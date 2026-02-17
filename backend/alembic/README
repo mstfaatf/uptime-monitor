@@ -1,0 +1,4 @@
+Generic single-database configuration for Alembic.
+Migrations are in versions/; run from project root (backend/) with:
+  alembic upgrade head
+  alembic revision --autogenerate -m "description"

@@ -74,7 +74,3 @@ async def logout(response: Response):
 async def me(current_user: User = Depends(get_current_user)):
     """Return current authenticated user."""
     return UserResponse(id=current_user.id, email=current_user.email)
-</think>
-Fixing the auth router: return user and set cookie via Response.
-<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
-StrReplace
