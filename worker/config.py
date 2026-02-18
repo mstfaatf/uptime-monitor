@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/uptime"
     CHECK_INTERVAL_SECONDS: int = 300
     HTTP_TIMEOUT_SECONDS: int = 10
+    # Set to "false" only for local/dev if SSL verification fails (insecure).
+    HTTP_VERIFY_SSL: bool = True
 
     @property
     def sync_database_url(self) -> str:

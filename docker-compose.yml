@@ -39,6 +39,13 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/uptime
       CHECK_INTERVAL_SECONDS: "300"
       HTTP_TIMEOUT_SECONDS: "10"
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      # Disable SSL verification for HTTP checks (dev only; insecure)
+      HTTP_VERIFY_SSL: "false"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     depends_on:
       db:
         condition: service_healthy

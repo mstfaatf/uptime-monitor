@@ -2,12 +2,12 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
 from database import get_db
-from models import Target, User
+from models import Check, Target, User
 
 router = APIRouter(prefix="/targets", tags=["targets"])
 
@@ -25,6 +25,59 @@ class TargetResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class TargetStatusResponse(BaseModel):
+    id: int
+    url: str
+    name: str | None
+    is_up: bool
+    checked_at: str | None
+    status_code: int | None
+    error: str | None
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/status", response_model=list[TargetStatusResponse])
+async def list_targets_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return each target owned by the user with its latest check result."""
+    latest = (
+        select(Check.target_id, func.max(Check.checked_at).label("max_at"))
+        .group_by(Check.target_id)
+        .subquery()
+    )
+    stmt = (
+        select(Target, Check)
+        .select_from(Target)
+        .outerjoin(latest, Target.id == latest.c.target_id)
+        .outerjoin(
+            Check,
+            and_(Check.target_id == Target.id, Check.checked_at == latest.c.max_at),
+        )
+        .where(Target.user_id == current_user.id)
+        .order_by(Target.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+    out = []
+    for target, check in rows:
+        out.append(
+            TargetStatusResponse(
+                id=target.id,
+                url=target.url,
+                name=target.name,
+                is_up=check.is_up if check else False,
+                checked_at=check.checked_at.isoformat() if check and check.checked_at else None,
+                status_code=check.status_code if check else None,
+                error=check.error if check else None,
+            )
+        )
+    return out
 
 
 @router.get("", response_model=list[TargetResponse])

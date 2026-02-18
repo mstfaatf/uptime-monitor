@@ -6,10 +6,14 @@ from datetime import datetime, timezone
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import urllib3
 
 from config import settings
 from checker import check_url
 from ssrf import is_url_blocked
+
+if not settings.HTTP_VERIFY_SSL:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)

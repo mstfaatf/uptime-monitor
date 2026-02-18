@@ -14,6 +14,7 @@ Background service that periodically checks all targets (HTTP HEAD/GET), measure
 | `DATABASE_URL` | PostgreSQL URL (same pattern as backend; sync driver used internally) | `postgresql+asyncpg://postgres:postgres@localhost:5432/uptime` |
 | `CHECK_INTERVAL_SECONDS` | Seconds between full check cycles | `300` (5 min) |
 | `HTTP_TIMEOUT_SECONDS` | Timeout per HTTP request | `10` |
+| `HTTP_VERIFY_SSL` | Verify TLS certificates for checked URLs (`true`/`false`) | `true`. Set to `false` only for local/dev if CA verification fails (insecure). |
 
 ## Run locally
 
