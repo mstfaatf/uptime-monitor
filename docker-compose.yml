@@ -1,4 +1,4 @@
-# Local development: PostgreSQL + API
+# Local development: PostgreSQL + API + Worker
 # Run from repo root: docker compose up --build
 
 services:
@@ -27,6 +27,18 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/uptime
       JWT_SECRET: change-me-in-production
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/uptime
+      CHECK_INTERVAL_SECONDS: "300"
+      HTTP_TIMEOUT_SECONDS: "10"
     depends_on:
       db:
         condition: service_healthy
