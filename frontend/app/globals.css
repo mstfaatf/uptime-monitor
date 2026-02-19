@@ -95,6 +95,30 @@ th {
   margin-right: 1rem;
 }
 
+.btn-danger {
+  background: #c00;
+  color: white;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.875rem;
+}
+
+.btn-danger:hover {
+  background: #a00;
+}
+
+.add-target-form {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background: #f9f9f9;
+  border-radius: 4px;
+  max-width: 32rem;
+}
+
+.add-target-form h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+}
+
 .error-message {
   color: #c00;
   margin-top: 0.5rem;
