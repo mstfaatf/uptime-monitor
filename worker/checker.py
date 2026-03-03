@@ -1,4 +1,4 @@
-"""Perform a single HTTP check: HEAD with GET fallback, measure latency, return result dict."""
+"""Perform a single HTTP check: HEAD first, retry once with GET if HEAD fails or status >= 400."""
 
 import time
 from datetime import datetime, timezone
@@ -8,19 +8,16 @@ import requests
 
 from config import settings
 
-def _verify() -> bool | str:
-    if not settings.HTTP_VERIFY_SSL:
-        return False
-    return certifi.where()
-
 
 def check_url(url: str) -> dict:
     """
-    Perform HTTP HEAD (fallback GET), measure latency.
+    Attempt HEAD first; if HEAD fails or returns >= 400, retry once with GET.
+    Record latency_ms and status_code from the successful attempt.
     Return dict: checked_at, status_code (int|None), latency_ms (int|None), is_up (bool), error (str|None).
     """
     checked_at = datetime.now(timezone.utc)
     timeout = settings.HTTP_TIMEOUT_SECONDS
+    verify = certifi.where()
     result = {
         "checked_at": checked_at,
         "status_code": None,
@@ -29,12 +26,11 @@ def check_url(url: str) -> dict:
         "error": None,
     }
     try:
-        # Prefer HEAD; fallback to GET on exception or 405 Method Not Allowed
         start = time.perf_counter()
-        verify = _verify()
+        resp = None
         try:
             resp = requests.head(url, timeout=timeout, allow_redirects=True, verify=verify)
-            if resp.status_code == 405:
+            if resp.status_code >= 400:
                 resp = requests.get(url, timeout=timeout, allow_redirects=True, verify=verify)
         except (requests.RequestException, OSError):
             resp = requests.get(url, timeout=timeout, allow_redirects=True, verify=verify)

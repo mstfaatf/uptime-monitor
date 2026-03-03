@@ -1,8 +1,10 @@
 """Target endpoints with strict ownership enforcement."""
 
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy import and_, func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
@@ -10,6 +12,26 @@ from database import get_db
 from models import Check, Target, User
 
 router = APIRouter(prefix="/targets", tags=["targets"])
+
+
+def normalize_url(url: str) -> str:
+    """Trim whitespace, require http/https, normalize trailing slash (remove)."""
+    url = url.strip()
+    parsed = urlparse(url)
+    if not parsed.scheme or parsed.scheme not in ("http", "https"):
+        raise ValueError("URL must use http or https")
+    path = (parsed.path or "/").rstrip("/") or ""
+    netloc = parsed.netloc or ""
+    if parsed.port and (parsed.scheme == "https" and parsed.port != 443 or parsed.scheme == "http" and parsed.port != 80):
+        netloc = f"{parsed.hostname}:{parsed.port}"
+    elif parsed.hostname:
+        netloc = parsed.hostname
+    normalized = f"{parsed.scheme}://{netloc}{path}" if path else f"{parsed.scheme}://{netloc}"
+    if parsed.query:
+        normalized += "?" + parsed.query
+    if parsed.fragment:
+        normalized += "#" + parsed.fragment
+    return normalized
 
 
 class TargetCreate(BaseModel):
@@ -27,17 +49,20 @@ class TargetResponse(BaseModel):
         from_attributes = True
 
 
+class LatestCheckResponse(BaseModel):
+    checked_at: str | None
+    is_up: bool
+    status_code: int | None
+    latency_ms: int | None
+    error: str | None
+
+
 class TargetStatusResponse(BaseModel):
     id: int
     url: str
     name: str | None
-    is_up: bool
-    checked_at: str | None
-    status_code: int | None
-    error: str | None
-
-    class Config:
-        from_attributes = True
+    created_at: str
+    latest_check: LatestCheckResponse | None
 
 
 @router.get("/status", response_model=list[TargetStatusResponse])
@@ -45,20 +70,19 @@ async def list_targets_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return each target owned by the user with its latest check result."""
-    latest = (
-        select(Check.target_id, func.max(Check.checked_at).label("max_at"))
-        .group_by(Check.target_id)
-        .subquery()
+    """Return each target owned by the user with its latest check (one per target, no duplicates)."""
+    latest_check_id = (
+        select(Check.id)
+        .where(Check.target_id == Target.id)
+        .order_by(Check.checked_at.desc())
+        .limit(1)
+        .correlate(Target)
+        .scalar_subquery()
     )
     stmt = (
         select(Target, Check)
         .select_from(Target)
-        .outerjoin(latest, Target.id == latest.c.target_id)
-        .outerjoin(
-            Check,
-            and_(Check.target_id == Target.id, Check.checked_at == latest.c.max_at),
-        )
+        .outerjoin(Check, Check.id == latest_check_id)
         .where(Target.user_id == current_user.id)
         .order_by(Target.created_at.desc())
     )
@@ -66,15 +90,22 @@ async def list_targets_status(
     rows = result.all()
     out = []
     for target, check in rows:
+        latest_check = None
+        if check:
+            latest_check = LatestCheckResponse(
+                checked_at=check.checked_at.isoformat() if check.checked_at else None,
+                is_up=check.is_up,
+                status_code=check.status_code,
+                latency_ms=check.latency_ms,
+                error=check.error,
+            )
         out.append(
             TargetStatusResponse(
                 id=target.id,
                 url=target.url,
                 name=target.name,
-                is_up=check.is_up if check else False,
-                checked_at=check.checked_at.isoformat() if check and check.checked_at else None,
-                status_code=check.status_code if check else None,
-                error=check.error if check else None,
+                created_at=target.created_at.isoformat(),
+                latest_check=latest_check,
             )
         )
     return out
@@ -102,11 +133,28 @@ async def create_target(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new target owned by the authenticated user."""
+    """Create a new target. URL is normalized; duplicate normalized URL per user returns 409."""
+    raw = str(body.url).strip()
+    try:
+        normalized = normalize_url(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    result = await db.execute(
+        select(Target).where(
+            Target.user_id == current_user.id,
+            Target.normalized_url == normalized,
+        )
+    )
+    if result.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A target with this URL already exists.",
+        )
     target = Target(
         user_id=current_user.id,
-        url=str(body.url),
-        name=body.name,
+        url=raw,
+        normalized_url=normalized,
+        name=(body.name.strip() or None) if body.name else None,
     )
     db.add(target)
     await db.flush()
@@ -120,7 +168,7 @@ async def delete_target(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a target only if it belongs to the authenticated user."""
+    """Delete a target only if it belongs to the authenticated user. Checks are removed (CASCADE)."""
     result = await db.execute(
         select(Target).where(Target.id == target_id, Target.user_id == current_user.id)
     )

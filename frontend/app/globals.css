@@ -65,6 +65,7 @@ button[type="submit"]:hover,
   font-weight: 500;
 }
 
+.status-pending,
 .status-unknown {
   color: #666;
 }

@@ -24,6 +24,7 @@ A full-stack web application where users can create accounts, log in, and manage
 - `k8s/` — Kubernetes manifests
 - `docker-compose.yml` — local development stack
 - `SPEC.md` — detailed technical specification
+- `TESTING.md` — commands to verify services, add target, checks, status, and delete
 
 ## Development
 This project is designed to run locally using Docker Compose. Kubernetes is used for learning and demonstration via a local cluster (kind or minikube).

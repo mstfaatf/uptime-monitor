@@ -5,24 +5,21 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiFetch, apiJson } from "@/lib/api";
 
-type TargetStatus = {
-  id: number;
-  url: string;
-  name?: string | null;
+type LatestCheck = {
+  checked_at: string | null;
   is_up: boolean;
-  checked_at?: string | null;
-  status_code?: number | null;
-  error?: string | null;
+  status_code: number | null;
+  latency_ms: number | null;
+  error: string | null;
 };
 
-type TargetOnly = {
+type TargetStatusRow = {
   id: number;
   url: string;
-  name?: string | null;
+  name: string | null;
   created_at: string;
+  latest_check: LatestCheck | null;
 };
-
-type TableRow = TargetStatus | (TargetOnly & { is_up?: null; checked_at?: null });
 
 function formatTimestamp(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -45,7 +42,7 @@ function isValidUrl(s: string): boolean {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const [items, setItems] = useState<TableRow[]>([]);
+  const [items, setItems] = useState<TargetStatusRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [authFailed, setAuthFailed] = useState(false);
@@ -67,7 +64,7 @@ export default function DashboardPage() {
         return;
       }
       if (statusRes.ok) {
-        const data = (await statusRes.json()) as TargetStatus[];
+        const data = (await statusRes.json()) as TargetStatusRow[];
         setItems(data);
         return;
       }
@@ -78,12 +75,11 @@ export default function DashboardPage() {
           return;
         }
         if (!targetsRes.ok) throw new Error("Failed to load targets");
-        const targets = (await targetsRes.json()) as TargetOnly[];
+        const targets = (await targetsRes.json()) as { id: number; url: string; name: string | null; created_at: string }[];
         setItems(
           targets.map((t) => ({
             ...t,
-            is_up: undefined,
-            checked_at: undefined,
+            latest_check: null,
           }))
         );
         return;
@@ -239,51 +235,60 @@ export default function DashboardPage() {
                   <th>URL</th>
                   <th>Status</th>
                   <th>Last checked</th>
+                  <th>Latency</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {items.map((row) => (
-                  <tr key={row.id}>
-                    <td>
-                      <a href={row.url} target="_blank" rel="noopener noreferrer">
-                        {row.name || row.url}
-                      </a>
-                      {row.name && (
-                        <span style={{ display: "block", fontSize: "0.875rem", color: "#666" }}>
-                          {row.url}
-                        </span>
-                      )}
-                    </td>
-                    <td>
-                      {"is_up" in row && row.is_up === true && (
-                        <span className="status-up">Up</span>
-                      )}
-                      {"is_up" in row && row.is_up === false && (
-                        <span className="status-down">Down</span>
-                      )}
-                      {!("is_up" in row) || row.is_up === undefined ? (
-                        <span className="status-unknown">—</span>
-                      ) : null}
-                    </td>
-                    <td>
-                      {formatTimestamp(
-                        "checked_at" in row ? row.checked_at : undefined
-                      )}
-                    </td>
-                    <td>
-                      <button
-                        type="button"
-                        className="btn btn-danger"
-                        onClick={() => handleDelete(row.id)}
-                        disabled={deletingId !== null}
-                        aria-label={`Delete ${row.name || row.url}`}
-                      >
-                        {deletingId === row.id ? "…" : "Delete"}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {items.map((row) => {
+                  const lc = row.latest_check;
+                  const status =
+                    !lc || lc.checked_at == null
+                      ? "pending"
+                      : lc.is_up
+                        ? "up"
+                        : "down";
+                  return (
+                    <tr key={row.id}>
+                      <td>
+                        <a href={row.url} target="_blank" rel="noopener noreferrer">
+                          {row.name || row.url}
+                        </a>
+                        {row.name && (
+                          <span style={{ display: "block", fontSize: "0.875rem", color: "#666" }}>
+                            {row.url}
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {status === "pending" && (
+                          <span className="status-pending">Pending</span>
+                        )}
+                        {status === "up" && (
+                          <span className="status-up">Up</span>
+                        )}
+                        {status === "down" && (
+                          <span className="status-down">Down</span>
+                        )}
+                      </td>
+                      <td>{formatTimestamp(lc?.checked_at ?? null)}</td>
+                      <td>
+                        {lc?.latency_ms != null ? `${lc.latency_ms} ms` : "—"}
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn-danger"
+                          onClick={() => handleDelete(row.id)}
+                          disabled={deletingId !== null}
+                          aria-label={`Delete ${row.name || row.url}`}
+                        >
+                          {deletingId === row.id ? "…" : "Delete"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -19,8 +19,11 @@ class Target(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    normalized_url: Mapped[str] = mapped_column(String(2048), nullable=False, index=True)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("user_id", "normalized_url", name="uq_targets_user_id_normalized_url"),)
 
     user: Mapped["User"] = relationship("User", back_populates="targets")
     checks: Mapped[list["Check"]] = relationship(

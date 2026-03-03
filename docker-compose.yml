@@ -41,8 +41,6 @@ services:
       HTTP_TIMEOUT_SECONDS: "10"
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
       REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
-      # Disable SSL verification for HTTP checks (dev only; insecure)
-      HTTP_VERIFY_SSL: "false"
     dns:
       - 8.8.8.8
       - 8.8.4.4
