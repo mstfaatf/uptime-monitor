@@ -1,6 +1,6 @@
 # Uptime Monitor — Worker
 
-Background service that periodically checks all targets (HTTP HEAD/GET), measures latency, and writes results to the `checks` table. SSRF protection blocks localhost and private IP ranges.
+Background service that periodically checks all targets concurrently (HTTP HEAD/GET via `httpx.AsyncClient`), measures latency, and writes results to the `checks` table. SSRF protection blocks localhost and private IP ranges.
 
 ## Requirements
 
@@ -15,7 +15,7 @@ consistency with the `api` service, but nothing here currently reads a value fro
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL URL (same pattern as backend; sync driver used internally) | `postgresql+asyncpg://postgres:postgres@localhost:5432/uptime` |
+| `DATABASE_URL` | PostgreSQL URL (same pattern as backend; connects via `asyncpg` directly, raw queries, no ORM) | `postgresql+asyncpg://postgres:postgres@localhost:5432/uptime` |
 | `CHECK_INTERVAL_SECONDS` | Seconds between full check cycles | `300` (5 min) |
 | `HTTP_TIMEOUT_SECONDS` | Timeout per HTTP request | `10` |
 | `HTTP_VERIFY_SSL` | Verify TLS certificates for checked URLs (`true`/`false`) | `true`. Set to `false` only for local/dev if CA verification fails (insecure). |
@@ -46,7 +46,7 @@ consistency with the `api` service, but nothing here currently reads a value fro
    python main.py
    ```
 
-   It will loop every `CHECK_INTERVAL_SECONDS`, fetch all targets, perform a HEAD (or GET fallback) per target, and insert one row per target into `checks`.
+   It will loop every `CHECK_INTERVAL_SECONDS`, fetch all targets, and check up to 15 of them concurrently at a time (a HEAD, or GET fallback, per target), inserting one row per target into `checks`.
 
 ## Run with Docker
 

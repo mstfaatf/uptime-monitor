@@ -367,5 +367,61 @@ were touched — this was read-only review plus a report delivered directly in t
   to a file — reread the conversation history if picking this up cold, or ask for the report
   to be regenerated.
 
+Phase 1, prompt 1.2 (async worker rewrite) is complete.
+- `worker/checker.py` and `worker/main.py` rewritten around a single `httpx.AsyncClient`,
+  created once in `main()` and reused for the process lifetime (not per-check) — `verify`
+  and `timeout` are set once from `settings` at construction instead of being threaded
+  through every call.
+- `psycopg2` replaced with `asyncpg` (raw queries, no ORM, matching the pattern the backend
+  already proves via SQLAlchemy's async engine, just without SQLAlchemy in the worker).
+  `worker/config.py`'s `sync_database_url` property renamed to `asyncpg_database_url` — the
+  name was about to be actively misleading (it strips the `+asyncpg` SQLAlchemy dialect
+  suffix so raw `asyncpg` can parse the DSN; nothing "sync" about it anymore).
+- Concurrency: `asyncio.gather` over all targets in a cycle, bounded by
+  `asyncio.Semaphore(CHECK_CONCURRENCY)` with **`CHECK_CONCURRENCY = 15`** — middle of the
+  10–20 range proposed in the 1.1 report: enough that a cycle over a few dozen targets
+  finishes in roughly one round-trip instead of N sequential ones, low enough that the
+  worker doesn't itself look like a burst against sites it doesn't control (or against its
+  own asyncpg pool). Each concurrent check acquires its own pooled DB connection
+  (`pool.acquire()`) rather than sharing one connection across tasks. Scheduling/backoff
+  logic in `run_cycle`/`main` is unchanged — still one flat `sleep(CHECK_INTERVAL_SECONDS)`
+  between cycles, per this prompt's scope (backoff+jitter is prompt 1.3, needs its own
+  `targets` migration).
+- SSRF/redirect logic preserved exactly per the 1.1 report: `_follow_with_ssrf_check` now
+  does `await client.request(method, url, follow_redirects=False)`, still manually resolving
+  each `Location` hop via `urljoin` and re-checking it with `is_url_blocked()` before
+  following, same `MAX_REDIRECTS=5` cap and same error-message format. `is_url_blocked()`
+  itself is untouched (still sync, still blocking `socket.getaddrinfo()`) — wrapped in
+  `asyncio.to_thread()` at both call sites (pre-check in `check_one`, per-redirect-hop in
+  `_follow_with_ssrf_check`) so one blocking DNS resolution can't stall every other in-flight
+  check under the same semaphore.
+- Incidental fix, directly caused by this rewrite (not scope creep): `HTTP_VERIFY_SSL` was
+  flagged back in the 0.7 wrap-up as dead code (`checker.py` hardcoded `certifi.where()`
+  instead of reading it). The new `httpx.AsyncClient(verify=settings.HTTP_VERIFY_SSL, ...)`
+  wires it up for real. `certifi` itself dropped from `worker/requirements.txt` — no longer
+  imported directly, and httpx already depends on it internally for its default CA bundle.
+- `worker/requirements.txt`: removed `psycopg2-binary`, `requests`, `certifi`; added
+  `asyncpg>=0.29.0`, `httpx>=0.27.0`.
+- Tests: `worker/tests/test_checker_redirects.py` rewritten for the async interface — mocks
+  `client.request` as an `AsyncMock` on a fixture client instead of patching
+  `checker.requests.request`; same three cases (blocked-hop-never-fetched, normal chain
+  followed, too-many-redirects) still pass. `worker/pytest.ini` gained
+  `asyncio_mode = auto`; `worker/requirements-dev.txt` gained `pytest-asyncio`.
+  `worker/tests/test_ssrf.py` untouched — `ssrf.py` itself didn't change.
+  `worker/README.md` updated in the few places it described the old sync/psycopg2 setup.
+- Verified against the real stack, not just unit tests: rebuilt the `worker` image
+  (`docker compose build worker`), ran it against the actual dev DB/targets
+  (`docker compose up -d db api worker`). Logs show genuinely concurrent, interleaved checks
+  across ~23 real targets in one cycle with zero exceptions; confirmed via direct DB query
+  that a real 301 redirect (`https://www.github.com` → `github.com/`) resolved correctly to
+  `status_code=200, is_up=true` under the new async redirect loop; smoke-tested
+  `asyncio.to_thread(is_url_blocked, ...)` directly inside the running container against a
+  blocked metadata-IP address to confirm the threading wrapper doesn't change its behavior
+  (no existing target in the dev DB is currently SSRF-blocked, since creation-time SSRF
+  already screens those out — the mocked redirect-to-blocked-IP unit test remains the
+  regression guard for that specific path).
+- Not touched in this prompt (explicitly out of scope, per the prompt): backoff/jitter,
+  scheduling cadence, `checks` schema, timing breakdown, cert expiry, SSE.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

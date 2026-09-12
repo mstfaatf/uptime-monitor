@@ -5,8 +5,10 @@ import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _sync_database_url(url: str) -> str:
-    """Convert postgresql+asyncpg to postgresql for sync driver (psycopg2)."""
+def _strip_asyncpg_dialect_suffix(url: str) -> str:
+    """Convert SQLAlchemy-style postgresql+asyncpg:// to plain postgresql:// — the worker
+    talks to the driver (asyncpg) directly via raw queries, not through SQLAlchemy, and
+    asyncpg's own DSN parser doesn't understand the "+asyncpg" dialect suffix."""
     if url.startswith("postgresql+asyncpg"):
         return url.replace("postgresql+asyncpg", "postgresql", 1)
     return url
@@ -22,8 +24,8 @@ class Settings(BaseSettings):
     HTTP_VERIFY_SSL: bool = True
 
     @property
-    def sync_database_url(self) -> str:
-        return _sync_database_url(self.DATABASE_URL)
+    def asyncpg_database_url(self) -> str:
+        return _strip_asyncpg_dialect_suffix(self.DATABASE_URL)
 
 
 settings = Settings()
