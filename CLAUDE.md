@@ -558,5 +558,71 @@ Phase 1, prompt 1.4 (DNS/TCP/TLS/TTFB timing breakdown + TLS cert expiry) is com
   dashboard itself is still Phase 2 work — these fields are exposed via the API now but not
   yet rendered anywhere.
 
+Phase 1, prompt 1.5 (SSE real-time dashboard updates) is complete. **This closes out Phase 1**
+— all five planned pieces (async rewrite, backoff scheduling, timing/cert capture, and now
+real-time push) are in place and verified.
+- New `GET /targets/stream` endpoint (`backend/routers/targets.py`), behind the same
+  `get_current_user` cookie-auth dependency as every other route. Returns a `StreamingResponse`
+  (`text/event-stream`) that yields `data: {...}\n\n` messages from a per-connection
+  `asyncio.Queue`, with a 15s keep-alive comment (`: keep-alive\n\n`) when there's nothing new,
+  and checks `request.is_disconnected()` each loop as a second, more active way to notice a
+  dead client beyond just letting the generator's `finally` run on cancellation.
+- New `backend/realtime.py`: an in-process pub/sub (`user_id -> set of asyncio.Queue`). The
+  worker (`worker/main.py`) now runs `SELECT pg_notify('checks_inserted', target_id)` **inside
+  the same transaction** as its `insert_check`/`reschedule_target` calls, so a notification
+  only ever fires for a check that actually got persisted (Postgres only delivers NOTIFY at
+  commit — a rolled-back transaction, e.g. the deleted-mid-check case from 1.3, sends nothing).
+  `NOTIFY_CHANNEL = "checks_inserted"` is duplicated by hand between the two services (same
+  "separately deployed, kept in sync manually" tradeoff as `worker/ssrf.py` vs
+  `backend/security/ssrf.py`).
+- **Ownership enforcement for push**: `realtime._handle_notification` resolves the notified
+  `target_id` to its owning `Target.user_id` via a real DB query and only publishes to that
+  user's queue(s) — a connected client's queue is registered under `current_user.id` (from the
+  cookie session) and can structurally never receive another user's event, since nothing ever
+  puts another user's payload on it. Verified live with two real concurrently-connected users:
+  user B's stream showed only a `: keep-alive`, never user A's target's data, while user A's
+  own stream correctly received it.
+- **Payload reuse**: extracted `build_target_status_payload()` (and a shared
+  `_latest_check_query()` builder) out of `list_targets_status` so both the polled
+  `GET /targets/status` and the SSE push build the identical shape from one place — confirmed
+  live that a pushed event carries the full `dns_ms`/`tcp_ms`/`tls_ms`/`ttfb_ms`/
+  `tls_cert_expires_at`/`tls_cert_issuer`/`tls_cert_days_remaining` set from 1.4, so the
+  frontend never needs a follow-up fetch to get the complete picture.
+- **Backend-side recovery, confirmed by actually killing the connection**: `realtime.run_listener()`
+  holds one long-lived asyncpg LISTEN connection in a loop that reconnects after a fixed 5s
+  delay if the connection is ever lost — started as a background task in `main.py`'s new
+  `lifespan`, cancelled cleanly at shutdown. Verified against the real stack: found the LISTEN
+  connection's backend PID via `pg_stat_activity`, ran `pg_terminate_backend()` on it directly,
+  confirmed a fresh LISTEN connection appeared within the reconnect window, and confirmed a
+  still-open client SSE stream kept receiving new check-update events afterward without any
+  restart on either side. Browser-side reconnect needs no code at all — `EventSource` retries
+  automatically on drop, per spec.
+- Frontend (`frontend/app/dashboard/page.tsx`, `frontend/lib/api.ts`): minimal, functional
+  wiring only, per this prompt's scope (full UI polish is Phase 2) — a new `useEffect` opens
+  `new EventSource(.../targets/stream, { withCredentials: true })` once the initial poll has
+  confirmed the user is authenticated, merges incoming `check_update` events into the existing
+  `items` list by id, and closes the connection on unmount. A small "● live / reconnecting…"
+  indicator was added next to the heading (driven by `onopen`/`onerror`) — the only new visible
+  UI, intentionally unstyled beyond that. `LatestCheck`'s TS type gained the 1.4 timing/cert
+  fields (not rendered anywhere yet, just carried through so the shape matches what's actually
+  sent). `API_BASE` exported from `lib/api.ts` so the dashboard can build the stream URL.
+- Tests: `backend/tests/test_realtime.py` (new) covers the pub/sub primitives directly
+  (publish reaches only the subscribed user, unsubscribe stops delivery and cleans up empty
+  entries, multiple connections for one user both receive an update) plus
+  `_handle_notification` against the real test DB (resolves the correct owner and full
+  payload, ignores a malformed payload, no-ops harmlessly for a since-deleted target).
+  `run_listener` itself isn't unit-tested (needs a live LISTEN connection) — covered by the
+  manual kill-and-recover verification above instead. 37 backend tests, 28 worker tests, all
+  passing. Frontend: `tsc --noEmit` clean and `npm run build` succeeds; no browser-automation
+  tool is available in this environment, so the actual dashboard UI wasn't clicked through —
+  verified the real HTTP/SSE contract instead (two concurrent curl-based SSE sessions against
+  the live stack, as described above), same caveat flagged as far back as the 0.7 wrap-up.
+
+**Phase 1 complete.** Per CLAUDE.md's phase plan, next is Phase 1.5 (multi-region: second
+worker instance, `REGION` tagging, `SELECT ... FOR UPDATE SKIP LOCKED` or region-scoped
+claiming so two worker instances can't double-check the same target) — flagged as still-open
+in every prompt since 1.2, since today's single-worker `get_due_targets()` has no claiming at
+all.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

@@ -1,15 +1,34 @@
 """FastAPI application entrypoint."""
 
+import asyncio
+import contextlib
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+import realtime
 from rate_limit import limiter
 from routers import auth, targets
 
-app = FastAPI(title="Uptime Monitor API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Run the Postgres LISTEN loop for the whole app lifetime, so realtime.py can push check
+    updates to connected SSE clients as soon as the worker commits them."""
+    listener_task = asyncio.create_task(realtime.run_listener())
+    try:
+        yield
+    finally:
+        listener_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await listener_task
+
+
+app = FastAPI(title="Uptime Monitor API", lifespan=lifespan)
 
 app.state.limiter = limiter
 

@@ -1,13 +1,17 @@
 """Target endpoints with strict ownership enforcement."""
 
+import asyncio
+import json
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import realtime
 from auth import get_current_user
 from database import get_db
 from models import Check, Target, User
@@ -15,6 +19,11 @@ from rate_limit import limiter
 from security.ssrf import is_url_blocked
 
 router = APIRouter(prefix="/targets", tags=["targets"])
+
+# How often the SSE stream sends a comment line if there's nothing new to report — keeps
+# intermediate proxies/load balancers from timing out an idle connection, and gives the
+# browser a steady heartbeat to notice a dead connection sooner than TCP's own timeouts would.
+SSE_KEEPALIVE_SECONDS = 15
 
 
 def normalize_url(url: str) -> str:
@@ -83,12 +92,41 @@ class TargetStatusResponse(BaseModel):
     latest_check: LatestCheckResponse | None
 
 
-@router.get("/status", response_model=list[TargetStatusResponse])
-async def list_targets_status(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Return each target owned by the user with its latest check (one per target, no duplicates)."""
+def build_target_status_payload(target: Target, check: Check | None) -> dict:
+    """Build the same {target + latest_check} shape used by GET /targets/status, for reuse by
+    the SSE push in realtime.py — one place decides what a "target status" looks like, so the
+    two delivery paths (poll and push) can never silently drift apart."""
+    latest_check = None
+    if check:
+        days_remaining = None
+        if check.tls_cert_expires_at is not None:
+            days_remaining = (check.tls_cert_expires_at - datetime.now(timezone.utc)).days
+        latest_check = {
+            "checked_at": check.checked_at.isoformat() if check.checked_at else None,
+            "is_up": check.is_up,
+            "status_code": check.status_code,
+            "latency_ms": check.latency_ms,
+            "error": check.error,
+            "dns_ms": check.dns_ms,
+            "tcp_ms": check.tcp_ms,
+            "tls_ms": check.tls_ms,
+            "ttfb_ms": check.ttfb_ms,
+            "tls_cert_expires_at": check.tls_cert_expires_at.isoformat() if check.tls_cert_expires_at else None,
+            "tls_cert_issuer": check.tls_cert_issuer,
+            "tls_cert_days_remaining": days_remaining,
+        }
+    return {
+        "id": target.id,
+        "url": target.url,
+        "name": target.name,
+        "created_at": target.created_at.isoformat(),
+        "latest_check": latest_check,
+    }
+
+
+def _latest_check_query(user_id: int | None = None, target_id: int | None = None):
+    """Shared query shape for "target(s) + their latest check": used by both the /status list
+    endpoint (filtered by user_id) and realtime's single-target lookup (filtered by target_id)."""
     latest_check_id = (
         select(Check.id)
         .where(Check.target_id == Target.id)
@@ -97,46 +135,61 @@ async def list_targets_status(
         .correlate(Target)
         .scalar_subquery()
     )
-    stmt = (
-        select(Target, Check)
-        .select_from(Target)
-        .outerjoin(Check, Check.id == latest_check_id)
-        .where(Target.user_id == current_user.id)
-        .order_by(Target.created_at.desc())
-    )
-    result = await db.execute(stmt)
+    stmt = select(Target, Check).select_from(Target).outerjoin(Check, Check.id == latest_check_id)
+    if user_id is not None:
+        stmt = stmt.where(Target.user_id == user_id).order_by(Target.created_at.desc())
+    if target_id is not None:
+        stmt = stmt.where(Target.id == target_id)
+    return stmt
+
+
+@router.get("/status", response_model=list[TargetStatusResponse])
+async def list_targets_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return each target owned by the user with its latest check (one per target, no duplicates)."""
+    result = await db.execute(_latest_check_query(user_id=current_user.id))
     rows = result.all()
-    out = []
-    for target, check in rows:
-        latest_check = None
-        if check:
-            days_remaining = None
-            if check.tls_cert_expires_at is not None:
-                days_remaining = (check.tls_cert_expires_at - datetime.now(timezone.utc)).days
-            latest_check = LatestCheckResponse(
-                checked_at=check.checked_at.isoformat() if check.checked_at else None,
-                is_up=check.is_up,
-                status_code=check.status_code,
-                latency_ms=check.latency_ms,
-                error=check.error,
-                dns_ms=check.dns_ms,
-                tcp_ms=check.tcp_ms,
-                tls_ms=check.tls_ms,
-                ttfb_ms=check.ttfb_ms,
-                tls_cert_expires_at=check.tls_cert_expires_at.isoformat() if check.tls_cert_expires_at else None,
-                tls_cert_issuer=check.tls_cert_issuer,
-                tls_cert_days_remaining=days_remaining,
-            )
-        out.append(
-            TargetStatusResponse(
-                id=target.id,
-                url=target.url,
-                name=target.name,
-                created_at=target.created_at.isoformat(),
-                latest_check=latest_check,
-            )
-        )
-    return out
+    return [TargetStatusResponse(**build_target_status_payload(target, check)) for target, check in rows]
+
+
+@router.get("/stream")
+async def stream_target_updates(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Server-Sent Events stream of check-result updates for the authenticated user's own
+    targets only. The worker NOTIFYs after each check commits; realtime.py resolves the
+    notified target_id to its owning user and forwards the event only to that user's queue(s)
+    here — this endpoint never sees, and can never accidentally forward, another user's data.
+    """
+    queue = realtime.subscribe(current_user.id)
+
+    async def event_generator():
+        try:
+            yield ": connected\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_SECONDS)
+                    yield f"data: {json.dumps(payload)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+        finally:
+            realtime.unsubscribe(current_user.id, queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable nginx-style proxy buffering of the stream
+        },
+    )
 
 
 @router.get("", response_model=list[TargetResponse])

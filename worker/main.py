@@ -37,6 +37,12 @@ CHECK_CONCURRENCY = 15
 # trivial at this scale (a single user's targets).
 SCHEDULER_TICK_SECONDS = 5
 
+# Postgres NOTIFY channel used to tell the backend a check just landed, for its SSE push to
+# connected dashboards (backend/realtime.py). Must match that module's NOTIFY_CHANNEL exactly
+# — the two services are deployed independently, so this is kept in sync by hand, the same
+# "deliberately duplicated, not shared" tradeoff as worker/ssrf.py vs backend/security/ssrf.py.
+NOTIFY_CHANNEL = "checks_inserted"
+
 
 async def get_due_targets(conn: asyncpg.Connection) -> list[dict]:
     """Return {id, url, consecutive_failures} for targets whose next_check_at has arrived."""
@@ -184,6 +190,11 @@ async def check_one(
                     tls_cert_issuer=result["tls_cert_issuer"],
                 )
                 await reschedule_target(conn, target_id, result["is_up"], consecutive_failures_before)
+                # NOTIFY inside the same transaction: Postgres only actually delivers a
+                # notification once its transaction commits, so if the insert/reschedule above
+                # gets rolled back (e.g. the FK-violation case caught below), no notification
+                # goes out for a check that was never really persisted.
+                await conn.execute("SELECT pg_notify($1, $2)", NOTIFY_CHANNEL, str(target_id))
         except Exception:
             # A target can be deleted by its owner between being selected for this cycle and
             # this check completing — most concretely, the INSERT above would then violate the

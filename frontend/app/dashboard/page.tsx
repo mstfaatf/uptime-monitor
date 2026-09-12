@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { apiFetch, apiJson } from "@/lib/api";
+import { API_BASE, apiFetch, apiJson } from "@/lib/api";
 
 type LatestCheck = {
   checked_at: string | null;
@@ -11,6 +11,16 @@ type LatestCheck = {
   status_code: number | null;
   latency_ms: number | null;
   error: string | null;
+  // Timing breakdown + TLS cert fields (not rendered yet — full waterfall/cert UI is a
+  // Phase 2 job — but included so the SSE payload and the polled /targets/status shape stay
+  // identical and no second fetch is ever needed to get the full picture).
+  dns_ms?: number | null;
+  tcp_ms?: number | null;
+  tls_ms?: number | null;
+  ttfb_ms?: number | null;
+  tls_cert_expires_at?: string | null;
+  tls_cert_issuer?: string | null;
+  tls_cert_days_remaining?: number | null;
 };
 
 type TargetStatusRow = {
@@ -54,6 +64,8 @@ export default function DashboardPage() {
 
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [deleteError, setDeleteError] = useState("");
+
+  const [live, setLive] = useState(false);
 
   const loadStatus = useCallback(async () => {
     setError("");
@@ -106,6 +118,36 @@ export default function DashboardPage() {
   useEffect(() => {
     if (authFailed) router.replace("/login");
   }, [authFailed, router]);
+
+  // Real-time push: once the initial poll has confirmed we're authenticated, open an SSE
+  // subscription for check-result updates on our own targets. The browser's EventSource
+  // auto-reconnects on its own after a drop (with backoff), so no manual retry loop is needed
+  // here; withCredentials is required since the API is on a different origin in dev and the
+  // session lives in an HttpOnly cookie, not anything JS can attach itself.
+  useEffect(() => {
+    if (loading || authFailed) return;
+
+    const es = new EventSource(`${API_BASE}/targets/stream`, { withCredentials: true });
+
+    es.onopen = () => setLive(true);
+    es.onerror = () => setLive(false);
+    es.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data) as { type: string; target: TargetStatusRow };
+        if (message.type !== "check_update") return;
+        setItems((prev) =>
+          prev.map((item) => (item.id === message.target.id ? message.target : item))
+        );
+      } catch {
+        // Ignore malformed/unrecognized messages rather than breaking the whole subscription.
+      }
+    };
+
+    return () => {
+      es.close();
+      setLive(false);
+    };
+  }, [loading, authFailed]);
 
   async function handleLogout() {
     try {
@@ -186,7 +228,19 @@ export default function DashboardPage() {
           Log out
         </button>
       </div>
-      <h1>Dashboard</h1>
+      <h1>
+        Dashboard{" "}
+        <span
+          title={live ? "Live updates connected" : "Live updates disconnected — retrying"}
+          style={{
+            fontSize: "0.6em",
+            color: live ? "#1a7f37" : "#999",
+            verticalAlign: "middle",
+          }}
+        >
+          ● {live ? "live" : "reconnecting…"}
+        </span>
+      </h1>
 
       <section className="add-target-form">
         <h2>Add target</h2>

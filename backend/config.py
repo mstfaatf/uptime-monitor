@@ -35,5 +35,14 @@ class Settings(BaseSettings):
             self.COOKIE_SECURE = True
         return self
 
+    @property
+    def asyncpg_database_url(self) -> str:
+        """Plain postgresql:// DSN for a raw asyncpg connection (used for LISTEN/NOTIFY in
+        realtime.py) — SQLAlchemy's async engine uses DATABASE_URL as-is (with the +asyncpg
+        dialect suffix it needs), but asyncpg.connect() doesn't understand that suffix."""
+        if self.DATABASE_URL.startswith("postgresql+asyncpg"):
+            return self.DATABASE_URL.replace("postgresql+asyncpg", "postgresql", 1)
+        return self.DATABASE_URL
+
 
 settings = Settings()
