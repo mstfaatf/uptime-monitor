@@ -9,6 +9,10 @@ Background service that periodically checks all targets (HTTP HEAD/GET), measure
 
 ## Environment variables
 
+None of these are required — all have safe defaults, unlike the backend's `JWT_SECRET`.
+In Docker Compose, the `worker` service also loads the repo-root `.env` (`env_file:`) for
+consistency with the `api` service, but nothing here currently reads a value from it.
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DATABASE_URL` | PostgreSQL URL (same pattern as backend; sync driver used internally) | `postgresql+asyncpg://postgres:postgres@localhost:5432/uptime` |

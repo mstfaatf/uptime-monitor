@@ -130,7 +130,39 @@ Phase 0, prompt 0.2 (fix #1: .gitignore + untrack .env) is complete.
   ~38-43) were identified and deliberately left untouched — that's fix #2, next.
 - Not touched in this prompt: `config.py`, SSRF logic, rate limiting, tests.
 
-Next: Phase 0 prompt 0.3 — remove insecure `JWT_SECRET`/`COOKIE_SECURE` defaults (fix #2),
-which will also touch the now-untouched `docker-compose.yml` secrets.
+Phase 0, prompt 0.3 (fix #2: remove insecure config defaults) is complete.
+- `backend/config.py`: `JWT_SECRET` now has no default — it's a required pydantic-settings
+  field, so `Settings()` raises `ValidationError` (app fails to start) if it's unset. No
+  hand-rolled check, just the library's normal required-field behavior. Verified in a
+  container: missing `JWT_SECRET` raises `pydantic_core.ValidationError` at import time.
+- Added `ENVIRONMENT` (`"development"` default / `"production"`). Chose approach (b): a
+  `model_validator(mode="after")` forces `COOKIE_SECURE = True` whenever
+  `ENVIRONMENT == "production"`, **overriding** any explicit `COOKIE_SECURE=false` rather than
+  just defaulting to it — rule 4 in this file says cookies must be secure in every deployed
+  environment, so treating it as a hard override (not a soft default) closes the "someone
+  forgot/fat-fingered the env var" failure mode. Verified: `ENVIRONMENT=production` →
+  `COOKIE_SECURE=True` in a container test. Local dev is unaffected (`ENVIRONMENT=development`
+  default → `COOKIE_SECURE=False` as before).
+- `docker-compose.yml`: `api`/`worker` services now use `env_file: .env` (repo-root `.env`)
+  instead of a hardcoded `JWT_SECRET`; `DATABASE_URL` stays hardcoded in `environment:` per
+  service since it must point at the `db` Docker-network hostname, not whatever's in `.env`.
+  `environment:` values override `env_file:` values in Compose, so this works as intended.
+- `.env.example` rewritten to list every var actually read by the code today (not the full
+  future CLAUDE.md list — `RESEND_API_KEY`/`REGION`/etc. aren't implemented yet), with
+  `JWT_SECRET` marked required and a one-liner to generate one.
+- Found and documented a pre-existing local-dev quirk (not new, just newly load-bearing now
+  that `JWT_SECRET` has no default): `backend/config.py`'s `env_file=".env"` resolves relative
+  to the process's cwd, and `backend/scripts/run.sh`/`run.ps1` `cd` into `backend/` before
+  running uvicorn — so local non-Docker runs need `backend/.env`, which is a **different file**
+  from the repo-root `.env` Docker Compose reads. Documented in `backend/README.md` rather than
+  changing `config.py`'s env-file resolution logic (out of scope for this prompt).
+  `worker/README.md` got a one-line note only — the worker has no required vars, so this
+  quirk doesn't block it.
+- Populated the local (gitignored, uncommitted) root `.env` with a generated dev `JWT_SECRET`
+  and `ENVIRONMENT=development` so the running stack keeps working; rebuilt `api`/`worker` and
+  confirmed `docker compose ps` shows both `Up` and `/health` returns `{"status":"ok"}`.
+- Not touched in this prompt: SSRF logic, rate limiting, tests.
+
+Next: Phase 0 prompt 0.4 — SSRF at creation + fix the redirect bypass (fix #3).
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

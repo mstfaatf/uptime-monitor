@@ -47,25 +47,31 @@ Alembic uses the same `DATABASE_URL` and converts it to a sync driver (`postgres
    ./scripts/install.sh
    ```
 
-3. **Environment variables** (create a `.env` in `backend/` or export):
+3. **Environment variables**: the app reads `.env` from the **current working directory** —
+   for local runs that's `backend/` (the run scripts `cd` there first), which is *not* the
+   same `.env` that `docker compose` reads (that one lives at the repo root). Copy the root
+   `.env.example` to `backend/.env` for local runs, or export the variables in your shell.
 
    | Variable | Description | Default |
    |----------|-------------|---------|
+   | `JWT_SECRET` | Secret for signing session cookies | **required — no default; the app fails to start without it** |
+   | `ENVIRONMENT` | `development` or `production` | `development`. `production` forces `COOKIE_SECURE=True` regardless of the setting below. |
    | `DATABASE_URL` | PostgreSQL URL (async: `postgresql+asyncpg://...`) | `postgresql+asyncpg://postgres:postgres@localhost:5432/uptime` |
-   | `JWT_SECRET` | Secret for signing session cookies | `change-me-in-production` |
    | `JWT_EXPIRE_MINUTES` | Session expiry in minutes | `10080` (7 days) |
    | `COOKIE_NAME` | Session cookie name | `session` |
    | `COOKIE_HTTP_ONLY` | HTTP-only cookie flag | `true` |
-   | `COOKIE_SECURE` | Secure (HTTPS only) | `false` |
+   | `COOKIE_SECURE` | Secure (HTTPS only) | `false` (see `ENVIRONMENT` above) |
    | `COOKIE_SAMESITE` | SameSite policy | `lax` |
    | `COOKIE_MAX_AGE` | Cookie max age in seconds | `604800` (7 days) |
 
-   Example `.env`:
+   Example `backend/.env`:
 
    ```
-   DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/uptime
    JWT_SECRET=your-secret-key
+   DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/uptime
    ```
+
+   Generate a `JWT_SECRET` with: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
 
 4. **Create the database** (if running Postgres locally):
 

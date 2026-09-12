@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: uptime
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - uptime_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -24,9 +24,12 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
+      # Overrides whatever DATABASE_URL is in .env — inside Compose the DB is reached via
+      # the `db` service hostname, not localhost.
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/uptime
-      JWT_SECRET: change-me-in-production
     depends_on:
       db:
         condition: service_healthy
@@ -35,6 +38,8 @@ services:
     build:
       context: ./worker
       dockerfile: Dockerfile
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/uptime
       CHECK_INTERVAL_SECONDS: "300"
