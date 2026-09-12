@@ -1,6 +1,6 @@
 """Auth endpoints: register, login, logout, me."""
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import get_current_user, hash_password, verify_password, create_session_cookie, clear_session_cookie
 from database import get_db
 from models import User
+from rate_limit import limiter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -31,7 +32,9 @@ class UserResponse(BaseModel):
 
 
 @router.post("/register", response_model=UserResponse)
+@limiter.limit("3/minute")
 async def register(
+    request: Request,
     body: RegisterBody,
     response: Response,
     db: AsyncSession = Depends(get_db),
@@ -49,7 +52,9 @@ async def register(
 
 
 @router.post("/login", response_model=UserResponse)
+@limiter.limit("5/minute")
 async def login(
+    request: Request,
     body: LoginBody,
     response: Response,
     db: AsyncSession = Depends(get_db),

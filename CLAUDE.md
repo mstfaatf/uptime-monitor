@@ -196,6 +196,45 @@ Phase 0, prompt 0.4 (fix #3: SSRF at creation + redirect bypass) is complete.
   works (`200`, `is_up=True`).
 - Not touched in this prompt: rate limiting, tests.
 
-Next: Phase 0 prompt 0.5 — rate limiting (fix #4).
+Phase 0, prompt 0.5 (fix #4: rate limiting) is complete.
+- Added `slowapi` to `backend/requirements.txt`. New `backend/rate_limit.py` holds a single
+  shared `Limiter(key_func=get_remote_address)` instance — kept out of `main.py` so the
+  routers can import it without a circular import.
+- `backend/main.py`: registered the limiter on `app.state`, added `SlowAPIMiddleware`, and a
+  custom `RateLimitExceeded` handler returning `429` with `{"detail": "Too many requests —
+  rate limit is <N per period>. Please try again shortly."}` — matches the existing
+  `HTTPException` error shape (`detail` key) the frontend already parses, instead of slowapi's
+  generic default body.
+- Limits applied (all keyed by client IP, all as `@limiter.limit(...)` under the route
+  decorator, each endpoint gained a `request: Request` param slowapi needs):
+  - `POST /auth/login` — `5/minute` (highest-value brute-force target).
+  - `POST /auth/register` — `3/minute` (bounds mass fake-account creation; a touch stricter
+    than login since legitimate users register once, not repeatedly).
+  - `POST /targets` — `10/minute` (bounds abuse of the SSRF-check/DB-write path while still
+    allowing a legitimate user to add several targets in one sitting).
+  Used the task's suggested numbers as-is — they matched my own judgment of the tradeoff
+  between blocking abuse and not annoying legitimate users.
+- Design choice worth flagging: `POST /targets` is keyed by **IP, not by authenticated user**,
+  even though the task phrased it as "per user/IP." slowapi's `key_func` only ever sees the
+  raw `Request`, before FastAPI dependencies like `get_current_user` run — keying by user would
+  mean re-decoding the session cookie a second time inside the key function, duplicating
+  `auth/cookies.py` logic for little real gain (an attacker hammering this endpoint from one
+  IP is caught either way). Documented in `rate_limit.py`; revisit if per-user keying turns
+  out to matter later (e.g. many users legitimately sharing one IP/NAT).
+- Flagging per the prompt: slowapi's default storage is **in-memory and per-process**. Fine
+  for the current single-instance deployment plan (Phase 3: one Railway API service). If the
+  backend is ever horizontally scaled to multiple instances (not currently planned), each
+  process enforces its own separate counters, so the *effective* limit multiplies by instance
+  count — would need a shared store (Redis, via slowapi's `storage_uri`) at that point. Not
+  implemented now — out of scope per the prompt.
+- Verified end-to-end against the running stack: 6 rapid `/auth/login` attempts → first 5
+  process normally (401 for bad creds), 6th → 429 with the clear message; 4 rapid
+  `/auth/register` calls → first 3 succeed, 4th → 429; 11 rapid `POST /targets` calls (one
+  authenticated user) → first 10 succeed (201), 11th → 429. Restarted the `api` container
+  between tests to reset slowapi's in-memory counters (expected/correct behavior for
+  single-instance in-memory storage, not a bug).
+- Not touched in this prompt: tests (fix #5, next, will assert these limits).
+
+Next: Phase 0 prompt 0.6 — pytest suite (fix #5), the last item in the Phase 0 checklist.
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

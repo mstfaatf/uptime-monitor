@@ -2,7 +2,7 @@
 
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import get_current_user
 from database import get_db
 from models import Check, Target, User
+from rate_limit import limiter
 from security.ssrf import is_url_blocked
 
 router = APIRouter(prefix="/targets", tags=["targets"])
@@ -129,7 +130,9 @@ async def list_targets(
 
 
 @router.post("", response_model=TargetResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 async def create_target(
+    request: Request,
     body: TargetCreate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
