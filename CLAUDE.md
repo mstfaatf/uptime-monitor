@@ -163,6 +163,39 @@ Phase 0, prompt 0.3 (fix #2: remove insecure config defaults) is complete.
   confirmed `docker compose ps` shows both `Up` and `/health` returns `{"status":"ok"}`.
 - Not touched in this prompt: SSRF logic, rate limiting, tests.
 
-Next: Phase 0 prompt 0.4 — SSRF at creation + fix the redirect bypass (fix #3).
+Phase 0, prompt 0.4 (fix #3: SSRF at creation + redirect bypass) is complete.
+- Added `backend/security/ssrf.py` (+ `backend/security/__init__.py`) — a **deliberate
+  duplicate** of `worker/ssrf.py`'s blocklist logic (loopback, RFC1918, link-local,
+  `localhost`), not a shared package. backend/ and worker/ are separately deployed with
+  independent Dockerfiles; a shared installable package for ~50 lines would add real
+  deployment complexity (versioning/publishing/syncing two services' dependency on it) for
+  little benefit. Do not "clean this up" into a shared import without revisiting that
+  tradeoff — kept in sync by hand, noted in both files' docstrings.
+- Wired into `POST /targets` (`backend/routers/targets.py`): after `normalize_url()`, before
+  the duplicate-check DB query, rejects with 400 and a clear message
+  (`"This URL cannot be monitored: <reason>"`) if the URL resolves to a blocked range.
+  `worker/ssrf.py`'s check-time validation is untouched — this adds creation-time on top, per
+  rule 2 (both are required).
+- Fixed the redirect bypass in `worker/checker.py`: `allow_redirects=True` (HEAD/GET) replaced
+  with a manual redirect loop (`_follow_with_ssrf_check`), capped at 5 hops, re-running
+  `is_url_blocked()` against each hop's resolved `Location` header before following it. A
+  blocked hop or exceeding the cap raises `RedirectValidationError`, caught in `check_url()`
+  and recorded the same way as an initial SSRF block (`is_up=False`, clear `error` reason,
+  same as `worker/main.py`'s existing pre-check). Normal method-per-hop redirects (HEAD→HEAD,
+  GET→GET) are preserved; not attempting full RFC-compliant 303-method-switching, which isn't
+  needed for a monitoring tool.
+- Unplanned but directly necessitated fix: `docker-compose.yml`'s `api` service never needed
+  outbound DNS before; the new creation-time check does, and this Windows/Docker-Desktop
+  setup's embedded DNS doesn't resolve external hostnames for it (same issue `worker` already
+  had `dns: [8.8.8.8, 8.8.4.4]` for). Mirrored that fix onto `api` — without it, creation-time
+  SSRF checks would 400 on every URL, including legitimate public ones.
+- Verified end-to-end against the running stack: public URL → 201; `localhost`, `10.0.0.5`,
+  `169.254.169.254` → 400 with clear reasons; a redirect to `169.254.169.254` (cloud metadata
+  IP) is caught by the worker and recorded as `is_up=False` with `"Redirect target blocked: ..."`
+  without the blocked address ever being requested; a normal public→public redirect still
+  works (`200`, `is_up=True`).
+- Not touched in this prompt: rate limiting, tests.
+
+Next: Phase 0 prompt 0.5 — rate limiting (fix #4).
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

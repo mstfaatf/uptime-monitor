@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import get_current_user
 from database import get_db
 from models import Check, Target, User
+from security.ssrf import is_url_blocked
 
 router = APIRouter(prefix="/targets", tags=["targets"])
 
@@ -139,6 +140,14 @@ async def create_target(
         normalized = normalize_url(raw)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    blocked, reason = is_url_blocked(normalized)
+    if blocked:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"This URL cannot be monitored: {reason}",
+        )
+
     result = await db.execute(
         select(Target).where(
             Target.user_id == current_user.id,

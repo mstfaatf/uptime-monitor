@@ -30,6 +30,12 @@ services:
       # Overrides whatever DATABASE_URL is in .env — inside Compose the DB is reached via
       # the `db` service hostname, not localhost.
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/uptime
+    dns:
+      # SSRF-at-creation (backend/security/ssrf.py) needs to resolve arbitrary public
+      # hostnames; the default embedded Docker DNS doesn't reliably do that on this setup
+      # (same issue worker already worked around below).
+      - 8.8.8.8
+      - 8.8.4.4
     depends_on:
       db:
         condition: service_healthy
