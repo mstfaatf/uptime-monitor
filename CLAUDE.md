@@ -117,13 +117,20 @@ Frontend: `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_WS_URL`
 
 ## Current status
 
-Phase 0, prompt 0.1 (codebase familiarization + report) is complete. No application code was
-changed. Findings reported to the user; next prompt should begin implementing Phase 0 fixes in
-this order: (1) .gitignore + untrack `.env`, (2) remove insecure `JWT_SECRET`/`COOKIE_SECURE`
-defaults, (3) SSRF-at-creation in the backend + fix a live SSRF-via-redirect bypass found in
-`worker/checker.py` (SSRF check only validates the original URL, not redirect targets followed
-with `allow_redirects=True`), (4) rate limiting (slowapi) on login/register/target-creation,
-(5) pytest suite covering all of the above plus existing ownership enforcement. Confirmed zero
-automated tests exist anywhere in the repo today.
+Phase 0, prompt 0.2 (fix #1: .gitignore + untrack .env) is complete.
+- Root `.gitignore` was empty (0 bytes, tracked since the initial commit) — corrects what
+  prompt 0.1's report assumed; that report's quoted content (`node_modules`, `.env*.local`,
+  etc.) was actually `frontend/.gitignore`, read under the wrong cwd. Root `.gitignore` now
+  ignores `.env`/`.env.*` (with `!.env.example` kept trackable), Python artifacts
+  (`__pycache__/`, `*.pyc`, `.venv/`, `*.egg-info/`), and Node artifacts (`node_modules/`,
+  `.next/`).
+- `.env` removed from git tracking (`git rm --cached`) but left in place locally; it is now
+  gitignored so it won't be re-added accidentally.
+- `docker-compose.yml`'s hardcoded `JWT_SECRET` (line ~29) and worker env values (lines
+  ~38-43) were identified and deliberately left untouched — that's fix #2, next.
+- Not touched in this prompt: `config.py`, SSRF logic, rate limiting, tests.
+
+Next: Phase 0 prompt 0.3 — remove insecure `JWT_SECRET`/`COOKIE_SECURE` defaults (fix #2),
+which will also touch the now-untouched `docker-compose.yml` secrets.
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

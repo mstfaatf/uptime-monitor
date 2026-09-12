@@ -1,0 +1,14 @@
+# Environment files (never commit real secrets)
+.env
+.env.*
+!.env.example
+
+# Python (backend/, worker/)
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Node (frontend/)
+node_modules/
+.next/
