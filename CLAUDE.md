@@ -423,5 +423,65 @@ Phase 1, prompt 1.2 (async worker rewrite) is complete.
 - Not touched in this prompt (explicitly out of scope, per the prompt): backoff/jitter,
   scheduling cadence, `checks` schema, timing breakdown, cert expiry, SSE.
 
+Phase 1, prompt 1.3 (per-target scheduling + backoff-with-jitter) is complete.
+- New Alembic migration `003_add_targets_scheduling_columns.py`: adds `next_check_at`
+  (`TIMESTAMPTZ NOT NULL DEFAULT now()`, indexed) and `consecutive_failures`
+  (`INTEGER NOT NULL DEFAULT 0`) to `targets`. Default `now()` means every existing target is
+  immediately due on the first cycle after migrating, same as the old check-everyone
+  behavior. `backend/models/target.py`'s `Target` model updated to match.
+- **Backoff curve** (`worker/backoff.py`, new module, unit-tested): exponential,
+  `base=30s * 2^(failures-1)`, capped at `900s` (15 min), each draw jittered by `±20%`
+  (symmetric jitter around the capped value, not "full jitter" — a single failing target
+  still retries roughly on schedule rather than occasionally retrying near-instantly, while
+  still avoiding multiple targets that started failing together getting stuck retrying in
+  perfect lockstep forever). Concretely: 1 failure → ~30s, 2 → ~60s, 3 → ~120s, 4 → ~240s,
+  5 → ~480s, 6+ → capped at ~900s. A successful check always resets
+  `consecutive_failures = 0` and returns to the normal `CHECK_INTERVAL_SECONDS` cadence.
+- `worker/main.py` rewritten around per-target due-scheduling: `get_due_targets()` now
+  selects `WHERE next_check_at <= now()` instead of every row. **New design decision beyond
+  the literal prompt wording**: decoupled the outer poll loop from
+  `CHECK_INTERVAL_SECONDS` — added `SCHEDULER_TICK_SECONDS = 5` as the outer loop's actual
+  sleep, since leaving the old 300s flat sleep in place would have quantized every backoff
+  retry to 5-minute boundaries regardless of the computed curve, defeating the point of a
+  30s-to-900s backoff range. `CHECK_INTERVAL_SECONDS` now means "normal per-target recheck
+  cadence on success" only; `SCHEDULER_TICK_SECONDS` means "how often we ask the DB who's
+  due." A 5s poll against an indexed `next_check_at` column is trivial at this project's
+  scale.
+- SSRF-blocked results are treated identically to a real check failure for scheduling
+  purposes (increment `consecutive_failures`, apply backoff) — otherwise a permanently
+  SSRF-blocked target would get re-resolved every single tick forever.
+- **Confirmed**: `is_up=False` is still written to `checks` unconditionally and first, inside
+  the same transaction as the scheduling update — backoff only changes `next_check_at`
+  metadata on `targets`, never whether or when the historical check row itself gets written.
+- **Mid-backoff deletion**: the only mutation the current API supports on an existing target
+  is delete (no edit/PATCH endpoint exists yet). A deleted target simply stops appearing in
+  `get_due_targets()`'s query — nothing to break there. The one real race is a target deleted
+  *while* a check for it is already in flight: the subsequent `INSERT INTO checks` then
+  violates the `checks.target_id` foreign key. `check_one()` now wraps its whole body in a
+  try/except that logs and swallows any such per-target error, specifically so one vanished
+  target can't propagate out of `asyncio.gather()` and cancel every other concurrently
+  in-flight check in the same cycle — verified directly by calling `check_one()` in the
+  running container against a nonexistent `target_id`: `ForeignKeyViolationError` raised
+  and caught exactly as designed, process kept running. (If an edit-URL endpoint is added in
+  a later phase, it should probably reset `next_check_at=now()`/`consecutive_failures=0` so
+  an edited target is checked promptly instead of waiting out a backoff computed against the
+  old URL — flagged for whoever builds that endpoint, not needed now since it doesn't exist.)
+- Verified against the real stack: rebuilt `api`+`worker` images, `docker compose up`,
+  confirmed migration `002→003` ran cleanly in the `api` container's startup log; watched a
+  genuinely failing target's `consecutive_failures`/`next_check_at` in the DB advance
+  `1→30s-ish→2→60s-ish` in real time across live polls, confirmed it was *not* re-picked-up
+  before its `next_check_at`; confirmed a healthy target's `next_check_at` sits ~300s out
+  with `consecutive_failures=0`. Also full test suites: 19 worker tests (8 new in
+  `test_backoff.py`) and 26 backend tests, all passing, including against the freshly
+  migrated schema.
+- Noted, not a bug: worker and api start concurrently in Compose, so the worker briefly
+  raced api's migration on this fresh `up` (`"column consecutive_failures does not exist"`
+  logged once as `Cycle failed`) — the existing outer-loop try/except caught it and the next
+  5s tick succeeded once the migration landed. Self-healing by design, left as is.
+- Not touched in this prompt (explicitly out of scope): timing breakdown, cert expiry, SSE.
+  Multi-instance locking (`SELECT ... FOR UPDATE SKIP LOCKED`) is still Phase 1.5's job — a
+  second worker instance today would double-check whatever's due, since nothing yet claims a
+  row before working it.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
