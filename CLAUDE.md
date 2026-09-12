@@ -624,5 +624,51 @@ claiming so two worker instances can't double-check the same target) — flagged
 in every prompt since 1.2, since today's single-worker `get_due_targets()` has no claiming at
 all.
 
+Phase 1, prompt 1.6 (wrap-up verification) is complete. **Phase 1 is genuinely, verifiably
+done** — every piece (async rewrite, backoff scheduling, timing breakdown, cert expiry, SSE)
+was re-proven this prompt against real network traffic and a real database, not just mocks,
+before moving to Phase 1.5.
+- Ran both suites fresh: 70 tests total (37 backend + 33 worker), all passing. Added
+  `worker/tests/test_scheduling.py` (5 new tests, mocked-connection/hermetic, consistent with
+  the rest of `worker/tests/`) — closed a real gap: nothing previously asserted that
+  `insert_check`'s SQL column list and positional-argument list stay in matching order, and
+  `get_due_targets`'/`reschedule_target`'s success/failure SQL branches had no direct coverage
+  at all (only `backoff.py`'s curve math was unit-tested).
+- Concurrency cap: mechanically proven via a throwaway script (60 fake tasks through a real
+  `asyncio.Semaphore(CHECK_CONCURRENCY)`) that peak concurrency saturates at exactly 15, never
+  above; then confirmed in practice with ~10 real targets created in one burst, all completing
+  within a ~0.6s window with visibly interleaved logs.
+- Backoff/reset: verified against real, organically-failing targets rather than synthetic
+  ones — Wikipedia/npmjs (403, bot-blocked) and Reuters (401) climbed
+  `consecutive_failures`/`next_check_at` exactly along the 30s→60s curve in real time; a
+  target left failing since an earlier prompt sits correctly capped at ~900s after 7
+  failures; healthy targets reset to `consecutive_failures=0` and ~300s cadence on success.
+- Redirect/SSRF: re-confirmed `169.254.169.254` still 400s at creation, and a real
+  `http://github.com` → 301 → `https://github.com` chain resolved with the final hop's real
+  cert/timing (not the plain-HTTP first hop's absence of them).
+- Timing/cert: every real check showed populated `dns_ms`/`tcp_ms`/`tls_ms`/`ttfb_ms` (TLS
+  fields correctly null only for a plain-HTTP hop); real certs from four different real CAs
+  captured correctly across the batch.
+- SSE: live push confirmed end-to-end with two real, concurrently-connected authenticated
+  users — user B's stream showed only keep-alives while user A's updates (including a
+  post-backoff retry) landed exclusively on user A's own stream. Payload carried the full
+  timing/cert set on every push.
+- Phase 0 regressions: none found. Login (5-then-429) and target-creation (10-then-429) rate
+  limits both fired correctly (the latter hit organically mid-burst-test); cross-user delete
+  still 404s, non-owner's list stays empty, anonymous access still 401s on `/targets` *and*
+  the new `/targets/stream`; `JWT_SECRET` fail-fast re-verified by actually stripping it from
+  `.env` and watching the container crash with the same `ValidationError` as in the 0.7
+  wrap-up, then recovering cleanly once restored.
+- All verification artifacts (test targets, temporary SSE connections, throwaway scripts)
+  cleaned up afterward; containers left healthy and stable.
+- No outstanding issues to revisit before Phase 1.5. The one thing Phase 1.5 must address
+  head-on — already flagged in every prompt since 1.2 — is that `get_due_targets` has no
+  row-claiming: a second worker instance today would double-check whatever's due.
+
+**Next: Phase 1.5 — multi-region.** Second worker instance, `REGION` env var tagging, and a
+coordination mechanism (`SELECT ... FOR UPDATE SKIP LOCKED` or region-scoped claiming — decide
+and document as an ADR per CLAUDE.md rule 5) so two worker instances can't double-check the
+same target or race on writes.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
