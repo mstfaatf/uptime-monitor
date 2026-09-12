@@ -333,5 +333,39 @@ not just re-read from prior test output:
 TLS/TTFB breakdown, backoff+jitter, cert expiry capture, WebSocket/SSE push). This changes the
 `checks` schema, so plan the Alembic migration and the new columns before touching the worker's
 check loop.
+
+Phase 1, prompt 1.1 (familiarization + report) is complete. No application code or new files
+were touched — this was read-only review plus a report delivered directly in the conversation
+(not saved to a file, per the prompt).
+- Confirmed current worker state: fully synchronous (`requests` + `psycopg2`), sequential
+  `while True` loop over all targets on one flat `CHECK_INTERVAL_SECONDS` cadence, no
+  concurrency, no retry/backoff/jitter beyond the single same-attempt HEAD→GET fallback in
+  `checker.py`. SSRF redirect-revalidation loop (`_follow_with_ssrf_check`, Phase 0) is the
+  one piece of existing logic that must survive the rewrite unchanged.
+- Confirmed current frontend state: **not polling** — `dashboard/page.tsx` fetches
+  `/targets/status` exactly once on mount, no interval, no refresh button. Only refetches
+  after add/delete actions. This is more primitive than assumed going in; Phase 1's
+  WebSocket/SSE work is replacing "no live-ness," not replacing an existing poll.
+- Proposed and reviewed (not yet implemented): httpx.AsyncClient (one shared instance,
+  semaphore-bounded concurrency) + asyncpg for the worker; `asyncio.to_thread()` around
+  `is_url_blocked()`'s blocking `socket.getaddrinfo()` so concurrent async checks don't stall
+  the event loop; httpx/httpcore `extensions={"trace": ...}` for TCP/TLS/TTFB phase timing,
+  with DNS timing piggybacked on the SSRF resolution call already happening; TLS cert
+  (expiry + issuer) read off the same handshake via
+  `response.extensions["network_stream"].get_extra_info("ssl_object")` — no second
+  connection; new nullable `checks` columns (`dns_ms`, `tcp_ms`, `tls_ms`, `ttfb_ms`,
+  `tls_cert_expires_at`, `tls_cert_issuer`) rather than a new table; explicitly deferred
+  alert-cooldown state (Phase 2.5's concern, not this migration's) to avoid designing that
+  table blind. Recommended SSE over WebSocket (unidirectional data flow, reuses existing
+  cookie auth, browser auto-reconnect) via Postgres LISTEN/NOTIFY filtered server-side by
+  `user_id` so ownership rules carry over to the push path.
+- Recommended build order: (1) async rewrite, (2) backoff+jitter scheduling (needs a
+  `targets` migration for `consecutive_failures`/`next_check_at`), (3) timing breakdown +
+  cert expiry together (shared `checks` migration, must land before Phase 2 UI), (4)
+  WebSocket/SSE push last, once the pushed payload shape is final.
+- Full report with reasoning for each decision was delivered in the conversation, not written
+  to a file — reread the conversation history if picking this up cold, or ask for the report
+  to be regenerated.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
