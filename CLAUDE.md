@@ -299,8 +299,38 @@ tests) are in place and verified.
   run against the already-migrated test database.
 - Documented in `backend/README.md` and `worker/README.md` under new "Tests" sections.
 
-Phase 0 complete. Next: Phase 1 — worker rewrite + networking depth (async httpx, DNS/TCP/TLS/
-TTFB breakdown, backoff+jitter, cert expiry capture, WebSocket/SSE push). This changes the
+Phase 0, prompt 0.7 (wrap-up verification) is complete. **Phase 0 is genuinely, verifiably
+done** — every checklist item was re-proven against real running containers in this prompt,
+not just re-read from prior test output:
+- Rebuilt `api`/`worker` images from the committed state and ran the full suites fresh: 37
+  tests (26 backend + 11 worker), all passing.
+- Did a real `docker compose down`/`up` cycle. Proved the JWT_SECRET fail-fast against an
+  *actual container boot* (temporarily stripped it from `.env`, `docker compose up api`
+  crashed with the same `ValidationError` the unit test checks, then restored `.env`) — not
+  just trusting the pytest coverage.
+- End-to-end flow verified live: register → login → CORS preflight/credentialed cookie
+  (`Origin: http://localhost:3000`, `HttpOnly`/`SameSite=lax`) → create target → ran the
+  worker's actual `check_url`/`insert_check` against it → `/targets/status` shows the result
+  exactly as the dashboard renders it. **Caveat**: no browser-automation tool is available in
+  this environment, so this verified the exact HTTP contract the frontend uses rather than
+  clicking through the actual UI — flagged explicitly, not silently assumed equivalent.
+- Manually re-verified (not just re-running old tests): SSRF blocks `127.0.0.1`/`10.5.5.5` at
+  creation (400); login rate limit is exactly 5-then-429 with a clean per-process counter;
+  two independently-registered users confirmed cross-isolated (`GET /targets`,
+  `GET /targets/status`, and `DELETE` on the other's target ID all correctly denied/empty).
+- Repo-wide re-audit for anything missed across 0.1–0.6: no tracked secrets, no stray `.env`
+  files, no leftover `change-me-in-production`, `.env.example` has only placeholders.
+  `docker-compose.yml`'s `POSTGRES_PASSWORD: postgres` reviewed and confirmed fine (local-dev
+  only, matches the Postgres image's own default; production uses Neon with its own
+  credentials).
+- Three **pre-existing, out-of-scope** items from the original 0.1 report remain open (not
+  Phase 0 checklist items, don't block moving on): `worker/config.py`'s `HTTP_VERIFY_SSL` is
+  still dead code (`checker.py` hardcodes `certifi.where()`), `backend/auth/password.py` has
+  a harmless redundant bcrypt-fallback branch, and `SPEC.md` still documents an unimplemented
+  `GET /targets/{id}/checks?limit=20` endpoint. Worth a cleanup pass sometime, not urgent.
+
+**Phase 0 complete.** Next: Phase 1 — worker rewrite + networking depth (async httpx, DNS/TCP/
+TLS/TTFB breakdown, backoff+jitter, cert expiry capture, WebSocket/SSE push). This changes the
 `checks` schema, so plan the Alembic migration and the new columns before touching the worker's
 check loop.
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
