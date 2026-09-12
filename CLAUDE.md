@@ -483,5 +483,80 @@ Phase 1, prompt 1.3 (per-target scheduling + backoff-with-jitter) is complete.
   second worker instance today would double-check whatever's due, since nothing yet claims a
   row before working it.
 
+Phase 1, prompt 1.4 (DNS/TCP/TLS/TTFB timing breakdown + TLS cert expiry) is complete.
+- New Alembic migration `004_add_checks_timing_and_cert_columns.py`: adds nullable `dns_ms`,
+  `tcp_ms`, `tls_ms`, `ttfb_ms` (Integer), `tls_cert_expires_at` (`TIMESTAMPTZ`), and
+  `tls_cert_issuer` (Text) to `checks`. `backend/models/check.py` updated to match.
+  `tls_cert_days_remaining` is deliberately **not** a column — derived at read time in
+  `backend/routers/targets.py` (`tls_cert_expires_at - now()`), per the 1.1 report's plan, so
+  it can't go stale between checks.
+- **Validated the risky assumption from the 1.1 report hands-on before writing any code**:
+  spun up throwaway probe scripts inside the running `worker` container (httpx 0.28.1 /
+  httpcore 1.0.9) to confirm httpx's `extensions={"trace": ...}` hook actually fires the named
+  httpcore phase boundaries (`connection.connect_tcp.*`, `connection.start_tls.*`,
+  `http11.send_request_*`, `http11.receive_response_headers.*`) rather than trusting memory of
+  an obscure internal API. It does, exactly as hoped — deleted the probe scripts once
+  confirmed.
+- **New finding, not anticipated in the 1.1 report**: the worker's single long-lived
+  `httpx.AsyncClient` (from prompt 1.2) pools/reuses keep-alive connections by default —
+  meaning a check that happened to land on a still-warm connection (e.g. rechecking the same
+  URL before the server's keep-alive expired) would silently skip the
+  `connect_tcp`/`start_tls` trace events entirely, leaving `tcp_ms`/`tls_ms` null on an
+  otherwise-successful check. Fixed by constructing the shared client with
+  `httpx.Limits(max_keepalive_connections=0)` — every request now opens a fresh connection,
+  which is the actually-correct behavior for a monitoring tool measuring real
+  connection-establishment cost on every check, not an artifact of whatever the pool had lying
+  around. Verified in-container: two consecutive requests to the same host both independently
+  fired `connect_tcp`/`start_tls`.
+- `worker/checker.py`: `dns_ms` piggybacks on the existing `asyncio.to_thread(is_url_blocked,
+  ...)` call (timed, no second lookup) — the up-front check in `check_one` for the original
+  URL, or the per-hop check inside `_follow_with_ssrf_check` for a redirect target, whichever
+  one validated the URL that was *actually* connected to. `tcp_ms`/`tls_ms` come from the
+  trace-event timestamp deltas; `ttfb_ms` is `receive_response_headers.complete` minus
+  `send_request_body.complete` (falling back to `send_request_headers.complete` if no body
+  event fired) — verified against real trace output that the actual network wait happens
+  inside `receive_response_headers`, not in the gap before it, so this is the accurate
+  boundary, not just a convenient approximation.
+- **Correct-hop guarantee**: `_follow_with_ssrf_check` now returns a `_HopResult` built only
+  from the trace events/response of the request that produced the final (non-redirect)
+  response — each redirect hop gets its own fresh trace-collection dict, and an intermediate
+  hop's timing/cert data is simply discarded when the loop continues past it. Verified live
+  against real traffic: `http://github.com/` → 301 → `https://github.com/` correctly reports
+  a real `tls_ms` and a Sectigo cert for github.com (the final hop), not null/absent data from
+  the plain-HTTP first hop.
+- TLS cert capture (`_extract_cert` in `checker.py`): `https://` only (checked via URL scheme
+  before touching anything), reads
+  `response.extensions["network_stream"].get_extra_info("ssl_object").getpeercert()` off the
+  connection already open for that response — no second connection. `notAfter` parsed via
+  stdlib `ssl.cert_time_to_seconds()`; issuer formatted as a flat `k=v, k=v` string from the
+  RDN-tuple structure `getpeercert()` returns. Wrapped in a broad try/except that fails safe to
+  `(None, None)` — this is enrichment, not the check itself, so a malformed/missing cert
+  should never fail the whole check.
+- `worker/main.py`: `check_one` times the pre-check `is_url_blocked` call for `dns_ms`, passes
+  it into `check_url(client, url, dns_ms)`, and threads all six new fields through
+  `insert_check`. Verified against the real stack (new targets created via the live API to
+  force an immediate check rather than waiting out the normal cadence): a real `https://`
+  target showed real `dns_ms`/`tcp_ms`/`tls_ms`/`ttfb_ms` plus a real Let's Encrypt cert and
+  correct `tls_cert_days_remaining`; a plain `http://` target that actually completed (404, not
+  a connection failure) showed a real `tcp_ms` with `tls_ms`/cert fields correctly null.
+- `backend/routers/targets.py`'s `LatestCheckResponse` (returned by `GET /targets/status`, the
+  only endpoint the frontend currently reads check data from) now carries all six new fields
+  plus the derived `tls_cert_days_remaining`. Negative days-remaining (already expired) is
+  exposed as-is, not clamped — Phase 2.5's alerting decides its own threshold later.
+- Explicitly did **not** add any alert-cooldown/"last alert sent" state in this prompt, per
+  the 1.1 report's plan — that's its own table in Phase 2.5, not columns bolted onto `checks`
+  now.
+- Tests: `worker/tests/test_timing.py` (new) unit-tests `_extract_timings`/`_extract_cert`
+  against synthetic trace-event dicts and fake ssl objects, including fail-safe behavior for
+  missing/malformed cert data. `worker/tests/test_checker_redirects.py` updated for the new
+  `check_url(client, url, dns_ms)` signature and a `resp.extensions = {}` fixture (matching a
+  real httpx.Response's shape instead of relying on MagicMock's auto-mock chaining).
+  `backend/tests/test_check_timing.py` (new) covers `GET /targets/status`'s exposure of the
+  new fields and the derived days-remaining, including the expired-cert (negative) case.
+  28 worker tests and 30 backend tests, all passing.
+- Not touched in this prompt (explicitly out of scope): SSE/real-time updates. The frontend
+  dashboard itself is still Phase 2 work — these fields are exposed via the API now but not
+  yet rendered anywhere.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

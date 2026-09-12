@@ -1,5 +1,6 @@
 """Target endpoints with strict ownership enforcement."""
 
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -57,6 +58,21 @@ class LatestCheckResponse(BaseModel):
     status_code: int | None
     latency_ms: int | None
     error: str | None
+    # DNS/TCP/TLS/TTFB timing breakdown for this check. Any phase the check didn't reach
+    # (e.g. no TLS on a plain http:// target, or a connect failure before DNS even resolved)
+    # is null rather than 0 — don't render a null phase as "0ms."
+    dns_ms: int | None
+    tcp_ms: int | None
+    tls_ms: int | None
+    ttfb_ms: int | None
+    # TLS cert info, https:// targets only (null otherwise). tls_cert_days_remaining is
+    # derived here at read time from tls_cert_expires_at, not stored — see
+    # backend/alembic/versions/004_add_checks_timing_and_cert_columns.py. Negative means
+    # already expired; this is intentionally exposed as-is (Phase 2.5's alerting will decide
+    # its own threshold), not clamped to zero.
+    tls_cert_expires_at: str | None
+    tls_cert_issuer: str | None
+    tls_cert_days_remaining: int | None
 
 
 class TargetStatusResponse(BaseModel):
@@ -94,12 +110,22 @@ async def list_targets_status(
     for target, check in rows:
         latest_check = None
         if check:
+            days_remaining = None
+            if check.tls_cert_expires_at is not None:
+                days_remaining = (check.tls_cert_expires_at - datetime.now(timezone.utc)).days
             latest_check = LatestCheckResponse(
                 checked_at=check.checked_at.isoformat() if check.checked_at else None,
                 is_up=check.is_up,
                 status_code=check.status_code,
                 latency_ms=check.latency_ms,
                 error=check.error,
+                dns_ms=check.dns_ms,
+                tcp_ms=check.tcp_ms,
+                tls_ms=check.tls_ms,
+                ttfb_ms=check.ttfb_ms,
+                tls_cert_expires_at=check.tls_cert_expires_at.isoformat() if check.tls_cert_expires_at else None,
+                tls_cert_issuer=check.tls_cert_issuer,
+                tls_cert_days_remaining=days_remaining,
             )
         out.append(
             TargetStatusResponse(

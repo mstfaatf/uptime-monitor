@@ -23,6 +23,18 @@ class Check(Base):
     is_up: Mapped[bool] = mapped_column(Boolean, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # DNS/TCP/TLS/TTFB timing breakdown (see backend/alembic/versions/004_*). All nullable:
+    # a check that failed before reaching a given phase has no timing for it.
+    dns_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tcp_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tls_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ttfb_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # TLS certificate info, https:// targets only. days-remaining is intentionally NOT
+    # stored — derive it at read time (expires_at - now()) so it can't go stale.
+    tls_cert_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tls_cert_issuer: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     target: Mapped["Target"] = relationship("Target", back_populates="checks")
 
     __table_args__ = (

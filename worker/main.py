@@ -8,6 +8,7 @@ persistently-down target isn't retried on the same tight schedule as a healthy o
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -53,13 +54,22 @@ async def insert_check(
     latency_ms: int | None,
     is_up: bool,
     error: str | None,
+    dns_ms: int | None,
+    tcp_ms: int | None,
+    tls_ms: int | None,
+    ttfb_ms: int | None,
+    tls_cert_expires_at: datetime | None,
+    tls_cert_issuer: str | None,
 ) -> None:
     """Insert one row into checks — the honest historical record of this attempt, written
     unconditionally regardless of how the target gets rescheduled afterwards."""
     await conn.execute(
         """
-        INSERT INTO checks (target_id, checked_at, status_code, latency_ms, is_up, error)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO checks (
+            target_id, checked_at, status_code, latency_ms, is_up, error,
+            dns_ms, tcp_ms, tls_ms, ttfb_ms, tls_cert_expires_at, tls_cert_issuer
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         """,
         target_id,
         checked_at,
@@ -67,6 +77,12 @@ async def insert_check(
         latency_ms,
         is_up,
         error or None,
+        dns_ms,
+        tcp_ms,
+        tls_ms,
+        ttfb_ms,
+        tls_cert_expires_at,
+        tls_cert_issuer,
     )
 
 
@@ -113,7 +129,11 @@ async def check_one(
         try:
             # is_url_blocked() does a blocking socket.getaddrinfo() call — run it off the event
             # loop so it doesn't stall every other in-flight check under this same semaphore.
+            # Timed so its cost is reported as dns_ms rather than performing a second,
+            # redundant DNS lookup just for timing purposes.
+            dns_start = time.perf_counter()
             blocked, reason = await asyncio.to_thread(is_url_blocked, url)
+            dns_ms = int((time.perf_counter() - dns_start) * 1000)
             if blocked:
                 result = {
                     "checked_at": datetime.now(timezone.utc),
@@ -121,15 +141,25 @@ async def check_one(
                     "latency_ms": None,
                     "is_up": False,
                     "error": reason,
+                    "dns_ms": dns_ms,
+                    "tcp_ms": None,
+                    "tls_ms": None,
+                    "ttfb_ms": None,
+                    "tls_cert_expires_at": None,
+                    "tls_cert_issuer": None,
                 }
                 logger.info("Target %s blocked (SSRF): %s", target_id, reason)
             else:
-                result = await check_url(client, url)
+                result = await check_url(client, url, dns_ms)
                 logger.info(
-                    "Target %s: %s %s ms is_up=%s %s",
+                    "Target %s: %s %s ms (dns=%s tcp=%s tls=%s ttfb=%s) is_up=%s %s",
                     target_id,
                     result["status_code"],
                     result["latency_ms"],
+                    result["dns_ms"],
+                    result["tcp_ms"],
+                    result["tls_ms"],
+                    result["ttfb_ms"],
                     result["is_up"],
                     result["error"] or "",
                 )
@@ -146,6 +176,12 @@ async def check_one(
                     latency_ms=result["latency_ms"],
                     is_up=result["is_up"],
                     error=result["error"],
+                    dns_ms=result["dns_ms"],
+                    tcp_ms=result["tcp_ms"],
+                    tls_ms=result["tls_ms"],
+                    ttfb_ms=result["ttfb_ms"],
+                    tls_cert_expires_at=result["tls_cert_expires_at"],
+                    tls_cert_issuer=result["tls_cert_issuer"],
                 )
                 await reschedule_target(conn, target_id, result["is_up"], consecutive_failures_before)
         except Exception:
@@ -188,8 +224,16 @@ async def main() -> None:
     )
     pool = await asyncpg.create_pool(settings.asyncpg_database_url)
     try:
+        # max_keepalive_connections=0: force a brand-new TCP+TLS connection for every single
+        # request instead of reusing a pooled one. A reused connection would skip the
+        # connect_tcp/start_tls trace events entirely, silently leaving tcp_ms/tls_ms null on
+        # any check that happens to land on a still-warm connection — unacceptable for a
+        # timing breakdown that's supposed to measure real connection-establishment cost on
+        # every check, not whatever the pool happened to have lying around.
         async with httpx.AsyncClient(
-            timeout=settings.HTTP_TIMEOUT_SECONDS, verify=settings.HTTP_VERIFY_SSL
+            timeout=settings.HTTP_TIMEOUT_SECONDS,
+            verify=settings.HTTP_VERIFY_SSL,
+            limits=httpx.Limits(max_keepalive_connections=0),
         ) as client:
             while True:
                 try:
