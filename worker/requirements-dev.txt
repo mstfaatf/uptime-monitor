@@ -1,0 +1,5 @@
+# Test-only dependency — not installed in the Docker image (Dockerfile installs
+# requirements.txt only).
+-r requirements.txt
+
+pytest>=8.0.0

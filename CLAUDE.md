@@ -235,6 +235,73 @@ Phase 0, prompt 0.5 (fix #4: rate limiting) is complete.
   single-instance in-memory storage, not a bug).
 - Not touched in this prompt: tests (fix #5, next, will assert these limits).
 
-Next: Phase 0 prompt 0.6 — pytest suite (fix #5), the last item in the Phase 0 checklist.
+Phase 0, prompt 0.6 (fix #5: pytest suite) is complete. **Phase 0 is now fully done** — all
+six checklist items (gitignore/.env, config defaults, SSRF creation+redirect, rate limiting,
+tests) are in place and verified.
+- `backend/tests/` (pytest + pytest-asyncio + httpx.AsyncClient against the FastAPI app
+  in-process via `ASGITransport`, no real server). 26 tests, all passing:
+  - `test_auth.py` — register/login/logout/me roundtrip, duplicate email (400), wrong
+    password (401), unknown email (401), unauthenticated `/auth/me` (401).
+  - `test_ownership.py` — **the most important file in the suite**: user A cannot list, see
+    status of, or delete user B's targets (404, not 403 — indistinguishable from "doesn't
+    exist"); anonymous access to every target endpoint is 401. Zero regression coverage for
+    this existed before today.
+  - `test_targets.py` — trailing-slash normalization collapses to the same target (409 on
+    the dupe), uniqueness is per-user not global, delete actually removes the row, invalid
+    scheme rejected.
+  - `test_ssrf.py` — creation-time blocking (400) for localhost/127.0.0.1/10.x/172.16.x/
+    192.168.x/169.254.169.254; a real public URL still succeeds.
+  - `test_config.py` — `Settings()` raises `ValidationError` with no `JWT_SECRET` (tests the
+    class directly with `_env_file=None` + `monkeypatch.delenv`, since the module-level
+    singleton is already-imported by the time tests run); also covers the
+    `ENVIRONMENT=production` → `COOKIE_SECURE=True` override from prompt 0.3.
+  - `test_rate_limit.py` — login/register/target-creation all confirmed to 429 exactly one
+    request past their configured limit.
+- **Test database**: a dedicated `<dbname>_test` Postgres database on the same server as
+  `DATABASE_URL` (not SQLite) — the schema uses Postgres-specific DDL
+  (`postgresql_ops` on `checks.checked_at`) and production runs on Postgres via asyncpg, so
+  SQLite would test a different SQL dialect than what ships. `backend/tests/conftest.py`
+  creates the test DB if missing and runs the real Alembic migrations against it every
+  session (catches model/migration drift, not just a `create_all()` snapshot), then
+  truncates all tables before every individual test for isolation. Single command from
+  `backend/`: `pip install -r requirements-dev.txt && pytest` — new `requirements-dev.txt`
+  (pytest/pytest-asyncio/httpx) is deliberately kept out of the Docker image.
+- **Real bug hit and fixed while building this**: pytest-asyncio 1.x's default per-test-
+  function event loop is incompatible with `database.py`'s module-level, session-lifetime
+  async engine — reusing pooled asyncpg connections across a new loop threw
+  `InterfaceError: another operation is in progress` on every test after the first. Fixed
+  via `asyncio_default_fixture_loop_scope = session` +
+  `asyncio_default_test_loop_scope = session` in `backend/pytest.ini`, giving the whole test
+  session one event loop, matching the engine's actual lifetime assumption.
+- **Also hit**: several early test URLs used made-up subdomains (`a.example.com`,
+  `shared.example.com`) that don't resolve via DNS, so `is_url_blocked()` (called from
+  `POST /targets`) correctly rejected them as "Resolution failed" — a self-inflicted false
+  SSRF-block, not a real bug. Fixed by varying the **path** on the real `example.com`
+  instead of the hostname (DNS only resolves hostnames, so `example.com/a`,
+  `example.com/shared`, etc. are all real, resolvable, distinct targets).
+- **worker/tests/** (separate suite, own `pytest.ini`/`requirements-dev.txt`) — kept apart
+  from `backend/tests/` for the same reason `backend/security/ssrf.py` was duplicated rather
+  than shared in prompt 0.4: the worker is an independently deployed service and shouldn't
+  need FastAPI/Postgres test infrastructure just to test its own SSRF/redirect logic. 11
+  tests, all passing, all hermetic (no DB, no network — `requests.request` is mocked via
+  `unittest.mock`, no new runtime dependency):
+  - `test_ssrf.py` — same blocked-range coverage as backend's, using IP literals throughout
+    so nothing depends on real DNS.
+  - `test_checker_redirects.py` — directly exercises the prompt-0.4 redirect fix: a redirect
+    to a blocked address (e.g. `169.254.169.254`) is caught and the blocked hop is *never
+    requested* (`mock_request.call_count == 1`); a normal public→public redirect still
+    resolves; a redirect chain exceeding `MAX_REDIRECTS` fails cleanly instead of looping.
+- Minor unrelated cleanup: added `path_separator = os` to `backend/alembic.ini` — silences an
+  Alembic deprecation warning that showed up on every test run.
+- Verified everything by actually running both suites in Docker (`docker compose run --rm
+  api|worker sh -c "pip install -r requirements-dev.txt && pytest"`, matching how CI would
+  invoke them) — 26 backend + 11 worker tests, all green, confirmed idempotent on a second
+  run against the already-migrated test database.
+- Documented in `backend/README.md` and `worker/README.md` under new "Tests" sections.
+
+Phase 0 complete. Next: Phase 1 — worker rewrite + networking depth (async httpx, DNS/TCP/TLS/
+TTFB breakdown, backoff+jitter, cert expiry capture, WebSocket/SSE push). This changes the
+`checks` schema, so plan the Alembic migration and the new columns before touching the worker's
+check loop.
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

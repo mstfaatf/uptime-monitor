@@ -129,6 +129,31 @@ docker compose up --build
 - Upgrade: `alembic upgrade head`
 - Downgrade one step: `alembic downgrade -1`
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt   # pytest, pytest-asyncio, httpx — not in the Docker image
+pytest
+```
+
+Requires a reachable Postgres server (the same one used for local dev — `docker compose up -d db`
+from the repo root is enough). Tests never touch your dev database: they create and migrate a
+separate `<database>_test` database on the same server automatically (derived from `DATABASE_URL`,
+or set `TEST_DATABASE_URL` explicitly to point somewhere else). No other manual setup needed —
+each test run creates the test DB if missing, migrates it to head, and wipes all tables before
+every test for isolation.
+
+If Postgres isn't reachable at the default `localhost:5432` (e.g. it's mapped to a different host
+port to avoid a conflict with another local project), set `DATABASE_URL` or `TEST_DATABASE_URL`
+accordingly before running `pytest`.
+
+Coverage: full auth flow (register/login/logout/me, duplicate email, wrong password), ownership
+enforcement across all target endpoints (the most important tests here — user A can never read,
+list, or delete user B's targets), URL normalization + duplicate-target 409s, SSRF blocking at
+creation time, the `JWT_SECRET` fail-fast behavior, and rate limiting on login/register/target
+creation. Worker-side SSRF and redirect-handling tests live in `worker/tests/` instead — see
+`worker/README.md` — since the worker is a separately deployed service with its own dependencies.
+
 ## Endpoints
 
 - **Health:** `GET /health` — returns `{"status": "ok"}`

@@ -71,4 +71,18 @@ The worker blocks targets whose hostname:
 - Is `localhost` (or similar), or
 - Resolves to an IP in: 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16
 
-Blocked targets get a check row with `is_up=false` and `error` set to the reason.
+Blocked targets get a check row with `is_up=false` and `error` set to the reason. Redirects are
+followed manually with the same check re-run on each hop (see `checker.py`) — a target can't
+pass the check and then 3xx to a blocked address.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt   # pytest — not in the Docker image
+pytest
+```
+
+No database or network needed — `worker/tests/` unit-tests `ssrf.py`'s blocklist and
+`checker.py`'s redirect-following logic directly, with all HTTP mocked. Kept separate from
+`backend/tests/` deliberately: the worker is a separately deployed service with its own
+dependencies, so its tests don't need backend/'s FastAPI/Postgres test setup at all.
