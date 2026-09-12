@@ -79,19 +79,24 @@ every push, rewritten root README (pitch, architecture diagram, live demo link, 
 
 ## Phases
 
-0. Foundation & security — .gitignore/.env fix, remove insecure config defaults, rate limiting,
-   SSRF-at-creation, pytest suite. Nothing else gets built until this is done.
-1. Worker rewrite + networking depth — async httpx, DNS/TCP/TLS/TTFB breakdown, backoff+jitter,
-   cert expiry capture, WebSocket/SSE push. Changes the `checks` schema — must land before
-   analytics/UI are built on the new fields.
-1.5. Multi-region — second worker instance, REGION tagging, coordination/locking to prevent
-   duplicate checks across instances.
-2. UI refresh + analytics — Tailwind/shadcn, all new pages listed above, summary strip, latency
+0. Foundation & security (complete) — .gitignore/.env fix, remove insecure config defaults,
+   rate limiting, SSRF-at-creation, pytest suite. Nothing else got built until this was done.
+1. Worker Rewrite & Network Observability (complete) — async httpx, DNS/TCP/TLS/TTFB breakdown,
+   backoff+jitter, cert expiry capture, WebSocket/SSE push. Changed the `checks` schema — landed
+   before analytics/UI were built on the new fields, per plan.
+2. Multi-region + coordination (next up) — second worker instance, REGION tagging,
+   coordination/locking to prevent duplicate checks across instances. **Carries forward one
+   known open item from Phase 1**: `get_due_targets` has no row-claiming mechanism at all today,
+   so multiple concurrent worker instances could double-check the same due targets — this must
+   be fixed before any multi-region check-dispatch logic is built on top of it, not after.
+3. UI refresh + analytics — Tailwind/shadcn, all new pages listed above, summary strip, latency
    chart, heatmap, incident timeline, SLA %, landing page + demo account, forgot password.
-2.5. Alerting + compliance — Resend downtime + cert-expiry alerts with cooldown, CSV/PDF export.
-3. Deploy — Neon (DB) + Railway (API + worker) + Vercel (frontend), CORS updated to real domain,
+4. Alerting + compliance export — Resend downtime + cert-expiry alerts with cooldown, CSV/PDF
+   export.
+5. Deploy — Neon (DB) + Railway (API + worker) + Vercel (frontend), CORS updated to real domain,
    CI pipeline.
-4. Presentation — README rewrite, ADRs, LOAD_TESTING.md against the live deployed instance.
+6. Presentation / README / ADRs / load testing — README rewrite, ADRs, LOAD_TESTING.md against
+   the live deployed instance.
 
 ## Workflow
 
@@ -222,7 +227,7 @@ Phase 0, prompt 0.5 (fix #4: rate limiting) is complete.
   IP is caught either way). Documented in `rate_limit.py`; revisit if per-user keying turns
   out to matter later (e.g. many users legitimately sharing one IP/NAT).
 - Flagging per the prompt: slowapi's default storage is **in-memory and per-process**. Fine
-  for the current single-instance deployment plan (Phase 3: one Railway API service). If the
+  for the current single-instance deployment plan (Phase 5: one Railway API service). If the
   backend is ever horizontally scaled to multiple instances (not currently planned), each
   process enforces its own separate counters, so the *effective* limit multiplies by instance
   count — would need a shared store (Redis, via slowapi's `storage_uri`) at that point. Not
@@ -355,13 +360,13 @@ were touched — this was read-only review plus a report delivered directly in t
   `response.extensions["network_stream"].get_extra_info("ssl_object")` — no second
   connection; new nullable `checks` columns (`dns_ms`, `tcp_ms`, `tls_ms`, `ttfb_ms`,
   `tls_cert_expires_at`, `tls_cert_issuer`) rather than a new table; explicitly deferred
-  alert-cooldown state (Phase 2.5's concern, not this migration's) to avoid designing that
+  alert-cooldown state (Phase 4's concern, not this migration's) to avoid designing that
   table blind. Recommended SSE over WebSocket (unidirectional data flow, reuses existing
   cookie auth, browser auto-reconnect) via Postgres LISTEN/NOTIFY filtered server-side by
   `user_id` so ownership rules carry over to the push path.
 - Recommended build order: (1) async rewrite, (2) backoff+jitter scheduling (needs a
   `targets` migration for `consecutive_failures`/`next_check_at`), (3) timing breakdown +
-  cert expiry together (shared `checks` migration, must land before Phase 2 UI), (4)
+  cert expiry together (shared `checks` migration, must land before Phase 3 UI), (4)
   WebSocket/SSE push last, once the pushed payload shape is final.
 - Full report with reasoning for each decision was delivered in the conversation, not written
   to a file — reread the conversation history if picking this up cold, or ask for the report
@@ -479,7 +484,7 @@ Phase 1, prompt 1.3 (per-target scheduling + backoff-with-jitter) is complete.
   logged once as `Cycle failed`) — the existing outer-loop try/except caught it and the next
   5s tick succeeded once the migration landed. Self-healing by design, left as is.
 - Not touched in this prompt (explicitly out of scope): timing breakdown, cert expiry, SSE.
-  Multi-instance locking (`SELECT ... FOR UPDATE SKIP LOCKED`) is still Phase 1.5's job — a
+  Multi-instance locking (`SELECT ... FOR UPDATE SKIP LOCKED`) is still Phase 2's job — a
   second worker instance today would double-check whatever's due, since nothing yet claims a
   row before working it.
 
@@ -542,9 +547,9 @@ Phase 1, prompt 1.4 (DNS/TCP/TLS/TTFB timing breakdown + TLS cert expiry) is com
 - `backend/routers/targets.py`'s `LatestCheckResponse` (returned by `GET /targets/status`, the
   only endpoint the frontend currently reads check data from) now carries all six new fields
   plus the derived `tls_cert_days_remaining`. Negative days-remaining (already expired) is
-  exposed as-is, not clamped — Phase 2.5's alerting decides its own threshold later.
+  exposed as-is, not clamped — Phase 4's alerting decides its own threshold later.
 - Explicitly did **not** add any alert-cooldown/"last alert sent" state in this prompt, per
-  the 1.1 report's plan — that's its own table in Phase 2.5, not columns bolted onto `checks`
+  the 1.1 report's plan — that's its own table in Phase 4, not columns bolted onto `checks`
   now.
 - Tests: `worker/tests/test_timing.py` (new) unit-tests `_extract_timings`/`_extract_cert`
   against synthetic trace-event dicts and fake ssl objects, including fail-safe behavior for
@@ -555,7 +560,7 @@ Phase 1, prompt 1.4 (DNS/TCP/TLS/TTFB timing breakdown + TLS cert expiry) is com
   new fields and the derived days-remaining, including the expired-cert (negative) case.
   28 worker tests and 30 backend tests, all passing.
 - Not touched in this prompt (explicitly out of scope): SSE/real-time updates. The frontend
-  dashboard itself is still Phase 2 work — these fields are exposed via the API now but not
+  dashboard itself is still Phase 3 work — these fields are exposed via the API now but not
   yet rendered anywhere.
 
 Phase 1, prompt 1.5 (SSE real-time dashboard updates) is complete. **This closes out Phase 1**
@@ -598,7 +603,7 @@ real-time push) are in place and verified.
   restart on either side. Browser-side reconnect needs no code at all — `EventSource` retries
   automatically on drop, per spec.
 - Frontend (`frontend/app/dashboard/page.tsx`, `frontend/lib/api.ts`): minimal, functional
-  wiring only, per this prompt's scope (full UI polish is Phase 2) — a new `useEffect` opens
+  wiring only, per this prompt's scope (full UI polish is Phase 3) — a new `useEffect` opens
   `new EventSource(.../targets/stream, { withCredentials: true })` once the initial poll has
   confirmed the user is authenticated, merges incoming `check_update` events into the existing
   `items` list by id, and closes the connection on unmount. A small "● live / reconnecting…"
@@ -618,7 +623,7 @@ real-time push) are in place and verified.
   verified the real HTTP/SSE contract instead (two concurrent curl-based SSE sessions against
   the live stack, as described above), same caveat flagged as far back as the 0.7 wrap-up.
 
-**Phase 1 complete.** Per CLAUDE.md's phase plan, next is Phase 1.5 (multi-region: second
+**Phase 1 complete.** Per CLAUDE.md's phase plan, next is Phase 2 (multi-region: second
 worker instance, `REGION` tagging, `SELECT ... FOR UPDATE SKIP LOCKED` or region-scoped
 claiming so two worker instances can't double-check the same target) — flagged as still-open
 in every prompt since 1.2, since today's single-worker `get_due_targets()` has no claiming at
@@ -627,7 +632,7 @@ all.
 Phase 1, prompt 1.6 (wrap-up verification) is complete. **Phase 1 is genuinely, verifiably
 done** — every piece (async rewrite, backoff scheduling, timing breakdown, cert expiry, SSE)
 was re-proven this prompt against real network traffic and a real database, not just mocks,
-before moving to Phase 1.5.
+before moving to Phase 2.
 - Ran both suites fresh: 70 tests total (37 backend + 33 worker), all passing. Added
   `worker/tests/test_scheduling.py` (5 new tests, mocked-connection/hermetic, consistent with
   the rest of `worker/tests/`) — closed a real gap: nothing previously asserted that
@@ -661,14 +666,18 @@ before moving to Phase 1.5.
   wrap-up, then recovering cleanly once restored.
 - All verification artifacts (test targets, temporary SSE connections, throwaway scripts)
   cleaned up afterward; containers left healthy and stable.
-- No outstanding issues to revisit before Phase 1.5. The one thing Phase 1.5 must address
+- No outstanding issues to revisit before Phase 2. The one thing Phase 2 must address
   head-on — already flagged in every prompt since 1.2 — is that `get_due_targets` has no
   row-claiming: a second worker instance today would double-check whatever's due.
 
-**Next: Phase 1.5 — multi-region.** Second worker instance, `REGION` env var tagging, and a
+**Next: Phase 2 — multi-region.** Second worker instance, `REGION` env var tagging, and a
 coordination mechanism (`SELECT ... FOR UPDATE SKIP LOCKED` or region-scoped claiming — decide
 and document as an ADR per CLAUDE.md rule 5) so two worker instances can't double-check the
-same target or race on writes.
+same target or race on writes. **Known open item carried forward from Phase 1**:
+`get_due_targets` (`worker/main.py`) has no row-claiming mechanism at all today — every worker
+instance would independently select and check whatever's currently due, so this must be fixed
+as the first piece of Phase 2, before any multi-region check-dispatch logic is layered on top
+of it, not after.
 
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
