@@ -2547,5 +2547,58 @@ CSV export) confirmed working, with the two alert paths not yet proven with a re
 worker instances, Vercel for the frontend, CORS updated to the real domain, CI pipeline) per
 CLAUDE.md's phase plan.
 
+Phase 5, prompt 5.1 (familiarization + deployment proposal) is complete. Read-only — no
+application code or new files, per this prompt's scope. Full report delivered directly in the
+conversation (not saved to a file); reread the conversation history if picking this up cold.
+- Full env var inventory across backend/worker/frontend, with local-dev value vs. required
+  production value for each (fresh `JWT_SECRET`, Neon `DATABASE_URL`, `COOKIE_SAMESITE=none`
+  in prod, real Vercel origin for CORS, real region names for `REGION`, etc.).
+- Neon: provision once, run `alembic upgrade head` manually from a local shell against the
+  Neon connection string for the first migration; every deploy after that is already handled
+  automatically by `backend/Dockerfile`'s existing boot-time `alembic upgrade head && exec
+  uvicorn ...` — no separate Railway release-phase command needed.
+- Railway: one project, three services (`api`, `worker`, `worker-<region-b>`), each pointing
+  at its existing Dockerfile as-is; one project (not two) so shared vars like `DATABASE_URL`
+  stay a single source of truth. `REGION` is the only var that differs between the two worker
+  services.
+- Vercel: root `frontend/`, default Next.js build, `NEXT_PUBLIC_API_URL` set in the dashboard.
+  Confirmed no server-only secret is exposed via any `NEXT_PUBLIC_*` var. Flagged that
+  `playwright` (a devDependency used only for this project's own manual verification) may slow
+  or complicate Vercel's install step via its browser-binary postinstall — recommended
+  `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` on Vercel.
+- **Cross-origin cookies/CORS — flagged as the riskiest untested part of this phase**:
+  `COOKIE_SAMESITE` must become `"none"` in production (relies on the existing
+  `ENVIRONMENT=production` → `COOKIE_SECURE=True` override already covering the `Secure`
+  requirement); `main.py`'s hardcoded single-origin `allow_origins=["http://localhost:3000"]`
+  must become an explicit env-driven allowlist (never `"*"`, since `allow_credentials=True`).
+  Neither change is made yet — implementation is later prompts.
+- Proposed verifying the cross-origin contract cheaply before Vercel is even involved: point
+  the local `next dev` server's `NEXT_PUBLIC_API_URL` at the deployed Railway backend once it
+  exists, and confirm login/cookie/SSE work over that real cross-origin (still-`localhost`
+  frontend, real HTTPS backend) combination first.
+- Resend: documented what DNS records domain verification needs and confirmed
+  `mail/client.py` needs zero code changes — `RESEND_FROM_EMAIL` is already a configurable
+  setting (not hardcoded). Flagged that Resend domain verification is independent of the
+  frontend's hosting domain and may be deferred if no custom domain is purchased for this
+  project.
+- Multi-region: recommended real Railway regions **US East** and **EU West** (replacing the
+  Phase 2 `local`/`eu-west` placeholders) — confirmed `REGION` is the only var that needs to
+  differ between the two worker deployments.
+- Secrets: confirmed none of `JWT_SECRET`/`DATABASE_URL`/`RESEND_API_KEY` should ever be
+  committed or pasted into a prompt; each gets generated/copied directly into Railway's or
+  Vercel's dashboard.
+- Cleanup: confirmed the 31 leftover test accounts (ids 3-39) in the local dev DB are moot —
+  production Neon gets populated only via migrations-from-scratch, no data copy from local.
+- Proposed build order for 5.2 onward: Neon provisioning → backend Railway deploy (incl. the
+  `COOKIE_SAMESITE`/CORS-allowlist code changes) → worker Railway deploy (both regions) →
+  cross-origin verification via local frontend against the deployed backend → Vercel deploy →
+  Resend domain verification (independent, can interleave) → CI pipeline → wrap-up/regression
+  verification, mirroring every prior phase's closing pattern.
+- No code changes, no new files, no migrations in this prompt — report only, pending review
+  before Phase 5 implementation begins.
+
+**Next: Phase 5 implementation begins at prompt 5.2** (Neon provisioning + first migration
+run), per the build order above, pending the user's review of this report.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
