@@ -10,19 +10,19 @@ export default function AboutPage() {
           Uptime Monitor is a personal project built to go deeper on the networking side most
           monitoring tools abstract away: DNS, TCP, and TLS timing per check, certificate
           expiry, and multi-region checks with real coordination between worker instances
-          rather than a single cron job. It's a private tool — there's no public page listing
+          rather than a single cron job. It's a private tool, and there's no public page listing
           what anyone else is watching.
         </p>
         <p className="mt-4" style={{ color: "var(--text-secondary)" }}>
           Built and documented end to end by Mustafa Atif as a portfolio project.
         </p>
 
-        <h2 className="mt-10 font-semibold">Stack</h2>
+        <h2 className="mt-10 text-lg font-semibold">Stack</h2>
         <p className="mt-2 font-mono text-sm" style={{ color: "var(--text-secondary)" }}>
           Next.js, FastAPI, an async Python worker, and PostgreSQL.
         </p>
 
-        <h2 className="mt-10 font-semibold">Source</h2>
+        <h2 className="mt-10 text-lg font-semibold">Source</h2>
         <p className="mt-2">
           <a
             href="https://github.com/mstfaatf/uptime-monitor"

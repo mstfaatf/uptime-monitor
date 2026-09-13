@@ -72,7 +72,7 @@ function deriveState(check: LatestCheck | undefined): SignalState {
 // SignalLight flip, which only helps if they're already looking at it.
 function notifyTransition(target: TargetStatusRow, region: string, from: SignalState, to: SignalState) {
   const label = target.name || target.url;
-  const description = `${region} — ${SIGNAL_STATE_LABELS[from]} → ${SIGNAL_STATE_LABELS[to]}`;
+  const description = `${region}: ${SIGNAL_STATE_LABELS[from]} → ${SIGNAL_STATE_LABELS[to]}`;
   if (to === "down") {
     toast.error(label, { description });
   } else if (to === "degraded") {
@@ -361,7 +361,7 @@ export default function DashboardPage() {
   return (
     <>
       <header className="border-b" style={{ borderColor: "var(--border)" }}>
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-y-2 px-6 py-4">
           <Link href="/" className="flex items-center gap-3">
             <SignalLight state="up" size="sm" />
             <span className="font-semibold">Uptime Monitor</span>
@@ -369,7 +369,7 @@ export default function DashboardPage() {
           <div className="flex items-center gap-6">
             <span
               className="font-mono text-xs"
-              title={live ? "Live updates connected" : "Live updates disconnected — retrying"}
+              title={live ? "Live updates connected" : "Live updates disconnected, retrying"}
               style={{ color: live ? "var(--signal-up)" : "var(--signal-pending-text)" }}
             >
               ● {live ? "live" : "reconnecting…"}
@@ -455,7 +455,7 @@ export default function DashboardPage() {
           className="mt-8 max-w-md rounded border p-5"
           style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
         >
-          <h2 className="font-semibold">Add target</h2>
+          <h2 className="text-lg font-semibold">Add target</h2>
           <form onSubmit={handleAddTarget} className="mt-4 flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="target-url">URL (required)</Label>

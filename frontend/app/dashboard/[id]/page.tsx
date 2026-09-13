@@ -128,7 +128,7 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
   return (
     <>
       <header className="border-b" style={{ borderColor: "var(--border)" }}>
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-y-2 px-6 py-4">
           <Link href="/dashboard" className="flex items-center gap-3">
             <SignalLight state="up" size="sm" />
             <span className="font-semibold">Uptime Monitor</span>
@@ -212,7 +212,7 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
             </div>
 
             <section className="mt-6 rounded border p-5" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
-              <h2 className="font-semibold">Latency</h2>
+              <h2 className="text-lg font-semibold">Latency</h2>
               <div className="mt-4 flex flex-col items-stretch gap-6 md:flex-row md:items-start">
                 <LatencyGauge value={selectedLatest?.latency_ms ?? null} size="md" />
                 <div className="min-w-0 flex-1">
@@ -222,7 +222,7 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
             </section>
 
             <section className="mt-6 rounded border p-5" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
-              <h2 className="font-semibold">Timing breakdown</h2>
+              <h2 className="text-lg font-semibold">Timing breakdown</h2>
               <p className="mt-1 text-xs" style={{ color: "var(--text-secondary)" }}>
                 Latest check, {formatTimestamp(selectedLatest?.checked_at)}
               </p>
@@ -232,21 +232,26 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
             </section>
 
             <section className="mt-6 rounded border p-5" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
-              <h2 className="font-semibold">Uptime</h2>
+              <h2 className="text-lg font-semibold">Uptime</h2>
               <div className="mt-4">
                 <UptimeHeatmap checks={selectedChecks} />
               </div>
             </section>
 
-            <section className="mt-6 rounded border p-5" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
-              <h2 className="font-semibold">Incidents</h2>
+            {/* Incidents and TLS certificate are read as documentation, not instrument panels
+                (a short list and a couple of lines of text, not a dense visual module) — a
+                divider instead of the full bordered surface used above keeps the page's boldness
+                on the actual data-dense panels (chart, waterfall, heatmap) rather than framing
+                every section identically regardless of what it holds. */}
+            <section className="mt-10 border-t pt-6" style={{ borderColor: "var(--border)" }}>
+              <h2 className="text-lg font-semibold">Incidents</h2>
               <div className="mt-4">
                 <IncidentTimeline checks={selectedChecks} />
               </div>
             </section>
 
-            <section className="mt-6 rounded border p-5" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
-              <h2 className="font-semibold">TLS certificate</h2>
+            <section className="mt-8 border-t pt-6" style={{ borderColor: "var(--border)" }}>
+              <h2 className="text-lg font-semibold">TLS certificate</h2>
               <div className="mt-4">
                 {selectedLatest?.tls_cert_expires_at ? (
                   <div className="flex flex-col gap-1">

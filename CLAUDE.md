@@ -1946,5 +1946,85 @@ rather than silently guessed at.
 alerts with a cooldown, CSV/PDF export), including the `consecutive_failures` exposure
 recommended back in the 3.9 wrap-up.
 
+Unplanned prompt (full UI design pass with the official `frontend-design` Anthropic skill) is
+complete. Not a numbered Phase 4 prompt — the user asked to install the real, official
+Anthropic `frontend-design` plugin (confirmed genuine via `github.com/anthropics/claude-code`
+and `claude.com/plugins/frontend-design`, installed via `/plugin install
+frontend-design@claude-plugins-official`; an earlier CLAUDE.md reference to "the
+frontend-design skill" from a prior session turned out to have been informal prose, not an
+actual installed skill — flagged and corrected) and then run a full critique pass against it
+across every page.
+- **Overall finding**: this app's existing design work (Phases 3.1-3.9) already avoids nearly
+  every generic-AI-design tell the skill warns about — no cream/terracotta, no gradients, no
+  drop shadows, a functionally-grounded (not decorative) traffic-light color system, mono
+  reserved for genuine live-instrument readings, motion restrained to one orchestrated moment,
+  a real signature custom instrument (SignalLight + LatencyGauge) rather than a stock
+  illustration. This was not a redesign — it was a scoped critique-and-fix pass against real
+  remaining gaps, verified with real seeded data across two regions via Playwright screenshots,
+  not just code review.
+- **Real finding #1, fixed**: the target detail page (`app/dashboard/[id]/page.tsx`) stacked
+  six identically-bordered `bg-surface` boxes in a row regardless of content density — the
+  "SaaS-card-kit" tell the skill specifically flags, just without the shadow. Fixed by keeping
+  the full bordered-panel treatment only for the three genuinely dense visual modules (Latency
+  gauge+chart, Timing breakdown, Uptime heatmap) and converting "Incidents" and "TLS
+  certificate" (a short list and 2-3 lines of text) to a lighter divider-plus-heading treatment
+  — creates real visual hierarchy instead of every section shouting at the same volume.
+- **Real finding #2, fixed**: the type scale was nearly flat below the page H1 — every section
+  H2 across the detail page, `/about`, `/settings`, and the dashboard's "Add target" was bare
+  `font-semibold` at the browser default 16px, giving Latency/Timing breakdown/Uptime/
+  Incidents/TLS certificate/Alert preferences/Account/Danger zone/Stack/Source all identical
+  visual weight. Bumped all of them to `text-lg` (18px), matching the scale the landing page
+  already established in the prior prompt — one consistent H1(24-30px)/H2(18px)/body(14-16px)
+  scale app-wide now, not just on the landing page.
+- **Real finding #3, fixed**: a handful of user-facing em dashes had survived outside the
+  landing page copy pass (the prior prompt's "no em dashes" rule was scoped to `app/page.tsx`
+  specifically). The skill's own tell-list separately flags "WORD — fragment"-style spaced-em-
+  dash labels as template chrome, so fixed the remaining four: `/about`'s body copy, the
+  dashboard's real-time toast description separator, the dashboard's "reconnecting" tooltip
+  title, and the settings alert-preferences caption. Left the single "—" glyph used as a bare
+  "no value" placeholder (e.g. `check.latency_ms ?? "—"`) alone — that's an idiomatic empty-
+  state marker, not the punctuation pattern the skill warns about.
+- **Real finding #4, fixed (found only by actually screenshotting at 400px, not from code
+  review)**: `app/dashboard/page.tsx`, `app/dashboard/[id]/page.tsx`, and `app/settings/page.tsx`
+  all shared an identical header row (`flex items-center justify-between`, no wrap) that, at
+  narrow widths, didn't wrap the nav items onto a second line — instead it squeezed the "Uptime
+  Monitor" wordmark itself into a narrow column, breaking it mid-word ("Uptime" / "Monitor" on
+  separate lines). This is a real, previously-unflagged mobile bug, not present in any prior
+  phase's mobile audit notes. Fixed by adding `flex-wrap gap-y-2` to all three header rows so
+  the nav cleanly drops to its own line below the wordmark instead.
+- **Verification methodology**: registered a throwaway account and seeded three targets with
+  real, varied check history (healthy/both-regions, degraded/slow-latency-with-expiring-cert,
+  down/with-a-real-incident-and-90-day-heatmap-history) directly via SQL. **Had to pause the
+  `worker`/`worker-eu-west` containers partway through**: the real live worker kept re-checking
+  the newly-created targets against their real (fake-path) URLs and overwriting the seeded
+  "healthy"/"degraded" states with real 404-driven "down" results within seconds of creation,
+  since new targets default to due-immediately — a genuine environment gotcha (same category as
+  Phase 0's "made-up subdomains don't resolve" issue), not a product bug. Stopped both workers
+  for the duration of the screenshot session, then restarted them afterward (confirmed both
+  `Up` again). Screenshotted every page (landing, about, login, register, dashboard, detail x2
+  target states, settings) at desktop width, plus the detail page and dashboard at 400px mobile
+  width, both before and after the fixes above, to confirm each change actually rendered as
+  intended rather than trusting the code alone. `tsc --noEmit` clean throughout.
+- All verification data (the seeded account, its 3 targets, ~14 seeded check rows) deleted
+  afterward via the real `DELETE /auth/me` flow; confirmed via direct SQL count that no rows
+  remained. All scratch scripts/screenshots removed. Docker stack and the port-3000 dev server
+  confirmed healthy before finishing.
+- **Considered and deliberately left alone**: the locked color palette/tokens (already
+  accessibility-audited and central to the app's identity across 6 phases — revisiting them
+  wasn't justified by anything found in this pass); the auth pages' (`/login`, `/register`)
+  large empty space around a centered card (a legitimate, deliberate minimal pattern from 3.4,
+  not itself one of the skill's named generic-AI tells); the dashboard's own stacked-box
+  structure (summary strip / legend / add-target form / target rows — each is genuinely
+  panel-like content, not arbitrary content forced into cards, unlike the detail page's issue);
+  the timing waterfall's descending-opacity-by-phase-order color scheme (flagged as a possible
+  minor readability tension worth a future look, since the longest phase segment reads as the
+  dimmest, but changing it would mean revisiting a deliberately-reasoned 3.6 decision without a
+  strong enough reason found here).
+- Not touched in this prompt: alerting, compliance export (still Phase 4's remaining scope).
+
+**Next: continue Phase 4 — Alerting + compliance export** (Resend downtime + cert-expiry
+alerts with a cooldown, CSV/PDF export), including the `consecutive_failures` exposure
+recommended back in the 3.9 wrap-up.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

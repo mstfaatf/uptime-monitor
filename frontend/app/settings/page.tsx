@@ -145,7 +145,7 @@ export default function SettingsPage() {
   return (
     <>
       <header className="border-b" style={{ borderColor: "var(--border)" }}>
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-y-2 px-6 py-4">
           <Link href="/dashboard" className="flex items-center gap-3">
             <SignalLight state="up" size="sm" />
             <span className="font-semibold">Uptime Monitor</span>
@@ -182,10 +182,10 @@ export default function SettingsPage() {
               className="mt-8 rounded border p-5"
               style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
             >
-              <h2 className="font-semibold">Alert preferences</h2>
+              <h2 className="text-lg font-semibold">Alert preferences</h2>
               <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>
-                Choose which events send you an email. (Sending itself isn't wired up yet — these
-                toggles just save your preference for when it is.)
+                Choose which events send you an email. Sending isn't wired up yet, so these
+                toggles just save your preference for when it is.
               </p>
 
               <div className="mt-5 flex flex-col gap-5">
@@ -231,7 +231,7 @@ export default function SettingsPage() {
               className="mt-6 rounded border p-5"
               style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
             >
-              <h2 className="font-semibold">Account</h2>
+              <h2 className="text-lg font-semibold">Account</h2>
               <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>
                 Change your password.
               </p>
@@ -290,7 +290,7 @@ export default function SettingsPage() {
               className="mt-6 rounded-sm border p-5"
               style={{ borderColor: "var(--signal-down)", background: "var(--bg-surface)" }}
             >
-              <h2 className="font-semibold" style={{ color: "var(--signal-down)" }}>
+              <h2 className="text-lg font-semibold" style={{ color: "var(--signal-down)" }}>
                 Danger zone
               </h2>
               <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>
