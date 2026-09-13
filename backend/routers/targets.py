@@ -99,6 +99,13 @@ class TargetStatusResponse(BaseModel):
     latest_checks: dict[str, LatestCheckResponse]
 
 
+class CheckHistoryEntry(LatestCheckResponse):
+    # Same shape as one region's entry in TargetStatusResponse.latest_checks, plus which
+    # region it's from — needed here because GET /targets/{id}/checks returns a flat list
+    # for one region rather than a region-keyed dict.
+    region: str
+
+
 def _check_to_response_dict(check: Check) -> dict:
     """Build the LatestCheckResponse-shaped dict for one check row."""
     days_remaining = None
@@ -289,6 +296,56 @@ async def create_target(
     await db.flush()
     await db.refresh(target)
     return TargetResponse(id=target.id, url=target.url, name=target.name, created_at=target.created_at.isoformat())
+
+
+@router.get("/{target_id}", response_model=TargetStatusResponse)
+async def get_target_detail(
+    target_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return one target with its latest check per region — the same shape as one row of
+    GET /targets/status, built via the same query/payload helpers so the two can never drift
+    apart. 404 (not 403) for a target that doesn't exist or isn't owned by the caller — same
+    "can't tell the difference" pattern as DELETE below."""
+    result = await db.execute(_latest_checks_per_region_query(target_id=target_id))
+    rows = result.all()
+    if not rows or rows[0][0].user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+    targets_by_id, checks_by_target = _group_checks_by_target(rows)
+    target = targets_by_id[target_id]
+    return TargetStatusResponse(**build_target_status_payload(target, checks_by_target[target_id]))
+
+
+@router.get("/{target_id}/checks", response_model=list[CheckHistoryEntry])
+async def get_target_checks(
+    target_id: int,
+    region: str,
+    limit: int = 500,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return this target's check history for one region, oldest first — the raw material for
+    the detail page's latency chart/heatmap/incident timeline. `region` is required rather
+    than defaulting to "every region mixed together": every analytics view on the detail page
+    is per-region by design (see the Phase 2 report's independent-display decision), so there
+    is no meaningful combined history to return. 404 (not 403) if the target doesn't exist or
+    isn't owned by the caller."""
+    limit = max(1, min(limit, 2000))
+    owns = await db.execute(
+        select(Target.id).where(Target.id == target_id, Target.user_id == current_user.id)
+    )
+    if owns.scalar_one_or_none() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+
+    result = await db.execute(
+        select(Check)
+        .where(Check.target_id == target_id, Check.region == region)
+        .order_by(Check.checked_at.asc())
+        .limit(limit)
+    )
+    checks = result.scalars().all()
+    return [CheckHistoryEntry(**_check_to_response_dict(check), region=check.region) for check in checks]
 
 
 @router.delete("/{target_id}", status_code=status.HTTP_204_NO_CONTENT)

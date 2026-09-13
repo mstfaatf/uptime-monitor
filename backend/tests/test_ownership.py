@@ -42,8 +42,22 @@ async def test_user_cannot_delete_another_users_target(client):
     assert delete_resp.status_code == 404
     await client.post("/auth/logout")
 
+
+async def test_user_cannot_view_another_users_target_detail_or_checks(client):
+    await _register(client, "usera4@example.com", "pw-a-1")
+    created = await client.post("/targets", json={"url": "https://example.com/a4"})
+    assert created.status_code == 201
+    target_id = created.json()["id"]
+    await client.post("/auth/logout")
+
+    await _register(client, "userb4@example.com", "pw-b-1")
+    # Same 404-not-403 pattern as delete: a cross-user probe can't even confirm the id exists.
+    assert (await client.get(f"/targets/{target_id}")).status_code == 404
+    assert (await client.get(f"/targets/{target_id}/checks?region=local")).status_code == 404
+    await client.post("/auth/logout")
+
     # Confirm it's untouched for the real owner.
-    login = await client.post("/auth/login", json={"email": "usera2@example.com", "password": "pw-a-1"})
+    login = await client.post("/auth/login", json={"email": "usera4@example.com", "password": "pw-a-1"})
     assert login.status_code == 200
     listing = await client.get("/targets")
     assert listing.status_code == 200
@@ -62,3 +76,5 @@ async def test_anonymous_user_cannot_access_any_target_endpoint(client):
     assert (await client.get("/targets/status")).status_code == 401
     assert (await client.post("/targets", json={"url": "https://example.com/x"})).status_code == 401
     assert (await client.delete(f"/targets/{target_id}")).status_code == 401
+    assert (await client.get(f"/targets/{target_id}")).status_code == 401
+    assert (await client.get(f"/targets/{target_id}/checks?region=local")).status_code == 401

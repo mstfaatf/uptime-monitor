@@ -1435,5 +1435,96 @@ data, which this prompt did. Detail view, settings, and the auth/static pages un
   prompt 3.6 — target detail page (timing waterfall, latency chart, heatmap, incident
   timeline, cert-expiry badge, export button stub).
 
+Phase 3, prompt 3.6 (target detail page, `/dashboard/[id]`) is complete. List view, settings,
+and auth/static pages untouched, per this prompt's scope.
+- **Real, unplanned backend addition, needed before any of this could use real data**: no
+  endpoint existed to fetch a single target or its check history (`SPEC.md` flagged this gap
+  as far back as the Phase 0 wrap-up). Added `GET /targets/{id}` (reuses the existing
+  `_latest_checks_per_region_query`/`build_target_status_payload` helpers from prompt 2.6 —
+  same shape as one row of `/targets/status`) and `GET /targets/{id}/checks?region=&limit=`
+  (ordered oldest-first, `region` required — never "every region mixed together," matching
+  the page's own no-collapsed-aggregate rule). Both 404 — not 403 — for a target that doesn't
+  exist or isn't owned by the caller, same pattern as `DELETE`. 8 new/extended backend tests
+  (ownership cases in `test_ownership.py`, shape/behavior in new `test_target_detail.py`) — 46
+  backend tests total, all passing. Caught and fixed my own copy-paste bug in a new ownership
+  test (wrong test-user email pasted from the neighboring test) via the actual test failure,
+  not by re-reading the code.
+- **Timing waterfall design approach** (stated before building, per the prompt): rather than
+  inventing four new brand colors for DNS/TCP/TLS/TTFB, `components/timing-waterfall.tsx` uses
+  ONE token (`--text-primary`) at four fixed opacity steps (0.9/0.7/0.5/0.3) to distinguish
+  phases proportionally — stays entirely inside the locked palette, with a 1px `--bg-base` seam
+  between segments for a sharp (not blurred/rounded) boundary. A phase the check never reached
+  (null, not 0) is omitted from the bar entirely rather than rendered as a zero-width sliver.
+- `components/uptime-heatmap.tsx`: hand-rolled CSS grid (not a library, per the 3.1 reasoning),
+  day-bucketed over a 90-day window, each cell colored by that day's worst state (down > amber
+  > up > no-data using `--signal-pending` as the fourth muted tone, exactly as specified).
+  Deliberate simplification flagged, not hidden: cells lay out in plain chronological
+  (row-major) order rather than true Sunday-Saturday calendar alignment — real calendar
+  alignment adds real complexity for no visible benefit on what is, in this project's own dev
+  data, a history of at most a couple of weeks.
+- `components/latency-chart.tsx` (Recharts): `<Line type="linear">` explicit (not the
+  smoothed `"monotone"` default most Recharts examples use), solid `<CartesianGrid>` (no
+  `strokeDasharray`) for the graph-paper feel, p95 computed client-side from the fetched
+  history and rendered as a dashed `<ReferenceLine>`.
+- `components/incident-timeline.tsx`: scans the ordered check history for runs of consecutive
+  `is_up=false`, converts each run into a start/end/duration entry (`end: null` = still
+  ongoing). Rendered as a real `<ol>` with number badges — the one place on this page (and in
+  the whole design system so far) a numbered marker is used, since this is a genuine
+  chronological sequence, not a feature list dressed up as one.
+- **SLA% and the no-collapsed-aggregate rule**: the header shows one SLA%-plus-`SignalLight`
+  block **per region**, each computed from that region's own fetched check history — not one
+  combined number for the target. This meant fetching every region's check history up front
+  (in parallel, `Promise.all`) rather than only the selected tab's region, so each region's SLA
+  can be computed independently regardless of which region's deeper analytics (chart/heatmap/
+  waterfall/timeline/cert panel) happen to be selected below.
+- Region tabs pick which region's chart/heatmap/waterfall/timeline/cert panel is shown; the
+  export button is a genuinely disabled shadcn `Button` (`Export (coming soon)`, no handler,
+  tooltip explaining CSV/PDF export lands in Phase 4) — visually present, not wired.
+- **Verified against ~10 days of real seeded history, not a single flat data point**: created a
+  fresh verification target on the live dev stack, let it get one real check in each region,
+  then seeded ~47 additional realistic rows directly via SQL for the `local` region (a healthy
+  baseline every 6h, two isolated slow/degraded checks on different days, and one real 3-check,
+  45-minute down-then-recover incident) — the same direct-SQL verification technique this
+  project has used since Phase 2. Screenshotted both regions: `eu-west` (sparse, 1 real check,
+  100% SLA) and `local` (the rich seeded history, 93.6% SLA) rendering **independently** —
+  confirmed by literally switching the region tab and re-screenshotting, not assumed from
+  reading the code. The chart showed the two real latency spikes and a correctly-positioned
+  p95 line; the heatmap showed a real mix of green/amber/red/muted days; the incident timeline
+  computed the exact real 45-minute window from the seeded down/up timestamps, not a
+  hardcoded example.
+- **Found and fixed a real responsive bug via the mobile screenshot, not code review**: the
+  latency-chart section's flex container used `items-start`, which (in the column layout the
+  `flex-col` default uses below the `md` breakpoint) meant the chart's wrapper never received a
+  real width, so Recharts' `ResponsiveContainer` rendered nothing — the gauge showed, the chart
+  was silently just gone. Fixed with `items-stretch md:items-start`; re-screenshotted mobile to
+  confirm the chart now renders.
+- **Caused and fixed a real regression to the user's own running dev server**: the production
+  `next build` verification step's `rm -rf .next` was run twice this prompt while the user's
+  separate long-running `npm run dev` process (port 3000) was still up, corrupting its webpack
+  runtime state (`Cannot find module './682.js'`) both times. Fixed both times by restarting
+  that dev server process (confirmed healthy afterward) — flagging this plainly since it's a
+  real disruption I caused to state outside this session's own sandbox, not a silent recovery.
+- All verification data cleaned up afterward (target deleted, scratch scripts and SQL removed,
+  cookie jar deleted); confirmed via the live API that the verification user has zero targets
+  remaining. Stack confirmed healthy (`docker compose ps`) before finishing.
+- Self-critique against the 3.1 avoid-list: clean, with two deliberate judgment calls flagged
+  rather than silently made — the "← Back to dashboard" link uses a **leading** arrow (a
+  wayfinding convention indicating direction of navigation), and the incident timeline's
+  "start → end" notation is a literal range separator in a data readout, not a button/link;
+  neither is the specific "decorative trailing arrow on CTA text" pattern the avoid-list
+  targets. No Inter/gradient, no all-caps eyebrow labels, no middle-dot-joined meta text, no
+  numbered markers anywhere except the one earned place, no single-word headline accent.
+- **A known gap, not fixed here**: the list view (`app/dashboard/page.tsx`, out of scope this
+  prompt) has no link to `/dashboard/[id]` yet — there's no way to reach the detail page
+  except by typing its URL. Flagging clearly for whichever prompt touches the list view next
+  (3.8 polish or 3.9 wrap-up) to close.
+- `tsc --noEmit` and `next build` both clean. Backend: 46 tests passing (`api` image rebuilt
+  and the running container recreated from it, so the live dev stack serves the new endpoints,
+  not just the test suite).
+- Not touched in this prompt (explicitly out of scope, per the prompt): list view, settings,
+  auth/static pages — beyond the known-gap note above, nothing in `app/dashboard/page.tsx`
+  was edited. Next per the 3.1 build order: prompt 3.7 — `/settings` (password-reset and
+  alert-preference UI stubs, ahead of Phase 4's real Resend wiring).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
