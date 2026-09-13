@@ -1703,5 +1703,65 @@ hardened everything built across 3.3–3.7; no backend changes this prompt.
   regression pass on Phase 0/1/2 invariants under the finished UI, plus the two nav-gap
   closures flagged above).
 
+Phase 3, prompt 3.9 (wrap-up verification) is complete. **Phase 3 is functionally done and
+verified end-to-end against real, concurrent live-stack activity — with one known gap flagged
+below, not fixed in this prompt (verification-only scope).** No application code changed this
+prompt; only test/build/live-data verification.
+- Rebuilt `api`/`worker`/`worker-eu-west` images fresh and ran both suites: **89 tests total
+  (53 backend + 36 worker)**, all passing — up from 74 at Phase 2's close, with every net-new
+  test attributable to 3.6/3.7's small backend additions (worker suite untouched at 36,
+  confirming Phase 3 never touched worker code). `tsc --noEmit` and `next build` both clean;
+  9 routes in the build output confirms the 3.3 scratch route is genuinely gone.
+- **Re-confirmed the 3.5 data-shape bugfix with entirely fresh real data**: created a new
+  target, let both region workers check it for real, then diverged the two regions via direct
+  DB mutation + `pg_notify` (not touching `next_check_at`, avoiding a worker race) —
+  `eu-west`→down, `local`→degraded. Dashboard showed both correctly, side by side, never
+  "Pending." From the same open tab, flipped `local` back to up and confirmed the row updated
+  and a toast fired ("local — Degraded → Reporting up") with no reload.
+- **Detail view**: confirmed a previously-untested code path — an **ongoing** incident (down
+  region with no recovery yet) renders "→ ongoing" / "duration unknown" correctly, not a
+  broken duration. Region-tab switching correctly swapped every widget (gauge/chart/waterfall/
+  heatmap/incidents/cert) between genuinely independent per-region data — 0.0% SLA/red/ongoing
+  incident on one region, 100.0% SLA/green/no-downtime on the other, same target.
+- **Settings**: toggled a preference and confirmed via a fresh `/auth/login` response (not just
+  the UI's own success state) that it persisted server-side.
+- **Phase 0-2 regression checks, all held**: ownership (404-not-403 cross-user on every
+  endpoint including the 3.6 detail/checks routes, 401 anonymous everywhere); rate limiting
+  (register 3→429 and target-creation 10→429 confirmed exact; login/change-password 5/min
+  confirmed correct once accounting for a prior request from my own verification script in the
+  same window — a test-ordering artifact, not a regression); `JWT_SECRET` fail-fast (stripped
+  from `.env`, real container crash with the same `ValidationError` every prior wrap-up has
+  hit, byte-identical `.env` restored via diff, clean recovery); cookie flags (`HttpOnly;
+  SameSite=lax` confirmed, `Secure` correctly absent in local dev); per-user SSE filtering
+  (the strongest test yet — two concurrent `curl -N` streams under real background worker
+  traffic; User B's stream received many real events, all for User B's own targets, never once
+  for User A's, proving isolation holds under real concurrent load, not just an idle
+  single-event check).
+- **Per-region independence (Phase 2 guarantee)**: holds completely — verified visually at
+  every level of the detail page, not just in the API response shape.
+- Accessibility/responsive items from 3.8 (focus ring on the target-row link, dark-on-red
+  Delete button text, mobile chart rendering) all visibly held up throughout this walkthrough's
+  screenshots without any dedicated re-testing needed.
+- All verification users/targets created this prompt deleted afterward; confirmed via the live
+  API that both walkthrough users have zero targets remaining. Docker stack and the port-3000
+  dev server both confirmed healthy before finishing.
+- **Known gap, explicitly not fixed here (out of this prompt's verification-only scope)**: the
+  two navigation gaps flagged since 3.6/3.7 are still open — nothing links to
+  `/dashboard/[id]` or `/settings` from the list view. Recommended as a small, quick follow-up
+  before treating Phase 3 as truly shippable, rather than carrying it silently into Phase 4.
+- **`consecutive_failures`-based degraded trigger (deferred since 3.1)**: recommended staying
+  deferred — not because it's not worth doing, but because Phase 4's alerting/cooldown logic
+  will need to reason about `consecutive_failures`/backoff state directly anyway, so exposing
+  it once for both purposes together is more efficient than a standalone Phase 3 addition now.
+
+**Phase 3 is complete.** Tokens/tooling, bespoke primitives, auth/static pages, the dashboard
+list (with its real bugfix), the detail/analytics view, settings, and a motion/accessibility/
+contrast polish pass are all built, tested, and verified against real concurrent live-stack
+activity — not just individually, but together. **Next: Phase 4 — Alerting + compliance
+export** (Resend downtime + cert-expiry alerts with a cooldown, CSV/PDF export) per CLAUDE.md's
+phase plan. Recommend closing the two navigation gaps above first, and building the
+`consecutive_failures` exposure as part of the alerting/cooldown work rather than bolting it on
+separately.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
