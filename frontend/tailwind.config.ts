@@ -53,7 +53,10 @@ export default {
           DEFAULT: 'var(--accent)',
           foreground: 'var(--accent-foreground)',
         },
-        destructive: 'var(--destructive)',
+        destructive: {
+          DEFAULT: 'var(--destructive)',
+          foreground: 'var(--destructive-foreground)',
+        },
         input: 'var(--input)',
         ring: 'var(--ring)',
       },

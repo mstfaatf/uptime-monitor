@@ -17,6 +17,16 @@
     --signal-warning: #ffc53d;
     --signal-down: #ff4444;
     --signal-pending: #5b6660;
+    /* Text-safe variant of --signal-pending — WCAG contrast audit (prompt 3.8): the raw
+       #5b6660 is fine as a graphic/icon fill (>=3:1 against every surface tier, the non-text
+       threshold) but fails AA for actual text (as low as 2.89:1 on --bg-surface-raised,
+       against the 4.5:1 small-text requirement). This lightened value clears 4.5:1 against
+       all three surface tiers (4.54:1 on the hardest case, --bg-surface-raised) — use it
+       anywhere the "muted/no-data" tone is rendered as small text, not the raw token. Large
+       text (>=~24px / 18.66px bold) may still use the raw --signal-pending directly, since it
+       only needs to clear 3:1, which it does (3.05:1 on --bg-surface, its tightest case).
+       Icons/graphics keep using the raw token unconditionally. */
+    --signal-pending-text: #7c8580;
 
     --radius-sm: 2px;
     --radius: 4px;
@@ -42,6 +52,12 @@
     --accent: var(--bg-surface-raised);
     --accent-foreground: var(--text-primary);
     --destructive: var(--signal-down);
+    /* Contrast audit (3.8): Button's destructive variant references text-destructive-foreground,
+       which was never defined here — Tailwind silently generated no rule for it, so the text
+       fell back to inherited --text-primary on a --signal-down background at 2.94:1, failing
+       even AA-large. --bg-base clears 5.69:1 against --signal-down (same dark-on-bright
+       pairing already used for the primary button). */
+    --destructive-foreground: var(--bg-base);
     --input: var(--border);
     --ring: var(--text-primary);
   }
@@ -55,6 +71,15 @@
     @apply bg-background text-foreground font-sans;
     padding: 1rem;
     line-height: 1.5;
+  }
+  /* Consistent keyboard focus everywhere (3.8 audit): shadcn's Button/Input/Switch already
+     ring in --ring via Tailwind's focus-visible:ring-* utilities, but plain <a> links (nav,
+     target rows, footer) had no explicit focus style and fell back to each browser's own
+     default outline — present, but not on-brand and not visually consistent with everything
+     else. This makes every link's focus indicator match. */
+  a:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
   }
 }
 

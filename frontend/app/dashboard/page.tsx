@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { API_BASE, apiFetch, apiJson } from "@/lib/api";
-import { SignalLight, type SignalState } from "@/components/signal-light";
+import { SignalLight, SIGNAL_STATE_LABELS, type SignalState } from "@/components/signal-light";
 import { LatencyGauge } from "@/components/latency-gauge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -66,6 +67,23 @@ function deriveState(check: LatestCheck | undefined): SignalState {
   return slow || certExpiringSoon ? "degraded" : "up";
 }
 
+// A real-time state change is worth interrupting the user for even if they're not looking at
+// the row that changed — that's the whole point of a toast here, as opposed to the row's own
+// SignalLight flip, which only helps if they're already looking at it.
+function notifyTransition(target: TargetStatusRow, region: string, from: SignalState, to: SignalState) {
+  const label = target.name || target.url;
+  const description = `${region} — ${SIGNAL_STATE_LABELS[from]} → ${SIGNAL_STATE_LABELS[to]}`;
+  if (to === "down") {
+    toast.error(label, { description });
+  } else if (to === "degraded") {
+    toast.warning(label, { description });
+  } else if (to === "up") {
+    toast.success(label, { description });
+  } else {
+    toast(label, { description });
+  }
+}
+
 function RegionBadge({ region }: { region: string }) {
   return (
     <span
@@ -99,6 +117,12 @@ export default function DashboardPage() {
   // a per-row hover effect, never scroll-triggered.
   const [revealedCount, setRevealedCount] = useState(0);
   const [revealComplete, setRevealComplete] = useState(false);
+
+  // Tracks the last known state per "targetId:region", so an incoming SSE push can be compared
+  // against what we actually knew before — not re-derived from nothing — to tell a real
+  // transition (up -> down) from just a fresh timestamp on an unchanged state. Seeded once
+  // after initial load (see the effect below), not on every render.
+  const prevStatesRef = useRef<Record<string, SignalState>>({});
 
   const loadStatus = useCallback(async () => {
     setError("");
@@ -176,6 +200,21 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
 
+  useEffect(() => {
+    if (loading) return;
+    // Seed the transition-tracking baseline from whatever the initial load returned, exactly
+    // once — so the first SSE push compares against real prior state instead of nothing (which
+    // would otherwise either toast a false "transition" from undefined, or never toast at all).
+    const next: Record<string, SignalState> = {};
+    for (const item of items) {
+      for (const [region, check] of Object.entries(item.latest_checks)) {
+        next[`${item.id}:${region}`] = deriveState(check);
+      }
+    }
+    prevStatesRef.current = next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
   // Real-time push: once the initial poll has confirmed we're authenticated, open an SSE
   // subscription for check-result updates on our own targets. The browser's EventSource
   // auto-reconnects on its own after a drop (with backoff), so no manual retry loop is needed
@@ -195,6 +234,20 @@ export default function DashboardPage() {
       try {
         const message = JSON.parse(event.data) as { type: string; target: TargetStatusRow };
         if (message.type !== "check_update") return;
+
+        // Compare each region's new state against what we last knew, and toast on a genuine
+        // transition — only when there was a real prior state to transition from (the first
+        // reading for a region is "new data," not a "change" worth interrupting anyone for).
+        for (const [region, check] of Object.entries(message.target.latest_checks)) {
+          const key = `${message.target.id}:${region}`;
+          const newState = deriveState(check);
+          const prevState = prevStatesRef.current[key];
+          if (prevState && prevState !== newState) {
+            notifyTransition(message.target, region, prevState, newState);
+          }
+          prevStatesRef.current[key] = newState;
+        }
+
         setItems((prev) =>
           prev.map((item) => (item.id === message.target.id ? message.target : item))
         );
@@ -307,7 +360,7 @@ export default function DashboardPage() {
             <span
               className="font-mono text-xs"
               title={live ? "Live updates connected" : "Live updates disconnected — retrying"}
-              style={{ color: live ? "var(--signal-up)" : "var(--signal-pending)" }}
+              style={{ color: live ? "var(--signal-up)" : "var(--signal-pending-text)" }}
             >
               ● {live ? "live" : "reconnecting…"}
             </span>

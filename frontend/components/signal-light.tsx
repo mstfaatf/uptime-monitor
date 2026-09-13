@@ -2,7 +2,9 @@ import { cn } from "@/lib/utils";
 
 export type SignalState = "up" | "degraded" | "down" | "pending";
 
-const LABELS: Record<SignalState, string> = {
+// Exported so anything reporting a state change in words (e.g. the dashboard's real-time
+// toasts) uses this exact locked microcopy instead of re-typing its own copy of it.
+export const SIGNAL_STATE_LABELS: Record<SignalState, string> = {
   up: "Reporting up",
   degraded: "Degraded",
   down: "No signal",
@@ -53,7 +55,7 @@ export function SignalLight({ state, size = "md", showLabel = false, className }
         height={height}
         viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
         role="img"
-        aria-label={LABELS[state]}
+        aria-label={SIGNAL_STATE_LABELS[state]}
       >
         <rect
           x={1}
@@ -93,7 +95,7 @@ export function SignalLight({ state, size = "md", showLabel = false, className }
       </svg>
       {showLabel && (
         <span className="font-mono text-sm" style={{ color: "var(--text-secondary)" }}>
-          {LABELS[state]}
+          {SIGNAL_STATE_LABELS[state]}
         </span>
       )}
     </span>

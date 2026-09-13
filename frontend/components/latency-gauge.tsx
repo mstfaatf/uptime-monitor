@@ -79,7 +79,7 @@ export function LatencyGauge({
 
   const zoneColor =
     value == null
-      ? "var(--signal-pending)"
+      ? "var(--signal-pending-text)" // small text — see globals.css's contrast note
       : value <= goodMs
         ? "var(--signal-up)"
         : value <= warnMs

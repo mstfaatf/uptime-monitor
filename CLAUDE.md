@@ -1600,5 +1600,108 @@ logic built (that's still entirely Phase 4).
   also close the two known navigation gaps (dashboard → detail page, and a settings link)
   flagged in 3.6 and here.
 
+Phase 3, prompt 3.8 (motion, accessibility, and contrast polish pass) is complete. Audited and
+hardened everything built across 3.3–3.7; no backend changes this prompt.
+- Removed the 3.3 scratch route (`app/dev/`) — confirmed gone from the build output (9 routes,
+  was 10).
+- **Motion audit**: grepped the whole frontend for `transition`/`animate-`/`hover:`/
+  `IntersectionObserver` — found only the two intentional custom transitions (`.signal-dot`,
+  `.gauge-needle`), standard shadcn interactive-state transitions on real controls (button/
+  input/switch/link hover+focus color changes — functional feedback, not decorative), and the
+  dashboard's one load-in sequence. **Confirmed the dashboard load-in is the only multi-element
+  entrance animation** — the landing hero's power-on (3.4) is single-element and reuses the
+  same `.signal-dot` mechanism, not a second animation system. No accidental scroll-triggered
+  fades or per-card hover effects found anywhere; nothing to remove.
+- **Toast notifications**: added `sonner` (shadcn's `Toaster` wrapper simplified to drop its
+  `next-themes` dependency — this app is permanently dark, decided in 3.2, so a runtime theme
+  hook was dead weight; hardcoded `theme="dark"` instead, and stripped `shadow-lg` like every
+  other primitive). Dashboard now tracks each region's last-known state in a ref, seeded once
+  after initial load, and compares against it on every SSE push — a toast fires only on a
+  genuine transition (never on the first reading for a region, which is "new data" not "a
+  change"). Exported `SIGNAL_STATE_LABELS` from `signal-light.tsx` so the toast text reuses the
+  exact locked microcopy instead of a re-typed copy. Verified live against the real backend:
+  drove a genuine up→down transition via a direct DB mutation + `pg_notify` (matching the wire
+  format from `backend/realtime.py`) into an already-connected SSE session and confirmed the
+  toast fired with correct text/color and the row/summary strip updated in the same push.
+- **`prefers-reduced-motion` audit, confirmed component by component**: `SignalLight`/
+  `LatencyGauge` — re-confirmed via the same Playwright `emulateMedia` technique from 3.3
+  (0.18s/0.35s → 0s). Dashboard load-in — explicitly checks `matchMedia` and jumps straight to
+  fully-revealed. Toasts — read `sonner`'s own bundled CSS directly (`node_modules/sonner/dist/
+  styles.css`) and confirmed it ships `@media (prefers-reduced-motion) { ... transition: none
+  !important; animation: none !important; }` on the toast element itself, so no extra wiring
+  was needed. Landing hero's power-on inherits `SignalLight`'s handling automatically (it's a
+  prop change, not separate animation code). All five collapse to an instant/static state
+  without hiding any information, not just skipping to a blank state.
+- **Contrast audit, computed exactly (WCAG relative-luminance formula, not eyeballed)** against
+  all three surface tiers:
+  - `--signal-up` (14.7–13.1:1), `--signal-warning` (12.3–10.9:1), `--signal-down`
+    (5.7–5.1:1), `--text-primary` (16.8–14.9:1), `--text-secondary` (6.4–5.7:1) — **all already
+    clear AA for text on every background tier, no adjustment needed.** The "neon" colors
+    read as harsh but are in fact high-luminance against this near-black palette — it's the
+    muted tone that actually fails.
+  - `--signal-pending` (#5b6660) is the one real failure: 3.25:1 on `--bg-base`, 2.89:1 on
+    `--bg-surface-raised` — fails AA-text (4.5:1) everywhere and fails even AA-large (3:1) on
+    the raised tier. It's fine as a **graphic/icon fill** (heatmap no-data cells, legend
+    swatches — non-text UI only needs 3:1, and those sit on `--bg-base`/`--bg-surface` where it
+    clears). Added **`--signal-pending-text: #7c8580`** — a lightened variant clearing 4.5:1
+    against all three tiers (4.54:1 on the hardest case) — and swapped the two places it was
+    actually rendered as small text: `LatencyGauge`'s null-value label and the dashboard's
+    "reconnecting…" indicator. Left the detail page's null-SLA readout on the raw token
+    deliberately — it's `text-3xl` (large text, only needs 3:1, clears at 3.05:1 on its actual
+    `--bg-surface` context).
+  - **Found a second, unrelated real bug while doing this audit**: shadcn's `Button` component
+    references a `text-destructive-foreground` Tailwind class that was never defined anywhere
+    in `tailwind.config.ts` — Tailwind silently generated no rule for it, so every destructive
+    button's text (the dashboard's "Delete") fell back to inherited `--text-primary` on a
+    `--signal-down` background at **2.94:1, failing even AA-large**. Added
+    `--destructive-foreground: var(--bg-base)` (5.69:1 against `--signal-down`, the same
+    dark-on-bright pairing the primary button already uses) and wired it into
+    `tailwind.config.ts`'s `destructive` color as `{DEFAULT, foreground}`. Confirmed visually
+    with a close-up screenshot: was near-white-on-red, now clearly dark-on-red.
+  - **Flagged, not fixed**: `--border` (#232b27) against `--bg-base` is 1.34:1 — well under the
+    3:1 WCAG 1.4.11 threshold for non-text UI boundaries (relevant to shadcn `Input`, which
+    relies on `border` alone with no background fill to mark its boundary). This is outside
+    the prompt's literal scope (signal colors for text use) and, unlike `signal-pending-text`,
+    would mean changing one of the ten originally-locked hex tokens rather than adding a new
+    derived variant — not something to silently override. Flagging the exact number for a
+    decision, not fixing it.
+- **Keyboard focus audit**: shadcn's `Button`/`Input`/`Switch` already ring in `--ring` via
+  Tailwind's `focus-visible:ring-*` utilities (confirmed via computed styles, not just source
+  reading: every one showed a `1–2px` box-shadow ring in `rgb(236, 239, 237)` = `--text-primary`
+  = `--ring`). Plain `<a>` links (nav, target rows, footer, "back" links) had no explicit style
+  and fell back to each browser's own default outline — present, but inconsistent and off-brand.
+  Added one base-layer rule, `a:focus-visible { outline: 2px solid var(--ring); outline-offset:
+  2px; }`, so every link now matches the same `--ring` color buttons/inputs already use.
+  Confirmed no custom click targets exist outside real `<button>`/`<a>` elements (grepped every
+  `onClick` — all on shadcn `Button`s), so nothing is keyboard-unreachable.
+- **Responsive re-check across every Phase 3 page** at 400px width, fresh (not just trusting
+  each prompt's own earlier pass, since this prompt's global token/CSS changes touch all of
+  them): landing, about, login, register, dashboard (including the live toast), detail page,
+  and settings all held up with no new issues from this prompt's changes.
+- **Final screenshot self-critique across all pages against the 3.1 avoid-list**: clean. No
+  Inter/gradient, no uniform soft-shadow card grid (every bordered section is a genuine content
+  group, never decorative filler, and none carry a drop shadow), no all-caps eyebrow labels, no
+  arrow appended to button/link text (the leading "←" back-links and the toast/incident-timeline
+  "→" transition notation are wayfinding/data notation, not the decorative trailing-CTA-arrow
+  tell — same reasoning as 3.6/3.7, re-confirmed), no middle-dot-joined meta text, numbered
+  markers used in exactly the one earned place (incident timeline), no single-word headline
+  color accent.
+- **Dev-server discipline maintained**: ran `next build` exactly once this prompt, after all
+  other live-stack verification was done (to minimize how many times the shared `.next`
+  corruption from prompt 3.7's finding would hit), then restarted the port-3000 dev server
+  immediately after and confirmed it healthy before finishing.
+- All verification users/targets created this prompt were deleted afterward; confirmed via the
+  live API. Docker stack confirmed healthy (`docker compose ps`) before finishing.
+- **Known gaps carried forward, still not fixed** (out of scope for this prompt's literal ask,
+  which was motion/contrast/focus/responsive/self-critique, not navigation): nothing links to
+  `/dashboard/[id]` or `/settings` from the list view yet (flagged in 3.6 and 3.7). Genuinely
+  the last two loose threads before Phase 3 can be called done — recommend closing both in the
+  3.9 wrap-up prompt itself, or a final 3.8.5-style micro-prompt just before it, since 3.9 is
+  meant to be verification, not new UI work.
+- Not touched in this prompt: any backend code, any page's actual content/copy, alerting/
+  email-sending logic. Next per the 3.1 build order: prompt 3.9 — final verification (full
+  regression pass on Phase 0/1/2 invariants under the finished UI, plus the two nav-gap
+  closures flagged above).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
