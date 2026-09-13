@@ -1170,5 +1170,70 @@ this up cold.
   `/settings` → 3.8 motion/polish pass → 3.9 verification. No code changes made pending review
   of this plan.
 
+Phase 3, prompt 3.2 (design system foundation: tokens + tooling) is complete. Tokens and
+tooling only, per this prompt's scope — no `SignalLight`/`LatencyGauge`, no page redesign.
+- Installed Tailwind CSS v3 (not v4): the current `shadcn` CLI (v4.21.0) defaults to Tailwind
+  v4's CSS-native theming (no `tailwind.config.ts`, `@theme` blocks instead), which conflicts
+  with this prompt's explicit instruction to override the palette/radius in
+  `tailwind.config.ts`. Used `shadcn@2.10.0` instead — the last line compatible with Tailwind
+  v3's JS-config workflow — via `npx shadcn@2.10.0 init -y -d -b neutral --css-variables`.
+  Flagging the version pin here since it's a real, deliberate deviation from "just run
+  `shadcn init`" and future component adds (`npx shadcn add <component>`) need the same
+  `@2.10.0` pin or they'll hit the same v3/v4 mismatch.
+- `app/globals.css`: the ten locked tokens (`--bg-base`, `--bg-surface`,
+  `--bg-surface-raised`, `--border`, `--text-primary`, `--text-secondary`, `--signal-up`,
+  `--signal-warning`, `--signal-down`, `--signal-pending`) plus `--radius-sm`/`--radius` are
+  now the only hex literals anywhere in the frontend (verified via a full-tree grep before
+  committing). shadcn's semantic CSS slots (`--background`, `--foreground`, `--card`,
+  `--popover`, `--primary`, `--secondary`, `--muted`, `--accent`, `--destructive`, `--input`,
+  `--ring`) are kept — future `shadcn add` components depend on those exact utility classes
+  existing — but every one is aliased onto the locked tokens (`var(--bg-base)` etc.), not left
+  at shadcn's generated oklch neutral scale. No brand/CTA accent color exists in the locked
+  palette, so `--primary` deliberately stays monochrome (near-white on near-black) rather than
+  inventing one — flagged for reconsideration in 3.4 once real buttons get built. Dropped
+  shadcn's generated `--chart-*`/`--sidebar-*` slots and the light/dark (`.dark` class) split
+  entirely — this app is one permanent dark theme, no toggle planned, so keeping unused
+  duplicate tokens would violate the project's own anti-premature-abstraction rule.
+- `tailwind.config.ts`: colors reference the CSS vars directly (`var(--signal-up)`, not
+  `hsl(var(--signal-up))`) since the tokens are already exact hex, not HSL triplets — matches
+  the 3.1 report's reasoning. `borderRadius.DEFAULT/sm/md/lg` all resolve to `var(--radius)`
+  (4px) or `var(--radius-sm)` (2px) — confirmed via the compiled build CSS that no `0.5rem`/
+  `8px` (shadcn's default) or `oklch(...)` survives anywhere in the output.
+  `postcss.config.js` had to be rewritten from `tailwindcss init`'s generated ESM
+  `export default` form to plain CommonJS `module.exports` — the ESM form broke `next/font`
+  with "must export a `plugins` key" under Next 14's webpack config loader.
+- `app/layout.tsx`: IBM Plex Sans (weights 400/500/600) and IBM Plex Mono (400/500) wired via
+  `next/font/google`, exposed as `--font-sans`/`--font-mono` on `<html>`, consumed by
+  `tailwind.config.ts`'s `fontFamily`. Verified in the compiled output: both fonts are
+  self-hosted `@font-face` declarations (no runtime Google Fonts request) and the classes land
+  on `<html>` in a real rendered page.
+- Retired `globals.css`'s two rules now fully superseded by Tailwind's preflight
+  (`* { box-sizing: border-box }`, `input, button { font: inherit }`) — genuinely dead, zero
+  behavior change. Did **not** delete the other hand-rolled component classes (`.form-group`,
+  `.btn`, `.btn-danger`, `.status-*`, table styles, `.add-target-form`, `.error-message`/
+  `.success-message`) — every current page's JSX still references those exact classNames and
+  no page gets touched until 3.4/3.5, so deleting them now would break rendering. Instead,
+  retokenized every hardcoded hex value inside them (mapped to the closest-matching locked
+  token) and replaced ad hoc hover-darken hex values with `filter: brightness(0.85)` on the
+  existing token, so no invented colors were added. `dashboard/page.tsx`'s two inline-style
+  hex literals (`:234-239`'s live-indicator dot, `:312`'s URL-subtitle text) were updated to
+  `var(--signal-up)`/`var(--signal-pending)` and `var(--text-secondary)` respectively — the one
+  explicitly-scoped exception to "don't touch pages" this prompt, since leaving known-dead hex
+  in place was explicitly called out as unacceptable.
+- **Degraded-state threshold contract, now locked for 3.3/3.5 to build against**:
+  `latency_ms > 800` OR `tls_cert_days_remaining <= 14` (when non-null) → degraded, exactly as
+  proposed in 3.1. Not implemented yet (no page touched this prompt) — this is the frozen
+  number contract, not code. The `consecutive_failures`/backoff-based degraded trigger remains
+  explicitly deferred/flagged, not built, per this prompt's scope.
+- Verified end-to-end: `tsc --noEmit` clean, `next build` succeeds (all 4 routes), and a real
+  dev-server request to `/login` on a scratch port confirmed the dark palette/fonts actually
+  apply in rendered HTML (not just present in source) — grepped the compiled CSS output
+  directly for zero remaining `oklch(`/`hsl(var`/`0.5rem`/`8px` and confirmed all ten locked
+  hex tokens plus both radius values are present.
+- Not touched in this prompt (explicitly out of scope, per the prompt): `SignalLight`,
+  `LatencyGauge`, any page redesign, the `consecutive_failures` backend field. Next per the
+  3.1 build order: prompt 3.3 — build the two bespoke primitives in isolation before wiring
+  them into real pages.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

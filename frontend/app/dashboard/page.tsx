@@ -234,7 +234,7 @@ export default function DashboardPage() {
           title={live ? "Live updates connected" : "Live updates disconnected — retrying"}
           style={{
             fontSize: "0.6em",
-            color: live ? "#1a7f37" : "#999",
+            color: live ? "var(--signal-up)" : "var(--signal-pending)",
             verticalAlign: "middle",
           }}
         >
@@ -309,7 +309,7 @@ export default function DashboardPage() {
                           {row.name || row.url}
                         </a>
                         {row.name && (
-                          <span style={{ display: "block", fontSize: "0.875rem", color: "#666" }}>
+                          <span style={{ display: "block", fontSize: "0.875rem", color: "var(--text-secondary)" }}>
                             {row.url}
                           </span>
                         )}
