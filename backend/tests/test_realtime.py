@@ -61,20 +61,25 @@ async def test_handle_notification_resolves_owner_and_publishes_full_status_payl
     other_queue = realtime.subscribe(user_id + 999999)  # some other, unrelated user
     my_queue = realtime.subscribe(user_id)
     try:
-        await realtime._handle_notification(str(target_id))
+        await realtime._handle_notification(f"{target_id}:local")
 
         assert other_queue.empty()
         message = my_queue.get_nowait()
         assert message["type"] == "check_update"
+        assert message["region"] == "local"
         assert message["target"]["id"] == target_id
-        assert message["target"]["latest_check"] is None  # no check inserted yet
+        assert message["target"]["latest_checks"] == {}  # no check inserted yet, in any region
     finally:
         realtime.unsubscribe(user_id, my_queue)
         realtime.unsubscribe(user_id + 999999, other_queue)
 
 
-async def test_handle_notification_ignores_malformed_payload():
-    await realtime._handle_notification("not-an-integer")  # must not raise
+async def test_handle_notification_ignores_payload_missing_region():
+    await realtime._handle_notification("not-an-integer")  # no ":region" suffix — must not raise
+
+
+async def test_handle_notification_ignores_non_numeric_target_id():
+    await realtime._handle_notification("not-an-integer:local")  # must not raise
 
 
 async def test_handle_notification_for_a_deleted_target_is_a_noop(client):
@@ -85,4 +90,4 @@ async def test_handle_notification_for_a_deleted_target_is_a_noop(client):
     target_id = created.json()["id"]
     await client.delete(f"/targets/{target_id}")
 
-    await realtime._handle_notification(str(target_id))  # must not raise
+    await realtime._handle_notification(f"{target_id}:local")  # must not raise

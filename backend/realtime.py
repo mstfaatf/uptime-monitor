@@ -1,15 +1,26 @@
 """In-process pub/sub that pushes check-result updates to connected SSE clients.
 
-The worker NOTIFYs (via pg_notify) with a target_id after each check commits. This module
-holds one long-lived LISTEN connection, resolves each notified target_id to its owning
-user_id, and forwards the event only to that user's connected SSE queue(s) — routers/targets.py's
-/targets/stream endpoint never sees another user's data, because it's never put in its queue in
-the first place. This is what makes the ownership guarantee hold for push, not just for the
-regular REST endpoints.
+The worker NOTIFYs (via pg_notify) with a "{target_id}:{region}" payload after each check
+commits — see backend/alembic/versions/006_add_region_and_target_schedule.py for why a check
+now belongs to a region. This module holds one long-lived LISTEN connection, resolves each
+notified target_id to its owning user_id, and forwards the event only to that user's connected
+SSE queue(s) — routers/targets.py's /targets/stream endpoint never sees another user's data,
+because it's never put in its queue in the first place. This is what makes the ownership
+guarantee hold for push, not just for the regular REST endpoints; it holds regardless of which
+region triggered the notification, since resolution is by target_id, not by region.
 
-NOTIFY_CHANNEL must match the literal string the worker NOTIFYs on (worker/main.py). The two
-services are deployed independently (see backend/security/ssrf.py's docstring for the same
-"deliberately duplicated, not shared" reasoning), so this is kept in sync by hand, not import.
+The pushed payload always carries the target's *complete* latest_checks (every region's most
+recent result, the same shape GET /targets/status returns) rather than just the one region
+that changed — `region` is included at the top level purely to say which region's check
+triggered this particular event, not to scope what data comes back. This preserves the
+existing "one shape decides what a target status looks like" invariant (see
+build_target_status_payload in routers/targets.py) instead of forcing the frontend to merge
+partial per-region deltas.
+
+NOTIFY_CHANNEL and the "{target_id}:{region}" payload format must match what the worker
+NOTIFYs (worker/main.py). The two services are deployed independently (see
+backend/security/ssrf.py's docstring for the same "deliberately duplicated, not shared"
+reasoning), so this is kept in sync by hand, not import.
 """
 
 import asyncio
@@ -58,10 +69,16 @@ def _publish(user_id: int, payload: dict) -> None:
 
 async def _handle_notification(payload: str) -> None:
     """Resolve a notified target_id to its owner and publish the same status payload the
-    REST endpoint would return for it, so the frontend never needs a follow-up fetch."""
+    REST endpoint would return for it (every region's latest check), so the frontend never
+    needs a follow-up fetch. payload is "{target_id}:{region}"; region is carried through into
+    the published event purely to say which region's check triggered it."""
+    target_id_str, sep, region = payload.partition(":")
+    if not sep:
+        logger.warning("Ignoring malformed check notification payload (missing region): %r", payload)
+        return
     try:
-        target_id = int(payload)
-    except (TypeError, ValueError):
+        target_id = int(target_id_str)
+    except ValueError:
         logger.warning("Ignoring malformed check notification payload: %r", payload)
         return
 
@@ -69,19 +86,20 @@ async def _handle_notification(payload: str) -> None:
     # top-level import here would be circular. By the time this coroutine actually runs, both
     # modules are already fully loaded, so a local import is safe and cheap (module lookup,
     # not re-execution).
-    from routers.targets import _latest_check_query, build_target_status_payload
+    from routers.targets import _group_checks_by_target, _latest_checks_per_region_query, build_target_status_payload
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(_latest_check_query(target_id=target_id))
-        row = result.first()
-        if row is None:
+        result = await session.execute(_latest_checks_per_region_query(target_id=target_id))
+        rows = result.all()
+        if not rows:
             # The target was deleted between the NOTIFY firing and this lookup running —
             # nothing to push, and (since it's gone) no owner to push it to.
             return
-        target, check = row
-        payload_dict = build_target_status_payload(target, check)
+        targets_by_id, checks_by_target = _group_checks_by_target(rows)
+        target = targets_by_id[target_id]
+        payload_dict = build_target_status_payload(target, checks_by_target[target_id])
 
-    _publish(target.user_id, {"type": "check_update", "target": payload_dict})
+    _publish(target.user_id, {"type": "check_update", "region": region, "target": payload_dict})
 
 
 async def run_listener() -> None:

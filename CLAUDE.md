@@ -948,5 +948,78 @@ order. **This restores real worker scheduling**, ending the temporary regression
   point an ADR documenting the SKIP LOCKED + region-scoping decision should also be written
   per CLAUDE.md rule 5.
 
+Phase 2, prompt 2.6 (backend/API + SSE region-awareness) is complete — step 5 of the 2.1
+build order, and **the last piece of Phase 2's backend/worker work**. Frontend dashboard
+changes remain explicitly out of scope (Phase 3), per the 2.1 report.
+- **API shape chosen**: `TargetStatusResponse.latest_check: LatestCheckResponse | None` →
+  `latest_checks: dict[str, LatestCheckResponse]`, keyed by region. A target with no checks
+  yet in any region now reports `{}` rather than `null` — a target is never dropped from the
+  response just because one (or every) region lacks data yet. **No derived "overall status"
+  field was added**, per the 2.1 report's explicit recommendation: collapsing multiple
+  regions into one boolean would hide exactly the per-region signal multi-region checking
+  exists to show; a future summary (if ever needed) should say "X of N regions reporting
+  down" explicitly, never a silent boolean.
+- `backend/routers/targets.py`: `_latest_check_query` replaced by
+  `_latest_checks_per_region_query`, using a `ROW_NUMBER() OVER (PARTITION BY target_id,
+  region ORDER BY checked_at DESC)` subquery outer-joined to `targets`, returning one row per
+  `(target, region)` that has data (plus one `(target, None)` row for a target with none at
+  all). New `_group_checks_by_target` collapses those rows into `{target_id: Target}` /
+  `{target_id: {region: Check}}` — shared by both `GET /targets/status` and realtime's
+  single-target lookup, same "one place decides the shape" principle as before.
+  `build_target_status_payload` now takes a `checks_by_region` dict instead of a single
+  `Check | None` and returns the new `latest_checks` shape.
+- **pg_notify payload**: `worker/main.py` now sends `"{target_id}:{region}"` (was bare
+  `target_id`) — documented in both `worker/main.py`'s `NOTIFY_CHANNEL` comment and
+  `backend/realtime.py`'s module docstring as the exact wire format, kept in sync by hand
+  (same tradeoff as the SSRF-blocklist duplication). `realtime._handle_notification` parses
+  it (`partition(":")`, warns and no-ops on a missing region or non-numeric id — same
+  fail-safe style as the old bare-id parsing) and rebuilds the **complete** per-region
+  payload for that target (every region's latest check, not just the one that changed) via
+  `_latest_checks_per_region_query`/`_group_checks_by_target` — chosen deliberately over
+  shipping a partial single-region delta, so the existing "one shape, poll and push can never
+  drift apart" invariant from Phase 1 keeps holding without new merge logic anywhere. The
+  parsed `region` is still carried in the published event's top level (`{"type":
+  "check_update", "region": ..., "target": {...}}`) purely to say which region's check
+  triggered this event, for whatever the Phase 3 frontend wants to do with that (e.g.
+  highlighting) — it is not used to scope what data comes back.
+- **Confirmed timing/cert fields still flow through per region**: `_check_to_response_dict`
+  (renamed from the old inline block) builds the full `LatestCheckResponse` shape — including
+  `dns_ms`/`tcp_ms`/`tls_ms`/`ttfb_ms`/cert fields/derived `tls_cert_days_remaining` — for
+  each region's check independently, so the frontend never needs a follow-up fetch no matter
+  how many regions a target has.
+- Tests updated: `backend/tests/test_check_timing.py`'s assertions moved from
+  `latest_check` to `latest_checks["local"]`; `backend/tests/test_realtime.py`'s
+  notification tests updated for the `"{target_id}:{region}"` payload format (including a new
+  test for a payload with a colon but a non-numeric id, alongside the existing
+  missing-colon case) and the `latest_checks == {}` empty-state assertion. 38 backend tests
+  (was 37), all passing; 35 worker tests unaffected (no worker test asserts the exact
+  `pg_notify` payload string — that path is covered by live verification instead, below).
+- **Verified end-to-end against the real dev stack**, not just the test suite: registered two
+  real users via the live API, created a real target for user A, confirmed
+  `GET /targets/status` returns the new `latest_checks: {"local": {...full timing/cert
+  data...}}` shape; opened two real concurrent SSE connections (one per user) via `curl -N`,
+  forced a recheck of user A's target directly in the DB, and confirmed user A's stream
+  received a `{"type": "check_update", "region": "local", "target": {...}}` event with the
+  complete per-region payload while user B's stream received only a keep-alive — **per-user
+  isolation (the Phase 0/1 rule) holds exactly as before under the new region-aware payload**.
+  All verification users/targets/checks cleaned up afterward.
+- Not touched in this prompt (explicitly out of scope, per the prompt): any frontend/dashboard
+  code (`frontend/app/dashboard/page.tsx` still expects the old `latest_check` shape and will
+  need updating in Phase 3 — flagged, not silently left broken: this is a backend-only prompt
+  and the frontend wasn't running against this response shape as part of this prompt's
+  verification), any ADR.
+
+**Phase 2 (multi-region + coordination) is now functionally complete** on the backend/worker
+side: row-claiming, region config, per-region scheduling schema, region-scoped scheduling
+queries, and region-aware API/SSE payloads are all in place and verified end-to-end. Two
+items remain before Phase 2 is fully closed out per the original phase plan: (1) the ADR
+documenting the `SKIP LOCKED` + region-scoping coordination decision (CLAUDE.md rule 5 requires
+this for the multi-region coordination approach specifically), and (2) actually running a
+second worker instance with a distinct `REGION` concurrently against the same dev DB as a
+final integration proof (per the 2.1 report's own build order, this was always meant to be the
+last step, after every piece it depends on — which is now all in place). Phase 3 (UI refresh +
+analytics, including the dashboard consuming `latest_checks` per region) is the next phase
+after that per CLAUDE.md's phase plan.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

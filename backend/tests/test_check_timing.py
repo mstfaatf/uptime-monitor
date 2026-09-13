@@ -53,7 +53,7 @@ async def test_status_exposes_timing_breakdown(client):
 
     resp = await client.get("/targets/status")
     assert resp.status_code == 200
-    latest = resp.json()[0]["latest_check"]
+    latest = resp.json()[0]["latest_checks"]["local"]
     assert latest["dns_ms"] == 8
     assert latest["tcp_ms"] == 15
     assert latest["tls_ms"] == 40
@@ -73,7 +73,7 @@ async def test_status_derives_cert_days_remaining_at_read_time(client):
     )
 
     resp = await client.get("/targets/status")
-    latest = resp.json()[0]["latest_check"]
+    latest = resp.json()[0]["latest_checks"]["local"]
     assert latest["tls_cert_issuer"] == "commonName=Test CA"
     assert latest["tls_cert_expires_at"] is not None
     # Not stored — recomputed from tls_cert_expires_at on every read, so it lands right at 30
@@ -89,7 +89,7 @@ async def test_status_leaves_cert_fields_null_when_check_has_no_cert_data(client
     await _insert_check(target_id)  # defaults leave tls_cert_* null, e.g. an http:// target
 
     resp = await client.get("/targets/status")
-    latest = resp.json()[0]["latest_check"]
+    latest = resp.json()[0]["latest_checks"]["local"]
     assert latest["tls_cert_expires_at"] is None
     assert latest["tls_cert_issuer"] is None
     assert latest["tls_cert_days_remaining"] is None
@@ -104,5 +104,5 @@ async def test_status_reports_negative_days_remaining_for_an_expired_cert(client
     await _insert_check(target_id, tls_cert_expires_at=expired_at, tls_cert_issuer="commonName=Test CA")
 
     resp = await client.get("/targets/status")
-    latest = resp.json()[0]["latest_check"]
+    latest = resp.json()[0]["latest_checks"]["local"]
     assert latest["tls_cert_days_remaining"] < 0

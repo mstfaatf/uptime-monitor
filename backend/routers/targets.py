@@ -8,8 +8,9 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 import realtime
 from auth import get_current_user
@@ -89,53 +90,71 @@ class TargetStatusResponse(BaseModel):
     url: str
     name: str | None
     created_at: str
-    latest_check: LatestCheckResponse | None
+    # Keyed by region (see backend/alembic/versions/006_add_region_and_target_schedule.py),
+    # not a single latest_check — a target's reachability/latency is now tracked per checking
+    # region and each region's most recent result is reported independently. Deliberately no
+    # derived "overall status" field: collapsing multiple regions into one boolean would hide
+    # exactly the per-region signal this exists to show (see the Phase 2 design report). A
+    # target with no checks yet in any region reports an empty dict, not null.
+    latest_checks: dict[str, LatestCheckResponse]
 
 
-def build_target_status_payload(target: Target, check: Check | None) -> dict:
-    """Build the same {target + latest_check} shape used by GET /targets/status, for reuse by
+def _check_to_response_dict(check: Check) -> dict:
+    """Build the LatestCheckResponse-shaped dict for one check row."""
+    days_remaining = None
+    if check.tls_cert_expires_at is not None:
+        days_remaining = (check.tls_cert_expires_at - datetime.now(timezone.utc)).days
+    return {
+        "checked_at": check.checked_at.isoformat() if check.checked_at else None,
+        "is_up": check.is_up,
+        "status_code": check.status_code,
+        "latency_ms": check.latency_ms,
+        "error": check.error,
+        "dns_ms": check.dns_ms,
+        "tcp_ms": check.tcp_ms,
+        "tls_ms": check.tls_ms,
+        "ttfb_ms": check.ttfb_ms,
+        "tls_cert_expires_at": check.tls_cert_expires_at.isoformat() if check.tls_cert_expires_at else None,
+        "tls_cert_issuer": check.tls_cert_issuer,
+        "tls_cert_days_remaining": days_remaining,
+    }
+
+
+def build_target_status_payload(target: Target, checks_by_region: dict[str, Check]) -> dict:
+    """Build the same {target + latest_checks} shape used by GET /targets/status, for reuse by
     the SSE push in realtime.py — one place decides what a "target status" looks like, so the
-    two delivery paths (poll and push) can never silently drift apart."""
-    latest_check = None
-    if check:
-        days_remaining = None
-        if check.tls_cert_expires_at is not None:
-            days_remaining = (check.tls_cert_expires_at - datetime.now(timezone.utc)).days
-        latest_check = {
-            "checked_at": check.checked_at.isoformat() if check.checked_at else None,
-            "is_up": check.is_up,
-            "status_code": check.status_code,
-            "latency_ms": check.latency_ms,
-            "error": check.error,
-            "dns_ms": check.dns_ms,
-            "tcp_ms": check.tcp_ms,
-            "tls_ms": check.tls_ms,
-            "ttfb_ms": check.ttfb_ms,
-            "tls_cert_expires_at": check.tls_cert_expires_at.isoformat() if check.tls_cert_expires_at else None,
-            "tls_cert_issuer": check.tls_cert_issuer,
-            "tls_cert_days_remaining": days_remaining,
-        }
+    two delivery paths (poll and push) can never silently drift apart. checks_by_region holds
+    each region's single most recent check for this target (empty if none yet in any region)."""
     return {
         "id": target.id,
         "url": target.url,
         "name": target.name,
         "created_at": target.created_at.isoformat(),
-        "latest_check": latest_check,
+        "latest_checks": {region: _check_to_response_dict(check) for region, check in checks_by_region.items()},
     }
 
 
-def _latest_check_query(user_id: int | None = None, target_id: int | None = None):
-    """Shared query shape for "target(s) + their latest check": used by both the /status list
-    endpoint (filtered by user_id) and realtime's single-target lookup (filtered by target_id)."""
-    latest_check_id = (
-        select(Check.id)
-        .where(Check.target_id == Target.id)
-        .order_by(Check.checked_at.desc())
-        .limit(1)
-        .correlate(Target)
-        .scalar_subquery()
+def _latest_checks_per_region_query(user_id: int | None = None, target_id: int | None = None):
+    """Shared query shape for "target(s) + each region's latest check": used by both the
+    /status list endpoint (filtered by user_id) and realtime's single-target lookup (filtered
+    by target_id). Returns one (Target, Check) row per (target, region) that has at least one
+    check, plus one (Target, None) row for a target with no checks in any region yet — a
+    target is never dropped just because it (or one region) has no data."""
+    ranked = (
+        select(
+            Check,
+            func.row_number()
+            .over(partition_by=(Check.target_id, Check.region), order_by=Check.checked_at.desc())
+            .label("rn"),
+        )
+    ).subquery()
+    latest_check = aliased(Check, ranked)
+
+    stmt = (
+        select(Target, latest_check)
+        .select_from(Target)
+        .outerjoin(ranked, (ranked.c.target_id == Target.id) & (ranked.c.rn == 1))
     )
-    stmt = select(Target, Check).select_from(Target).outerjoin(Check, Check.id == latest_check_id)
     if user_id is not None:
         stmt = stmt.where(Target.user_id == user_id).order_by(Target.created_at.desc())
     if target_id is not None:
@@ -143,15 +162,34 @@ def _latest_check_query(user_id: int | None = None, target_id: int | None = None
     return stmt
 
 
+def _group_checks_by_target(rows) -> tuple[dict[int, Target], dict[int, dict[str, Check]]]:
+    """Collapse the (Target, Check|None) rows from _latest_checks_per_region_query — one row
+    per (target, region) — into per-target Target objects and {region: Check} dicts, preserving
+    the order targets first appeared in (the query's own ORDER BY, when applied)."""
+    targets_by_id: dict[int, Target] = {}
+    checks_by_target: dict[int, dict[str, Check]] = {}
+    for target, check in rows:
+        if target.id not in targets_by_id:
+            targets_by_id[target.id] = target
+            checks_by_target[target.id] = {}
+        if check is not None:
+            checks_by_target[target.id][check.region] = check
+    return targets_by_id, checks_by_target
+
+
 @router.get("/status", response_model=list[TargetStatusResponse])
 async def list_targets_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return each target owned by the user with its latest check (one per target, no duplicates)."""
-    result = await db.execute(_latest_check_query(user_id=current_user.id))
-    rows = result.all()
-    return [TargetStatusResponse(**build_target_status_payload(target, check)) for target, check in rows]
+    """Return each target owned by the user with its latest check per region (one target per
+    id, no duplicates; each region's own most recent result reported independently)."""
+    result = await db.execute(_latest_checks_per_region_query(user_id=current_user.id))
+    targets_by_id, checks_by_target = _group_checks_by_target(result.all())
+    return [
+        TargetStatusResponse(**build_target_status_payload(target, checks_by_target[target_id]))
+        for target_id, target in targets_by_id.items()
+    ]
 
 
 @router.get("/stream")
