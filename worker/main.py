@@ -201,11 +201,12 @@ async def check_one(
                     "tls_cert_expires_at": None,
                     "tls_cert_issuer": None,
                 }
-                logger.info("Target %s blocked (SSRF): %s", target_id, reason)
+                logger.info("[region=%s] Target %s blocked (SSRF): %s", settings.REGION, target_id, reason)
             else:
                 result = await check_url(client, url, dns_ms)
                 logger.info(
-                    "Target %s: %s %s ms (dns=%s tcp=%s tls=%s ttfb=%s) is_up=%s %s",
+                    "[region=%s] Target %s: %s %s ms (dns=%s tcp=%s tls=%s ttfb=%s) is_up=%s %s",
+                    settings.REGION,
                     target_id,
                     result["status_code"],
                     result["latency_ms"],
@@ -251,7 +252,9 @@ async def check_one(
             # a deleted target simply won't be selected again (its row, and next_check_at with
             # it, no longer exists); any other target's state is untouched by this one failing.
             logger.exception(
-                "Check failed for target %s (it may have been deleted mid-check)", target_id
+                "[region=%s] Check failed for target %s (it may have been deleted mid-check)",
+                settings.REGION,
+                target_id,
             )
 
 
@@ -275,7 +278,8 @@ async def run_cycle(pool: asyncpg.Pool, client: httpx.AsyncClient) -> None:
 
 async def main() -> None:
     logger.info(
-        "Worker starting (interval=%ss, tick=%ss, timeout=%ss, concurrency=%s)",
+        "Worker starting (region=%s, interval=%ss, tick=%ss, timeout=%ss, concurrency=%s)",
+        settings.REGION,
         settings.CHECK_INTERVAL_SECONDS,
         SCHEDULER_TICK_SECONDS,
         settings.HTTP_TIMEOUT_SECONDS,

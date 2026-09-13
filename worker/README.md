@@ -19,6 +19,7 @@ consistency with the `api` service, but nothing here currently reads a value fro
 | `CHECK_INTERVAL_SECONDS` | Seconds between full check cycles | `300` (5 min) |
 | `HTTP_TIMEOUT_SECONDS` | Timeout per HTTP request | `10` |
 | `HTTP_VERIFY_SSL` | Verify TLS certificates for checked URLs (`true`/`false`) | `true`. Set to `false` only for local/dev if CA verification fails (insecure). |
+| `REGION` | Identifies which region this worker instance is checking from. Tagged onto log lines now; will be tagged onto `checks` rows once the multi-region schema migration lands. Set a distinct value per instance (e.g. `us-east`, `eu-west`) once more than one worker runs. | `local` |
 
 ## Run locally
 

@@ -778,5 +778,33 @@ this prompt's scope.
   order, next is step 2 — `REGION` env var + worker config plumbing — before the bigger
   per-target-per-region schema migration (step 3).
 
+Phase 2, prompt 2.3 (`REGION` env var + worker config plumbing) is complete — step 2 of the
+2.1 build order. Config/logging only; no schema changes, no query-logic changes, per this
+prompt's scope.
+- `worker/config.py`'s `Settings` gained `REGION: str = "local"` — read once at startup the
+  same way every other worker setting is (no new pattern). Kept as a defaulted, optional field
+  for now per the 2.1 report's own recommendation; flagged in a comment to become required
+  (no default) once a real multi-region deployment is actually in view (Phase 5), so a
+  misconfigured worker instance can't silently report under the wrong or blank region.
+- `worker/main.py`: startup log line now includes `region=%s`; the three existing per-check
+  log lines (SSRF-blocked, normal check result, deleted-mid-check exception) now prefix
+  `[region=%s]` using `settings.REGION`. This is log-line tagging only — no new column, no
+  new function parameter threading region through `check_one`/`insert_check`/etc. — so
+  region-aware log greping/tests can be written now, ahead of the schema change that will
+  actually persist `region` onto `checks` rows in a later prompt.
+- `.env.example` and `worker/README.md` document `REGION` (default `local`, set a distinct
+  value like `us-east`/`eu-west` per instance once more than one worker runs).
+- Verified against the real stack: rebuilt the `worker` image, restarted the container, and
+  confirmed the real startup log line reads `region=local`; forced a target due now via a
+  direct DB update and confirmed the resulting check log line reads
+  `[region=local] Target 1: 200 279 ms ...`. 34 worker tests and 37 backend tests both still
+  pass unchanged (no test behavior depends on log line content).
+- Not touched in this prompt (explicitly out of scope, per the prompt and the 2.1 build
+  order): `checks.region` column, `targets`/`get_due_targets`/`claim_due_targets` query logic,
+  the per-target-per-region schedule table, any ADR. Per the 2.1 report's build order, next is
+  step 3 — the schema migration replacing `targets.next_check_at`/`consecutive_failures` with
+  a per-target-per-region schedule table and adding `region` to `checks` — the biggest single
+  change in Phase 2, planned as its own dedicated prompt.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     HTTP_TIMEOUT_SECONDS: int = 10
     # Set to "false" only for local/dev if SSL verification fails (insecure).
     HTTP_VERIFY_SSL: bool = True
+    # Identifies which region this worker instance is checking from — tagged onto log lines
+    # now, and onto checks rows once the Phase 2 multi-region schema migration lands. Defaults
+    # to "local" for single-instance dev; per the Phase 2 design report, this should become a
+    # required field (no default) once a real multi-region deployment is in view, so a
+    # misconfigured worker can't silently report under the wrong (or no) region.
+    REGION: str = "local"
 
     @property
     def asyncpg_database_url(self) -> str:
