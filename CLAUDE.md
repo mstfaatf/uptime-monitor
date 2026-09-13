@@ -1132,5 +1132,43 @@ need updating to `latest_checks: Record<string, LatestCheck>` as part of that wo
 in this prompt that the mismatch degrades safely (no crash, no dropped events) rather than
 breaking, but it still needs real UI work, not just safety.
 
+Phase 3, prompt 3.1 (familiarization + design system implementation plan) is complete.
+Read-only — no application code or new files, per this prompt's scope. Full report delivered
+directly in the conversation (not saved to a file); reread the conversation history if picking
+this up cold.
+- Confirmed current frontend state precisely: zero Tailwind/shadcn adoption (no config, no
+  dependency, no `components/` dir) — one hand-rolled `globals.css` with hardcoded hex, every
+  route a self-contained file. Confirmed the exact Phase 2 degradation mechanism:
+  `dashboard/page.tsx`'s `TargetStatusRow` still types the pre-2.6 single `latest_check` shape,
+  so `row.latest_check` is `undefined` against the real `latest_checks: dict[str, ...]` API
+  response — every target always renders "Pending"/"—" today, not a crash but zero real
+  per-region treatment. Also confirmed `consecutive_failures`/backoff state is worker-only
+  (`target_region_schedule`, raw asyncpg) and not exposed through the API at all today.
+- Design tokens: recommended CSS custom properties (plain hex, not shadcn's default HSL-triplet
+  convention, since the locked palette is exact hex) in `globals.css`, consumed by
+  `tailwind.config.ts` — written before `shadcn init` so its scaffolded defaults (8px radius,
+  wrong palette) never need tearing out.
+- Signal icon (`components/signal-light.tsx`): custom inline SVG, three-dot stack, "flip"
+  implemented as an opacity transition on always-present fixed-color circles (not a fill
+  color-swap) specifically to avoid a hue cross-fade, per the locked motion spec. Speedometer
+  gauge (`components/latency-gauge.tsx`): custom inline SVG (arc + rotated needle), not
+  Recharts — no native gauge chart type exists there.
+- Degraded/amber proposal: is_up=false → down (no change); is_up=true with latency_ms over a
+  threshold (proposed 800ms, shared with the gauge's amber zone) or tls_cert_days_remaining
+  ≤14 → degraded — both buildable today with zero backend change. Flagged, not built: a
+  stronger backoff-based degraded trigger (mid-retry, debouncing a single blip before going
+  red) would need `consecutive_failures` added to the API response — a real but contained
+  backend change, deferred as optional.
+- Charting: Recharts (`type="linear"`, not the smoothed default) for the latency chart per
+  CLAUDE.md's existing stack choice; heatmap hand-rolled as a CSS grid of square divs rather
+  than a calendar-heatmap library, since those default to soft rounded cells and fighting that
+  default costs more than hand-rolling.
+- Proposed build order: 3.2 design-system foundation (tokens, fonts, Tailwind/shadcn install) →
+  3.3 bespoke primitives built in isolation (signal light, gauge) → 3.4 auth/static pages →
+  3.5 dashboard list rewrite (fixes the confirmed `latest_checks` bug, region badges, summary
+  strip) → 3.6 target detail page (waterfall, chart, heatmap, incident timeline) → 3.7
+  `/settings` → 3.8 motion/polish pass → 3.9 verification. No code changes made pending review
+  of this plan.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
