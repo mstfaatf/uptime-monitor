@@ -133,9 +133,14 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
             <SignalLight state="up" size="sm" />
             <span className="font-semibold">Uptime Monitor</span>
           </Link>
-          <Link href="/dashboard" className="font-mono text-sm hover:underline" style={{ color: "var(--text-secondary)" }}>
-            ← Back to dashboard
-          </Link>
+          <div className="flex items-center gap-6">
+            <Link href="/dashboard" className="font-mono text-sm hover:underline" style={{ color: "var(--text-secondary)" }}>
+              ← Back to dashboard
+            </Link>
+            <Link href="/settings" className="font-mono text-sm hover:underline" style={{ color: "var(--text-secondary)" }}>
+              Settings
+            </Link>
+          </div>
         </div>
       </header>
 

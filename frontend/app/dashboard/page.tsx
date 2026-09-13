@@ -364,6 +364,9 @@ export default function DashboardPage() {
             >
               ● {live ? "live" : "reconnecting…"}
             </span>
+            <Link href="/settings" className="font-mono text-sm hover:underline" style={{ color: "var(--text-secondary)" }}>
+              Settings
+            </Link>
             <Button type="button" variant="outline" size="sm" onClick={handleLogout}>
               Log out
             </Button>
@@ -509,16 +512,21 @@ export default function DashboardPage() {
                           </span>
                         )}
                       </div>
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => handleDelete(row.id)}
-                        disabled={deletingId !== null}
-                        aria-label={`Delete ${row.name || row.url}`}
-                      >
-                        {deletingId === row.id ? "…" : "Delete"}
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <Button asChild variant="outline" size="sm">
+                          <Link href={`/dashboard/${row.id}`}>View details</Link>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => handleDelete(row.id)}
+                          disabled={deletingId !== null}
+                          aria-label={`Delete ${row.name || row.url}`}
+                        >
+                          {deletingId === row.id ? "…" : "Delete"}
+                        </Button>
+                      </div>
                     </div>
 
                     <div className="mt-4 flex flex-wrap gap-x-8 gap-y-3">

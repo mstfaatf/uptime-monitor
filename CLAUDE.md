@@ -1763,5 +1763,40 @@ phase plan. Recommend closing the two navigation gaps above first, and building 
 `consecutive_failures` exposure as part of the alerting/cooldown work rather than bolting it on
 separately.
 
+Phase 3, prompt 3.10 (navigation links) is complete — closes the last open item from the 3.9
+wrap-up. **Phase 3 is now fully, genuinely complete.**
+- `app/dashboard/page.tsx`: each target row gained a "View details" button (shadcn `Button
+  asChild` wrapping a `Link` to `/dashboard/{id}`, placed next to Delete) rather than making
+  the whole row a link — keeps the existing external-site link (the target name/URL, opens the
+  monitored site itself) and the new internal-navigation link unambiguous and non-overlapping.
+  Header gained a "Settings" link next to "Log out".
+- `app/dashboard/[id]/page.tsx`: header gained a "Settings" link next to "← Back to dashboard".
+- `app/settings/page.tsx` deliberately left untouched — it already has its own way back
+  (dashboard link), and a self-referential "Settings" link on the Settings page itself would be
+  dead weight, not a real gap to close.
+- **Verified live, not just visually**: registered a real user, created a real target, and
+  confirmed with Playwright that clicking "View details" performs a genuine navigation to
+  `/dashboard/{id}` (`page.waitForURL`, not just a visual check) and clicking "Settings" from
+  the detail page genuinely navigates to `/settings`. Separately proved **pure keyboard
+  operability** — tabbed to the "Settings" link and activated it with `Enter` alone (no mouse
+  event at all) and confirmed real navigation. Read computed styles for every tabbed element
+  and confirmed both new links carry the same on-brand `--ring`-colored focus indicator as
+  everything else (the plain-link `a:focus-visible` outline for "Settings", the shadcn `Button`
+  ring box-shadow for "View details", both established in 3.8).
+- `tsc --noEmit` and `next build` both clean (routes unchanged, confirming this was purely
+  additive markup, no new pages). Diff scope confirmed minimal: exactly the two files above,
+  26 insertions / 13 deletions. No backend change, so the existing 89-test suite is
+  unaffected — not re-run this prompt since nothing it covers could have changed.
+- Verification target and user data cleaned up afterward; both the live dev stack and the
+  Docker stack confirmed healthy before finishing.
+
+**Phase 3 is complete — tokens/tooling, bespoke primitives, auth/static pages, the dashboard
+list (with its real bugfix), the detail/analytics view, settings, a motion/accessibility/
+contrast polish pass, end-to-end verification, and now full navigation between every
+authenticated page — all built, tested, and verified.** No known gaps remain. **Next: Phase 4
+— Alerting + compliance export** (Resend downtime + cert-expiry alerts with a cooldown,
+CSV/PDF export), including building the `consecutive_failures` exposure as part of that
+work rather than as a separate Phase 3 addition, per the 3.9 recommendation.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
