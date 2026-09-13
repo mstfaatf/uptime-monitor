@@ -4,6 +4,15 @@ Each target has its own next_check_at; a cycle only checks targets that are curr
 rather than checking every target on every cycle. A successful check reschedules the target at
 the normal cadence (CHECK_INTERVAL_SECONDS); a failed check backs off (see backoff.py) so a
 persistently-down target isn't retried on the same tight schedule as a healthy one.
+
+Row-claiming: get_due_targets alone (a bare SELECT) would let two concurrent worker instances
+both select and check the same due target, racing on the reschedule write. claim_due_targets()
+closes that gap with a claim-then-release-then-recheck pattern: a short transaction does
+SELECT ... FOR UPDATE SKIP LOCKED against due, unclaimed-or-stale-claimed targets, stamps
+claimed_at = now() on whatever it selected, and commits immediately — releasing the row lock
+before the actual HTTP check (which can take several seconds) ever starts, so a lock is never
+held for network I/O. A single worker instance sees this as a no-op: it always gets every due
+target back, just via two quick transactions instead of one bare SELECT.
 """
 
 import asyncio
@@ -43,12 +52,48 @@ SCHEDULER_TICK_SECONDS = 5
 # "deliberately duplicated, not shared" tradeoff as worker/ssrf.py vs backend/security/ssrf.py.
 NOTIFY_CHANNEL = "checks_inserted"
 
+# How long a claim on a target is honored before it's considered stale (the worker that
+# claimed it crashed or was killed mid-check) and becomes claimable again. Chosen well above
+# the worst realistic single-check duration: up to MAX_REDIRECTS (5) hops, each capped at
+# HTTP_TIMEOUT_SECONDS (default 10s) for connect+TLS+request+response, is ~50s in a
+# pathological case, plus trivial DB overhead. 120s leaves more than 2x headroom above that
+# before assuming a claim was abandoned — long enough that a genuinely slow-but-alive check
+# is never falsely reclaimed and double-checked, short enough that a crashed worker's targets
+# self-heal well within the normal CHECK_INTERVAL_SECONDS (300s) cadence rather than staying
+# stuck until a manual fix.
+CLAIM_TTL_SECONDS = 120
 
-async def get_due_targets(conn: asyncpg.Connection) -> list[dict]:
-    """Return {id, url, consecutive_failures} for targets whose next_check_at has arrived."""
-    rows = await conn.fetch(
-        "SELECT id, url, consecutive_failures FROM targets WHERE next_check_at <= now()"
-    )
+
+async def claim_due_targets(conn: asyncpg.Connection) -> list[dict]:
+    """
+    Select targets currently due for a check and claim them, atomically, so a concurrent
+    worker instance's own call to this function can never come back with the same target.
+
+    SELECT ... FOR UPDATE SKIP LOCKED means a genuinely concurrent claim attempt on the same
+    row doesn't block waiting for this transaction — it just skips that row and returns
+    whatever else is due. The row lock is only held long enough to stamp claimed_at and
+    commit; the caller does the actual HTTP check afterward, outside any transaction.
+
+    A target is "due" if its schedule says so AND it isn't currently claimed by a still-live
+    claim: claimed_at is either NULL (never claimed / already cleared after a prior check) or
+    older than CLAIM_TTL_SECONDS (stale — treat as abandoned).
+    """
+    async with conn.transaction():
+        rows = await conn.fetch(
+            """
+            SELECT id, url, consecutive_failures
+            FROM targets
+            WHERE next_check_at <= now()
+              AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1))
+            FOR UPDATE SKIP LOCKED
+            """,
+            CLAIM_TTL_SECONDS,
+        )
+        if rows:
+            await conn.execute(
+                "UPDATE targets SET claimed_at = now() WHERE id = ANY($1::int[])",
+                [row["id"] for row in rows],
+            )
     return [dict(row) for row in rows]
 
 
@@ -101,12 +146,14 @@ async def reschedule_target(
     """
     Update the target's scheduling state after a check. Success resets the failure streak and
     returns to the normal CHECK_INTERVAL_SECONDS cadence; failure increments the streak and
-    schedules the next attempt using exponential backoff with jitter.
+    schedules the next attempt using exponential backoff with jitter. Either way, this clears
+    claimed_at — the claim's job (keeping another worker instance from grabbing this target
+    while it was being checked) is done once this write lands.
     """
     if is_up:
         next_check_at = datetime.now(timezone.utc) + timedelta(seconds=settings.CHECK_INTERVAL_SECONDS)
         await conn.execute(
-            "UPDATE targets SET consecutive_failures = 0, next_check_at = $2 WHERE id = $1",
+            "UPDATE targets SET consecutive_failures = 0, next_check_at = $2, claimed_at = NULL WHERE id = $1",
             target_id,
             next_check_at,
         )
@@ -115,7 +162,7 @@ async def reschedule_target(
         delay_seconds = compute_backoff_seconds(new_failures)
         next_check_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
         await conn.execute(
-            "UPDATE targets SET consecutive_failures = $2, next_check_at = $3 WHERE id = $1",
+            "UPDATE targets SET consecutive_failures = $2, next_check_at = $3, claimed_at = NULL WHERE id = $1",
             target_id,
             new_failures,
             next_check_at,
@@ -209,10 +256,11 @@ async def check_one(
 
 
 async def run_cycle(pool: asyncpg.Pool, client: httpx.AsyncClient) -> None:
-    """Fetch targets currently due for a check and check them concurrently (bounded by
-    CHECK_CONCURRENCY) — targets not yet due are left alone until their next_check_at arrives."""
+    """Claim targets currently due for a check and check them concurrently (bounded by
+    CHECK_CONCURRENCY) — targets not yet due, or already claimed by another still-live worker,
+    are left alone until their next_check_at (or claim) expires."""
     async with pool.acquire() as conn:
-        targets = await get_due_targets(conn)
+        targets = await claim_due_targets(conn)
     if not targets:
         logger.debug("No targets due for a check")
         return

@@ -15,10 +15,21 @@ from unittest.mock import AsyncMock, MagicMock
 import main
 
 
+class _FakeTransaction:
+    """Stands in for asyncpg's Connection.transaction() async context manager."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
 def _mock_conn():
     conn = MagicMock()
     conn.execute = AsyncMock()
     conn.fetch = AsyncMock()
+    conn.transaction = MagicMock(return_value=_FakeTransaction())
     return conn
 
 
@@ -69,15 +80,33 @@ async def test_insert_check_normalizes_empty_error_to_none():
     assert params[5] is None  # error is the 6th positional column
 
 
-async def test_get_due_targets_queries_next_check_at_and_returns_dicts():
+async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim():
     conn = _mock_conn()
     conn.fetch.return_value = [{"id": 1, "url": "https://example.com", "consecutive_failures": 0}]
 
-    rows = await main.get_due_targets(conn)
+    rows = await main.claim_due_targets(conn)
 
-    sql = conn.fetch.call_args.args[0]
-    assert "next_check_at <= now()" in sql
+    select_sql, ttl_arg = conn.fetch.call_args.args
+    assert "next_check_at <= now()" in select_sql
+    assert "claimed_at" in select_sql
+    assert "FOR UPDATE SKIP LOCKED" in select_sql
+    assert ttl_arg == main.CLAIM_TTL_SECONDS
+
+    update_sql, ids_arg = conn.execute.call_args.args
+    assert "UPDATE targets SET claimed_at = now()" in update_sql
+    assert ids_arg == [1]
+
     assert rows == [{"id": 1, "url": "https://example.com", "consecutive_failures": 0}]
+
+
+async def test_claim_due_targets_does_not_update_when_nothing_is_due():
+    conn = _mock_conn()
+    conn.fetch.return_value = []
+
+    rows = await main.claim_due_targets(conn)
+
+    assert rows == []
+    conn.execute.assert_not_called()
 
 
 async def test_reschedule_target_on_success_resets_failures_and_uses_normal_interval():
@@ -88,6 +117,7 @@ async def test_reschedule_target_on_success_resets_failures_and_uses_normal_inte
 
     sql, target_id, next_check_at = conn.execute.call_args.args
     assert "consecutive_failures = 0" in sql
+    assert "claimed_at = NULL" in sql
     assert target_id == 1
     expected = before + timedelta(seconds=main.settings.CHECK_INTERVAL_SECONDS)
     assert abs((next_check_at - expected).total_seconds()) < 2
@@ -101,6 +131,7 @@ async def test_reschedule_target_on_failure_increments_and_backs_off():
 
     sql, target_id, new_failures, next_check_at = conn.execute.call_args.args
     assert "consecutive_failures = $2" in sql
+    assert "claimed_at = NULL" in sql
     assert target_id == 1
     assert new_failures == 3  # incremented from 2
     delay = (next_check_at - before).total_seconds()

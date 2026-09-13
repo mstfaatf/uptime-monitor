@@ -722,5 +722,61 @@ conversation (not saved to a file), reread the conversation history if picking t
 - No code changes, no new files, no migrations in this prompt — report only, pending review
   before Phase 2 implementation begins.
 
+Phase 2, prompt 2.2 (row-claiming) is complete — step 1 of the 2.1 build order. Region config,
+`checks.region`, and the per-target-per-region schedule table are explicitly untouched, per
+this prompt's scope.
+- New Alembic migration `005_add_targets_claimed_at.py`: adds nullable `claimed_at`
+  (`TIMESTAMPTZ`) to `targets`. `backend/models/target.py` updated to match (worker-owned
+  scheduling field, same as `next_check_at`/`consecutive_failures`).
+- `worker/main.py`: `get_due_targets` replaced by `claim_due_targets(conn)`, implementing the
+  claim-then-release-then-recheck pattern exactly as proposed in 2.1 — one short transaction
+  runs `SELECT ... FOR UPDATE SKIP LOCKED` against due, unclaimed-or-stale-claimed targets,
+  stamps `claimed_at = now()` on whatever it selected, and commits immediately. The actual
+  HTTP check in `check_one` happens entirely outside any transaction/lock, exactly as planned
+  — a row lock is never held for network I/O latency.
+- **`CLAIM_TTL_SECONDS = 120`** (the self-healing window): a claim older than 120s is treated
+  as abandoned (crashed/killed worker) and becomes claimable again — `claimed_at IS NULL OR
+  claimed_at < now() - make_interval(secs => $1)`. Chosen against the worst realistic
+  single-check duration: up to `MAX_REDIRECTS` (5) hops each capped at
+  `HTTP_TIMEOUT_SECONDS` (10s default) is ~50s worst case; 120s leaves over 2x headroom above
+  that (so a genuinely slow-but-alive check is never falsely reclaimed and double-checked)
+  while still recovering well within the normal 300s `CHECK_INTERVAL_SECONDS` cadence rather
+  than leaving a crashed worker's targets stuck indefinitely.
+- `reschedule_target` now clears `claimed_at` back to `NULL` in the same `UPDATE` as the
+  success/failure reschedule — the claim's job is done once that write lands. Confirmed
+  single-worker behavior is unchanged: a healthy single instance always gets every due target
+  back from `claim_due_targets`, just via two quick transactions instead of one bare
+  `SELECT` — claiming is a no-op safety net until a second instance actually exists.
+- `worker/tests/test_scheduling.py` updated: `_mock_conn()` now mocks `conn.transaction()` as
+  an async context manager; new/renamed tests cover the `FOR UPDATE SKIP LOCKED`
+  select+stamp SQL, the empty-result no-op case, and that both reschedule branches include
+  `claimed_at = NULL`. 34 worker tests (was 33), all passing; 37 backend tests unaffected.
+- **Two-worker concurrency verification** (throwaway script run against the real dev DB via
+  `docker compose run --rm -v ... worker python ...`, deleted after — not committed, worker
+  tests stay hermetic per existing convention): Phase 1 proved the actual mechanism
+  deterministically rather than relying on asyncio scheduling luck — one connection opens a
+  transaction, runs the claim `SELECT ... FOR UPDATE SKIP LOCKED`, and holds it open
+  (uncommitted); a second, fully independent connection running the identical query
+  concurrently returned in 0.003s with zero rows (proving `SKIP LOCKED` doesn't block *and*
+  every due row was already locked). Phase 2 ran the full claim+check+reschedule pipeline for
+  two concurrent "instances" via `asyncio.gather` against synthetic `.invalid`-domain targets
+  (deterministic DNS-resolution failure, no live network dependency): claims were disjoint and
+  covered every target exactly once, every target got exactly one `checks` row (no double
+  actual check), and every target's `consecutive_failures`/`claimed_at` reflected one
+  consistent write (no lost-update race). Pre-existing real dev-DB targets were temporarily
+  deferred (`next_check_at` pushed out, saved and restored exactly afterward) so they didn't
+  also get scooped up and pollute the assertions — verified via direct DB query afterward that
+  no synthetic targets remained and all real targets' schedules were restored unchanged.
+- Verified against the real stack end-to-end beyond the script: rebuilt `api`/`worker` images,
+  confirmed migration `004 → 005` ran cleanly in the `api` container's startup log, and
+  confirmed the `worker` container resumed normal per-target checking against real targets
+  immediately after the code change with no behavior change visible in the logs (as expected
+  for the single-instance no-op case).
+- Not touched in this prompt (explicitly out of scope, per the prompt and the 2.1 build
+  order): `REGION` env var/config, `checks.region`, the per-target-per-region schedule table,
+  region-scoped `get_due_targets`/`claim_due_targets`, any ADR. Per the 2.1 report's build
+  order, next is step 2 — `REGION` env var + worker config plumbing — before the bigger
+  per-target-per-region schema migration (step 3).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

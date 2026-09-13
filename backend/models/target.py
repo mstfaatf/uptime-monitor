@@ -30,6 +30,11 @@ class Target(Base):
     )
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
+    # Row-claiming for concurrency-safe scheduling across worker instances — see
+    # backend/alembic/versions/005_add_targets_claimed_at.py and worker/main.py's
+    # claim_due_targets()/CLAIM_TTL_SECONDS. NULL means unclaimed.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     __table_args__ = (UniqueConstraint("user_id", "normalized_url", name="uq_targets_user_id_normalized_url"),)
 
     user: Mapped["User"] = relationship("User", back_populates="targets")
