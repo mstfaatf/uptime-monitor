@@ -1235,5 +1235,65 @@ tooling only, per this prompt's scope — no `SignalLight`/`LatencyGauge`, no pa
   3.1 build order: prompt 3.3 — build the two bespoke primitives in isolation before wiring
   them into real pages.
 
+Phase 3, prompt 3.3 (bespoke primitives: SignalLight + LatencyGauge) is complete. Built in
+isolation on a scratch route, per this prompt's scope — no real page touched.
+- `components/signal-light.tsx`: one inline SVG housing (rounded-rect, `rx=3` in a 24×68
+  viewBox scaling to the instrument-panel radius at every size) containing three
+  always-present circles at fixed hex fills (red/amber/green). The "hot" dot is expressed via
+  `opacity` (1 vs. 0.22), never a fill swap — `up→bottom`, `degraded→middle`, `down→top`,
+  `pending→none`. Props: `state`, `size` (`sm`/`md`/`lg`, one shared geometry scaled via the
+  SVG's own `width`/`height`, not redrawn per size), `showLabel`, `className`. Labels use the
+  locked microcopy exactly: up→"Reporting up", degraded→"Degraded", down→"No signal",
+  pending→"Pending".
+- `components/latency-gauge.tsx`: custom SVG, 270° arc (135°→405° in SVG's y-down angle
+  convention, opening at the bottom) built from three `<path>` zone segments
+  (`stroke-linecap="butt"`, sharp ends) plus a polygon needle inside a `<g>` rotated via
+  `transform: rotate(...)` around the arc's center. Props: `value`, `goodMs=200`,
+  `warnMs=800`, `maxMs=2000` — matching the thresholds locked in 3.2 exactly. Needle rest
+  position (value=0 or null) sits at the arc's start (135°, lower-left); rotation increases
+  monotonically to 270° at `maxMs`, so there's no wraparound case to worry about. Numeric
+  readout below the arc in mono, colored by which zone the value falls in.
+- Motion, implemented via two small `globals.css` rules (`.signal-dot`, `.gauge-needle`) each
+  wrapped in `@media (prefers-reduced-motion: no-preference)` so no transition exists at all
+  unless the OS allows motion — collapses to instant otherwise by construction, not by an
+  explicit override. `.signal-dot` transitions `opacity` only (180ms ease-out) — confirmed by
+  design and by a before/after screenshot pair that the flip never interpolates between two
+  fill colors. `.gauge-needle` transitions `transform` (350ms ease-out) — the one deliberate
+  smooth-motion exception, per the locked spec.
+- Scratch route: `app/dev/components/page.tsx` — a static grid of every `SignalLight`
+  state×size combination plus the `showLabel` variants, a static row of `LatencyGauge` across
+  8 values spanning its full range (0 through 2000ms plus null), a size-comparison row, and
+  two small live demos (a 1.8s state-cycle timer, a 500ms/250ms-step sweep timer) specifically
+  so the CSS transitions actually fire during verification rather than only proving each end
+  state renders. **Not linked from anywhere in the app; not deleted yet** — per the prompt,
+  kept through 3.5/3.6 as a visual reference. Flagging clearly: **this route must be deleted
+  in the Phase 3 wrap-up/verification prompt (3.9)** before Phase 3 is considered done.
+- Verified with real screenshots, not just code review — installed Playwright
+  (`devDependencies`) and found Chromium/Firefox/WebKit already cached locally, so no slow
+  download was needed. Screenshotted the scratch route twice, ~1.6s apart: confirmed all four
+  signal states render correctly at all three sizes, the `showLabel` microcopy matches exactly,
+  the live flip demo visibly moved from "Reporting up" to "Degraded" between the two captures
+  (dot relocated, opacity mechanism confirmed working live not just in source), and the live
+  sweep demo advanced from 0ms to 750ms with the needle correctly repositioned into the amber
+  zone and the numeric label correctly colored amber (800ms boundary: `value <= warnMs` holds
+  at exactly `warnMs`, confirmed both by reading the code and by the rendered color at a
+  nearby value). Additionally emulated `prefers-reduced-motion: reduce` via Playwright and
+  read the computed `transitionDuration` directly: 0.18s/0.35s normally, 0s under reduced
+  motion — the media-query approach genuinely works, not just presumed from the CSS source.
+  Screenshots sent to the user directly; verification scripts were scratch files outside the
+  repo (not committed).
+- Self-critique against the 3.1 avoid-list: no Inter/gradient, no uniform soft-shadow card
+  grid (no cards at all here), no all-caps eyebrow labels, no arrow appended to a button/link
+  (the page has neither; the "→" in a section heading denotes a numeric range, 0→2000ms, not
+  the flagged link-affordance pattern), no middle-dot-joined meta text, no numbered markers,
+  no single-word headline color accent. One minor, deliberate observation: the signal
+  housing's rounded-rect (bg-surface-raised on the page's bg-base) is a subtle tonal step
+  rather than a high-contrast outline — intentional (instrument panel, not bright chrome) but
+  worth a second look once it's sitting in a real dashboard row in 3.5, not just on a plain
+  dark scratch page.
+- Not touched in this prompt (explicitly out of scope, per the prompt): dashboard, detail
+  view, auth pages, landing/about pages. Next per the 3.1 build order: prompt 3.4 — auth and
+  static pages.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

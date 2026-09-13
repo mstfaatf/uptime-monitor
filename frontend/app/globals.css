@@ -58,6 +58,23 @@
   }
 }
 
+/* SignalLight's "flip": opacity only, never a fill-color interpolation, so a state change
+   reads as a light switching rather than a cross-fade. No transition at all unless the OS
+   allows motion, so it's an instant change under prefers-reduced-motion: reduce by default. */
+@media (prefers-reduced-motion: no-preference) {
+  .signal-dot {
+    transition: opacity 180ms ease-out;
+  }
+}
+
+/* LatencyGauge's needle: a real sweep, not a snap — the one deliberate exception to the
+   discrete-flip motion rule, since a physical needle moving smoothly is the honest metaphor. */
+@media (prefers-reduced-motion: no-preference) {
+  .gauge-needle {
+    transition: transform 350ms ease-out;
+  }
+}
+
 /* Below: the pre-Tailwind hand-rolled rules, kept working (the pages that reference these
    classNames aren't rewritten until prompt 3.4/3.5) but retokenized — no hardcoded hex left
    anywhere in this file. `* { box-sizing: border-box }` and `input, button { font: inherit }`
