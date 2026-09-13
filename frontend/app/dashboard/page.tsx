@@ -4,6 +4,12 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { API_BASE, apiFetch, apiJson } from "@/lib/api";
+import { SignalLight, type SignalState } from "@/components/signal-light";
+import { LatencyGauge } from "@/components/latency-gauge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { LATENCY_WARN_MS, CERT_EXPIRY_WARN_DAYS } from "@/lib/thresholds";
 
 type LatestCheck = {
   checked_at: string | null;
@@ -11,9 +17,6 @@ type LatestCheck = {
   status_code: number | null;
   latency_ms: number | null;
   error: string | null;
-  // Timing breakdown + TLS cert fields (not rendered yet — full waterfall/cert UI is a
-  // Phase 2 job — but included so the SSE payload and the polled /targets/status shape stay
-  // identical and no second fetch is ever needed to get the full picture).
   dns_ms?: number | null;
   tcp_ms?: number | null;
   tls_ms?: number | null;
@@ -23,19 +26,20 @@ type LatestCheck = {
   tls_cert_days_remaining?: number | null;
 };
 
+// Keyed by region — see backend/routers/targets.py's TargetStatusResponse (since prompt 2.6).
+// A target with no checks yet in any region reports an empty object, not null.
 type TargetStatusRow = {
   id: number;
   url: string;
   name: string | null;
   created_at: string;
-  latest_check: LatestCheck | null;
+  latest_checks: Record<string, LatestCheck>;
 };
 
 function formatTimestamp(iso: string | null | undefined): string {
   if (!iso) return "—";
   try {
-    const d = new Date(iso);
-    return d.toLocaleString();
+    return new Date(iso).toLocaleString();
   } catch {
     return "—";
   }
@@ -48,6 +52,29 @@ function isValidUrl(s: string): boolean {
   } catch {
     return false;
   }
+}
+
+// The locked degraded-state contract, applied per region: a region that hasn't reported yet
+// is "pending"; a failed check is "down"; a successful check that's slow or has a
+// soon-to-expire cert is "degraded"; everything else is "up". See lib/thresholds.ts.
+function deriveState(check: LatestCheck | undefined): SignalState {
+  if (!check || check.checked_at == null) return "pending";
+  if (!check.is_up) return "down";
+  const slow = check.latency_ms != null && check.latency_ms > LATENCY_WARN_MS;
+  const certExpiringSoon =
+    check.tls_cert_days_remaining != null && check.tls_cert_days_remaining <= CERT_EXPIRY_WARN_DAYS;
+  return slow || certExpiringSoon ? "degraded" : "up";
+}
+
+function RegionBadge({ region }: { region: string }) {
+  return (
+    <span
+      className="rounded border px-1.5 py-0.5 font-mono text-xs"
+      style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+    >
+      {region}
+    </span>
+  );
 }
 
 export default function DashboardPage() {
@@ -66,6 +93,12 @@ export default function DashboardPage() {
   const [deleteError, setDeleteError] = useState("");
 
   const [live, setLive] = useState(false);
+
+  // The one deliberate motion moment on this page: rows light up top-to-bottom once on initial
+  // load, then stay revealed for the rest of the session (including rows added later) — never
+  // a per-row hover effect, never scroll-triggered.
+  const [revealedCount, setRevealedCount] = useState(0);
+  const [revealComplete, setRevealComplete] = useState(false);
 
   const loadStatus = useCallback(async () => {
     setError("");
@@ -91,7 +124,7 @@ export default function DashboardPage() {
         setItems(
           targets.map((t) => ({
             ...t,
-            latest_check: null,
+            latest_checks: {},
           }))
         );
         return;
@@ -119,11 +152,38 @@ export default function DashboardPage() {
     if (authFailed) router.replace("/login");
   }, [authFailed, router]);
 
+  useEffect(() => {
+    if (loading || items.length === 0 || revealComplete) return;
+    const prefersReducedMotion =
+      typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReducedMotion) {
+      setRevealComplete(true);
+      return;
+    }
+    let i = 0;
+    const total = items.length;
+    const id = setInterval(() => {
+      i += 1;
+      setRevealedCount(i);
+      if (i >= total) {
+        clearInterval(id);
+        setRevealComplete(true);
+      }
+    }, 90);
+    return () => clearInterval(id);
+    // Deliberately only depends on `loading`: this sequence should fire once, right after the
+    // initial load, not re-run every time `items` changes (SSE updates, add/delete).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
   // Real-time push: once the initial poll has confirmed we're authenticated, open an SSE
   // subscription for check-result updates on our own targets. The browser's EventSource
   // auto-reconnects on its own after a drop (with backoff), so no manual retry loop is needed
   // here; withCredentials is required since the API is on a different origin in dev and the
-  // session lives in an HttpOnly cookie, not anything JS can attach itself.
+  // session lives in an HttpOnly cookie, not anything JS can attach itself. Each event carries
+  // the target's full latest_checks map (every region, not just the one that changed — see
+  // backend/realtime.py), so replacing the whole row is correct and never loses another
+  // region's data.
   useEffect(() => {
     if (loading || authFailed) return;
 
@@ -220,134 +280,224 @@ export default function DashboardPage() {
 
   if (authFailed) return null;
 
+  // Flatten every (target, region) pair that has a check yet, for the summary strip. Targets
+  // are deliberately never collapsed into one boolean per the Phase 2 design — this counts
+  // per-region results, not per-target.
+  const regionEntries = items.flatMap((item) =>
+    Object.entries(item.latest_checks).map(([region, check]) => ({
+      state: deriveState(check),
+      latencyMs: check.latency_ms,
+    }))
+  );
+  const pendingTargetsWithNoRegions = items.filter((i) => Object.keys(i.latest_checks).length === 0).length;
+  const counts = { up: 0, degraded: 0, down: 0, pending: pendingTargetsWithNoRegions };
+  for (const e of regionEntries) counts[e.state]++;
+  const latencies = regionEntries.map((e) => e.latencyMs).filter((v): v is number => v != null);
+  const avgLatency = latencies.length > 0 ? latencies.reduce((a, b) => a + b, 0) / latencies.length : null;
+
   return (
-    <main>
-      <div className="dashboard-actions">
-        <Link href="/dashboard">Dashboard</Link>
-        <button type="button" className="btn" onClick={handleLogout}>
-          Log out
-        </button>
-      </div>
-      <h1>
-        Dashboard{" "}
-        <span
-          title={live ? "Live updates connected" : "Live updates disconnected — retrying"}
-          style={{
-            fontSize: "0.6em",
-            color: live ? "var(--signal-up)" : "var(--signal-pending)",
-            verticalAlign: "middle",
-          }}
+    <>
+      <header className="border-b" style={{ borderColor: "var(--border)" }}>
+        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+          <Link href="/" className="flex items-center gap-3">
+            <SignalLight state="up" size="sm" />
+            <span className="font-semibold">Uptime Monitor</span>
+          </Link>
+          <div className="flex items-center gap-6">
+            <span
+              className="font-mono text-xs"
+              title={live ? "Live updates connected" : "Live updates disconnected — retrying"}
+              style={{ color: live ? "var(--signal-up)" : "var(--signal-pending)" }}
+            >
+              ● {live ? "live" : "reconnecting…"}
+            </span>
+            <Button type="button" variant="outline" size="sm" onClick={handleLogout}>
+              Log out
+            </Button>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-5xl px-6 py-10">
+        <h1 className="text-2xl font-semibold">Dashboard</h1>
+
+        {!loading && items.length > 0 && (
+          <div
+            className="mt-6 flex flex-wrap items-center gap-8 rounded border p-4"
+            style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
+          >
+            <div className="flex flex-col">
+              <span className="font-mono text-2xl" style={{ color: "var(--text-primary)" }}>
+                {items.length}
+              </span>
+              <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                targets
+              </span>
+            </div>
+            <div className="flex items-center gap-5">
+              <div className="flex items-center gap-2">
+                <SignalLight state="up" size="sm" />
+                <span className="font-mono text-sm">{counts.up}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <SignalLight state="degraded" size="sm" />
+                <span className="font-mono text-sm">{counts.degraded}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <SignalLight state="down" size="sm" />
+                <span className="font-mono text-sm">{counts.down}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <SignalLight state="pending" size="sm" />
+                <span className="font-mono text-sm">{counts.pending}</span>
+              </div>
+            </div>
+            <div className="ml-auto flex flex-col items-center">
+              <LatencyGauge value={avgLatency} size="sm" />
+              <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                avg latency
+              </span>
+            </div>
+          </div>
+        )}
+
+        <section
+          className="mt-8 max-w-md rounded border p-5"
+          style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
         >
-          ● {live ? "live" : "reconnecting…"}
-        </span>
-      </h1>
+          <h2 className="font-semibold">Add target</h2>
+          <form onSubmit={handleAddTarget} className="mt-4 flex flex-col gap-4">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="target-url">URL (required)</Label>
+              <Input
+                id="target-url"
+                type="url"
+                placeholder="https://example.com"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                disabled={submitting}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="target-name">Name (optional)</Label>
+              <Input
+                id="target-name"
+                type="text"
+                placeholder="My site"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                disabled={submitting}
+              />
+            </div>
+            {formError && (
+              <p className="text-sm" style={{ color: "var(--signal-down)" }}>
+                {formError}
+              </p>
+            )}
+            <Button type="submit" disabled={submitting} className="self-start">
+              {submitting ? "Adding…" : "Add target"}
+            </Button>
+          </form>
+        </section>
 
-      <section className="add-target-form">
-        <h2>Add target</h2>
-        <form onSubmit={handleAddTarget}>
-          <div className="form-group">
-            <label htmlFor="target-url">URL (required)</label>
-            <input
-              id="target-url"
-              type="url"
-              placeholder="https://example.com"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              disabled={submitting}
-            />
-          </div>
-          <div className="form-group">
-            <label htmlFor="target-name">Name (optional)</label>
-            <input
-              id="target-name"
-              type="text"
-              placeholder="My site"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              disabled={submitting}
-            />
-          </div>
-          {formError && <p className="error-message">{formError}</p>}
-          <button type="submit" disabled={submitting}>
-            {submitting ? "Adding…" : "Add target"}
-          </button>
-        </form>
-      </section>
+        {deleteError && (
+          <p className="mt-4 text-sm" style={{ color: "var(--signal-down)" }}>
+            {deleteError}
+          </p>
+        )}
+        {error && (
+          <p className="mt-4 text-sm" style={{ color: "var(--signal-down)" }}>
+            {error}
+          </p>
+        )}
 
-      {deleteError && <p className="error-message">{deleteError}</p>}
-      {error && <p className="error-message">{error}</p>}
-      {loading ? (
-        <p>Loading…</p>
-      ) : (
-        <>
-          {items.length === 0 ? (
-            <p>No targets yet. Add one above.</p>
+        <div className="mt-8">
+          {loading ? (
+            <p style={{ color: "var(--text-secondary)" }}>Loading…</p>
+          ) : items.length === 0 ? (
+            <div
+              className="flex flex-col items-center gap-3 rounded border border-dashed p-12 text-center"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <SignalLight state="pending" size="lg" />
+              <p className="font-semibold">No targets yet</p>
+              <p className="max-w-sm text-sm" style={{ color: "var(--text-secondary)" }}>
+                Add a URL above and it'll show up here once the worker picks it up.
+              </p>
+            </div>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>URL</th>
-                  <th>Status</th>
-                  <th>Last checked</th>
-                  <th>Latency</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((row) => {
-                  const lc = row.latest_check;
-                  const status =
-                    !lc || lc.checked_at == null
-                      ? "pending"
-                      : lc.is_up
-                        ? "up"
-                        : "down";
-                  return (
-                    <tr key={row.id}>
-                      <td>
-                        <a href={row.url} target="_blank" rel="noopener noreferrer">
+            <div className="flex flex-col gap-4">
+              {items.map((row, index) => {
+                const revealed = revealComplete || index < revealedCount;
+                const regions = Object.entries(row.latest_checks).sort(([a], [b]) => a.localeCompare(b));
+
+                return (
+                  <div
+                    key={row.id}
+                    className="rounded border p-4"
+                    style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <a
+                          href={row.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-medium hover:underline"
+                        >
                           {row.name || row.url}
                         </a>
                         {row.name && (
-                          <span style={{ display: "block", fontSize: "0.875rem", color: "var(--text-secondary)" }}>
+                          <span
+                            className="block font-mono text-xs"
+                            style={{ color: "var(--text-secondary)" }}
+                          >
                             {row.url}
                           </span>
                         )}
-                      </td>
-                      <td>
-                        {status === "pending" && (
-                          <span className="status-pending">Pending</span>
-                        )}
-                        {status === "up" && (
-                          <span className="status-up">Up</span>
-                        )}
-                        {status === "down" && (
-                          <span className="status-down">Down</span>
-                        )}
-                      </td>
-                      <td>{formatTimestamp(lc?.checked_at ?? null)}</td>
-                      <td>
-                        {lc?.latency_ms != null ? `${lc.latency_ms} ms` : "—"}
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          className="btn btn-danger"
-                          onClick={() => handleDelete(row.id)}
-                          disabled={deletingId !== null}
-                          aria-label={`Delete ${row.name || row.url}`}
-                        >
-                          {deletingId === row.id ? "…" : "Delete"}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => handleDelete(row.id)}
+                        disabled={deletingId !== null}
+                        aria-label={`Delete ${row.name || row.url}`}
+                      >
+                        {deletingId === row.id ? "…" : "Delete"}
+                      </Button>
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap gap-x-8 gap-y-3">
+                      {regions.length === 0 ? (
+                        <div className="flex items-center gap-2">
+                          <SignalLight state="pending" size="sm" showLabel />
+                        </div>
+                      ) : (
+                        regions.map(([region, check]) => {
+                          const state = revealed ? deriveState(check) : "pending";
+                          return (
+                            <div key={region} className="flex items-center gap-3">
+                              <RegionBadge region={region} />
+                              <SignalLight state={state} size="sm" showLabel />
+                              <span className="font-mono text-sm" style={{ color: "var(--text-primary)" }}>
+                                {check.latency_ms != null ? `${check.latency_ms} ms` : "—"}
+                              </span>
+                              <span className="font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
+                                {formatTimestamp(check.checked_at)}
+                              </span>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
-        </>
-      )}
-    </main>
+        </div>
+      </main>
+    </>
   );
 }

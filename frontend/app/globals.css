@@ -75,126 +75,19 @@
   }
 }
 
-/* Below: the pre-Tailwind hand-rolled rules, kept working (the pages that reference these
-   classNames aren't rewritten until prompt 3.4/3.5) but retokenized — no hardcoded hex left
-   anywhere in this file. `* { box-sizing: border-box }` and `input, button { font: inherit }`
-   from the old stylesheet are gone entirely: Tailwind's preflight (@tailwind base) already
-   applies both. */
-
+/* The one hand-rolled rule still load-bearing: every page has plain <a> tags (target URLs,
+   footer/about links) that rely on this default rather than an inline color. Everything else
+   that used to live here (.form-group, .btn, .status-*, table styles, .dashboard-actions,
+   .btn-danger, .add-target-form, .error-message/.success-message) was retired once dashboard
+   — the last page still using them — was rewritten onto shadcn primitives + Tailwind
+   utilities; none of it is referenced anywhere in app/ or components/ any more. Removing it
+   also closes a real hazard it left behind: `button[type="submit"] { background: ... }` was a
+   bare element+attribute selector that would have kept matching every shadcn <Button
+   type="submit"> going forward, not just the old hand-rolled buttons it was written for. */
 a {
   color: var(--text-primary);
 }
 
 a:hover {
   text-decoration: underline;
-}
-
-.form-group {
-  margin-bottom: 1rem;
-}
-
-.form-group label {
-  display: block;
-  margin-bottom: 0.25rem;
-  font-weight: 500;
-}
-
-.form-group input {
-  width: 100%;
-  max-width: 20rem;
-  padding: 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-}
-
-button[type="submit"],
-.btn {
-  padding: 0.5rem 1rem;
-  background: var(--text-primary);
-  color: var(--bg-base);
-  border: none;
-  border-radius: var(--radius);
-  cursor: pointer;
-}
-
-button[type="submit"]:hover,
-.btn:hover {
-  filter: brightness(0.85);
-}
-
-.status-up {
-  color: var(--signal-up);
-  font-weight: 500;
-}
-
-.status-down {
-  color: var(--signal-down);
-  font-weight: 500;
-}
-
-.status-pending,
-.status-unknown {
-  color: var(--signal-pending);
-}
-
-table {
-  border-collapse: collapse;
-  width: 100%;
-  max-width: 50rem;
-}
-
-th,
-td {
-  text-align: left;
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid var(--border);
-}
-
-th {
-  font-weight: 600;
-  background: var(--bg-surface);
-}
-
-.dashboard-actions {
-  margin-bottom: 1rem;
-}
-
-.dashboard-actions a {
-  margin-right: 1rem;
-}
-
-.btn-danger {
-  background: var(--signal-down);
-  color: var(--text-primary);
-  padding: 0.35rem 0.6rem;
-  font-size: 0.875rem;
-}
-
-.btn-danger:hover {
-  filter: brightness(0.85);
-}
-
-.add-target-form {
-  margin-bottom: 1.5rem;
-  padding: 1rem;
-  background: var(--bg-surface);
-  border-radius: var(--radius);
-  max-width: 32rem;
-}
-
-.add-target-form h2 {
-  margin-top: 0;
-  font-size: 1.1rem;
-}
-
-.error-message {
-  color: var(--signal-down);
-  margin-top: 0.5rem;
-}
-
-.success-message {
-  color: var(--signal-up);
-  margin-top: 0.5rem;
 }

@@ -1361,5 +1361,79 @@ Dashboard, detail view, and settings untouched, per this prompt's scope.
   dashboard list view rewrite (fixes the confirmed `latest_checks` bug, region badges, summary
   strip with `SignalLight`/`LatencyGauge` wired to real data).
 
+Phase 3, prompt 3.5 (dashboard list view rewrite) is complete. **This prompt fixed the
+pre-2.6 data-shape bug flagged in every status note since Phase 2's wrap-up, in addition to
+the redesign** — `/dashboard` was never actually broken-looking (it silently degraded to
+"Pending" everywhere), so the bug was invisible without deliberately checking real per-region
+data, which this prompt did. Detail view, settings, and the auth/static pages untouched.
+- **The bugfix**: `TargetStatusRow.latest_check: LatestCheck | null` → `latest_checks:
+  Record<string, LatestCheck>`, matching `backend/routers/targets.py`'s real response shape
+  since prompt 2.6. New `deriveState()` classifies each region independently (no check yet →
+  pending; `is_up: false` → down; `is_up: true` with `latency_ms > 800` or
+  `tls_cert_days_remaining <= 14` → degraded, using the exact 3.2-locked thresholds via a new
+  shared `lib/thresholds.ts` — also wired into `LatencyGauge`'s default props, closing a real
+  drift risk where the gauge and the dashboard could otherwise have hardcoded the same "800"
+  independently and diverged later). The SSE merge logic itself needed no fix — replacing the
+  whole row by id was already correct once the types matched the real payload; the type
+  mismatch was the entire bug.
+- **Verified the fix against real data, not synthetic props**: the app's Docker stack was
+  already running with real `local` and `eu-west` workers. Registered a throwaway
+  verification user via the live API, created two real targets — one plain `https://
+  example.com` (real `up` in both regions) and one deliberately 404ing URL (real `down` in
+  both regions, `is_up=false` from an actual HTTP response, not a mock) — and directly
+  mutated one check row's `latency_ms` to 950 to also exercise the `degraded` path with real
+  backend data flowing through the real API response shape. Loaded `/dashboard` as that user
+  via Playwright with an injected session cookie against the project's own running dev server
+  on port 3000 (a scratch port was tried first and rejected by the backend's CORS allowlist,
+  which is correctly locked to `localhost:3000` per Phase 0 — did not loosen it for
+  convenience, used the already-running server instead). Confirmed every row shows real,
+  distinct per-region status instead of "Pending" everywhere — see screenshots sent to the
+  user. All verification targets and the cookie jar were deleted afterward; the throwaway
+  user account was left in place (harmless, matches this project's existing precedent for
+  verification users from earlier phases).
+- **Verified the SSE live-flip with an airtight before/after**: from within the same
+  Playwright script (never calling `page.reload()`), captured a baseline screenshot, then
+  forced a real recheck via a direct DB update (`next_check_at = now()`), waited 8s, and
+  captured a second screenshot from the same still-open tab. Latencies, timestamps, and the
+  recalculated average-latency gauge all changed in place with no reload — real proof the SSE
+  → state update → re-render → `SignalLight` opacity transition chain works end to end, not
+  just plausible from reading the code.
+- Summary strip: total target count (plain number) + four `SignalLight`+count chips
+  (up/degraded/down/pending, counted per-region per the Phase 2 design — never collapsed to
+  one status per target) + a `LatencyGauge` showing the mean `latency_ms` across every region
+  with a reading. Confirmed against real data: 4 region-entries averaging to the gauge's
+  displayed value and matching its own zone coloring.
+- Empty state: reuses `SignalLight state="pending"` (the existing vocabulary, not a new
+  icon) inside a dashed border with plain copy — verified by literally deleting both test
+  targets and re-screenshotting.
+- Motion: one load-in sequence (rows reveal top-to-bottom, 90ms apart, `pending` until their
+  turn) that runs once after initial load and never re-triggers on later SSE updates or
+  add/delete (deliberately keyed only to `loading`, not `items`); skips straight to fully
+  revealed under `prefers-reduced-motion: reduce`. No per-row hover effects, no scroll
+  triggers.
+- **Retired the last of the pre-Tailwind hand-rolled CSS**: dashboard was the only remaining
+  page still using `.form-group`/`.btn`/`.status-*`/`table`/`.dashboard-actions`/
+  `.btn-danger`/`.add-target-form`/`.error-message`/`.success-message` — confirmed via grep
+  that nothing in `app/` or `components/` references any of them any more, then deleted the
+  whole block from `globals.css`. This also closed a latent hazard the block left behind:
+  `button[type="submit"] { background: ... }` was a bare element+attribute selector that
+  would have kept matching every shadcn `<Button type="submit">` (including dashboard's own
+  "Add target" button) indefinitely, not just the old hand-rolled buttons it was written for.
+  Only the still-load-bearing `a`/`a:hover` global link rule remains outside the token/base
+  layers.
+- Self-critique against the 3.1 avoid-list: clean — no Inter/gradient, no all-caps eyebrow
+  labels, no arrow-appended button/link text, no middle-dot-joined meta text, no numbered
+  markers, no single-word headline accent. The target rows are visually uniform bordered
+  boxes, which could superficially resemble the "identical card grid" tell — but they're a
+  genuine list of comparable data rows (not decorative content forced into cards) and carry
+  no soft drop shadow, so this reads as an intentional data-list treatment, not the avoided
+  pattern.
+- `tsc --noEmit` and `next build` both clean throughout, including after the CSS cleanup.
+- Not touched in this prompt (explicitly out of scope, per the prompt): detail view,
+  settings, auth/static pages. The `/dev/components` scratch route from 3.3 **still needs
+  deleting** before the Phase 3 wrap-up prompt — not yet due. Next per the 3.1 build order:
+  prompt 3.6 — target detail page (timing waterfall, latency chart, heatmap, incident
+  timeline, cert-expiry badge, export button stub).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

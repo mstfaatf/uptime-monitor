@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { LATENCY_GOOD_MS, LATENCY_WARN_MS, LATENCY_MAX_MS } from "@/lib/thresholds";
 
 // Speedometer gauge for response time only — the one deliberate borrow from a second metaphor,
 // used in exactly two places (dashboard summary tile, target detail view). See CLAUDE.md's
@@ -58,9 +59,9 @@ export interface LatencyGaugeProps {
 
 export function LatencyGauge({
   value,
-  goodMs = 200,
-  warnMs = 800,
-  maxMs = 2000,
+  goodMs = LATENCY_GOOD_MS,
+  warnMs = LATENCY_WARN_MS,
+  maxMs = LATENCY_MAX_MS,
   size = "md",
   className,
 }: LatencyGaugeProps) {
