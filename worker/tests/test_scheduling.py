@@ -52,11 +52,12 @@ async def test_insert_check_passes_all_columns_in_matching_order():
         ttfb_ms=4,
         tls_cert_expires_at=cert_expires,
         tls_cert_issuer="commonName=Test",
+        region="us-east",
     )
 
     sql, *params = conn.execute.call_args.args
     assert "INSERT INTO checks" in sql
-    assert params == [1, checked_at, 200, 123, True, None, 1, 2, 3, 4, cert_expires, "commonName=Test"]
+    assert params == [1, checked_at, 200, 123, True, None, 1, 2, 3, 4, cert_expires, "commonName=Test", "us-east"]
 
 
 async def test_insert_check_normalizes_empty_error_to_none():
@@ -75,50 +76,74 @@ async def test_insert_check_normalizes_empty_error_to_none():
         ttfb_ms=None,
         tls_cert_expires_at=None,
         tls_cert_issuer=None,
+        region="local",
     )
     _, *params = conn.execute.call_args.args
     assert params[5] is None  # error is the 6th positional column
+
+
+async def test_claim_due_targets_backfills_schedule_rows_before_claiming():
+    conn = _mock_conn()
+    conn.fetch.return_value = []
+
+    await main.claim_due_targets(conn, "us-east")
+
+    # ensure_schedule_rows() must run before the claim SELECT — it's the fix for a target
+    # (new, or a brand-new region against pre-existing targets) having no schedule row yet.
+    backfill_sql, backfill_region = conn.execute.call_args_list[0].args
+    assert "INSERT INTO target_region_schedule" in backfill_sql
+    assert "ON CONFLICT" in backfill_sql
+    assert backfill_region == "us-east"
 
 
 async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim():
     conn = _mock_conn()
     conn.fetch.return_value = [{"id": 1, "url": "https://example.com", "consecutive_failures": 0}]
 
-    rows = await main.claim_due_targets(conn)
+    rows = await main.claim_due_targets(conn, "us-east")
 
-    select_sql, ttl_arg = conn.fetch.call_args.args
+    select_sql, region_arg, ttl_arg = conn.fetch.call_args.args
+    assert "target_region_schedule" in select_sql
     assert "next_check_at <= now()" in select_sql
     assert "claimed_at" in select_sql
-    assert "FOR UPDATE SKIP LOCKED" in select_sql
+    assert "FOR UPDATE OF trs SKIP LOCKED" in select_sql
+    assert region_arg == "us-east"
     assert ttl_arg == main.CLAIM_TTL_SECONDS
 
-    update_sql, ids_arg = conn.execute.call_args.args
-    assert "UPDATE targets SET claimed_at = now()" in update_sql
+    # Second execute() call is the claim stamp (the first, asserted separately above, is the
+    # ensure_schedule_rows backfill).
+    update_sql, update_region, ids_arg = conn.execute.call_args_list[1].args
+    assert "UPDATE target_region_schedule SET claimed_at = now()" in update_sql
+    assert update_region == "us-east"
     assert ids_arg == [1]
 
     assert rows == [{"id": 1, "url": "https://example.com", "consecutive_failures": 0}]
 
 
-async def test_claim_due_targets_does_not_update_when_nothing_is_due():
+async def test_claim_due_targets_does_not_stamp_claim_when_nothing_is_due():
     conn = _mock_conn()
     conn.fetch.return_value = []
 
-    rows = await main.claim_due_targets(conn)
+    rows = await main.claim_due_targets(conn, "us-east")
 
     assert rows == []
-    conn.execute.assert_not_called()
+    # Only the ensure_schedule_rows backfill executed — no claim-stamp UPDATE since nothing
+    # came back from the SELECT.
+    assert conn.execute.call_count == 1
 
 
 async def test_reschedule_target_on_success_resets_failures_and_uses_normal_interval():
     conn = _mock_conn()
     before = datetime.now(timezone.utc)
 
-    await main.reschedule_target(conn, target_id=1, is_up=True, consecutive_failures_before=3)
+    await main.reschedule_target(conn, target_id=1, region="us-east", is_up=True, consecutive_failures_before=3)
 
-    sql, target_id, next_check_at = conn.execute.call_args.args
+    sql, target_id, region, next_check_at = conn.execute.call_args.args
+    assert "UPDATE target_region_schedule" in sql
     assert "consecutive_failures = 0" in sql
     assert "claimed_at = NULL" in sql
     assert target_id == 1
+    assert region == "us-east"
     expected = before + timedelta(seconds=main.settings.CHECK_INTERVAL_SECONDS)
     assert abs((next_check_at - expected).total_seconds()) < 2
 
@@ -127,12 +152,14 @@ async def test_reschedule_target_on_failure_increments_and_backs_off():
     conn = _mock_conn()
     before = datetime.now(timezone.utc)
 
-    await main.reschedule_target(conn, target_id=1, is_up=False, consecutive_failures_before=2)
+    await main.reschedule_target(conn, target_id=1, region="us-east", is_up=False, consecutive_failures_before=2)
 
-    sql, target_id, new_failures, next_check_at = conn.execute.call_args.args
-    assert "consecutive_failures = $2" in sql
+    sql, target_id, region, new_failures, next_check_at = conn.execute.call_args.args
+    assert "UPDATE target_region_schedule" in sql
+    assert "consecutive_failures = $3" in sql
     assert "claimed_at = NULL" in sql
     assert target_id == 1
+    assert region == "us-east"
     assert new_failures == 3  # incremented from 2
     delay = (next_check_at - before).total_seconds()
     # failure #3 -> unjittered 120s (30 * 2^2), +/-20% jitter => roughly [96, 144]; padded

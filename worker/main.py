@@ -1,18 +1,24 @@
 """Worker: per-target scheduled HTTP checks, results stored in checks table.
 
-Each target has its own next_check_at; a cycle only checks targets that are currently due,
-rather than checking every target on every cycle. A successful check reschedules the target at
-the normal cadence (CHECK_INTERVAL_SECONDS); a failed check backs off (see backoff.py) so a
+Scheduling state (next_check_at, consecutive_failures, claimed_at) lives in
+target_region_schedule, one row per (target_id, region) — see
+backend/alembic/versions/006_add_region_and_target_schedule.py. This worker instance only
+ever reads/writes rows for its own settings.REGION: each checking region tracks its own
+due-time and backoff/claim state for a target independently, since reachability/backoff in one
+region says nothing about another. A successful check reschedules the target at the normal
+cadence (CHECK_INTERVAL_SECONDS); a failed check backs off (see backoff.py) so a
 persistently-down target isn't retried on the same tight schedule as a healthy one.
 
-Row-claiming: get_due_targets alone (a bare SELECT) would let two concurrent worker instances
-both select and check the same due target, racing on the reschedule write. claim_due_targets()
-closes that gap with a claim-then-release-then-recheck pattern: a short transaction does
-SELECT ... FOR UPDATE SKIP LOCKED against due, unclaimed-or-stale-claimed targets, stamps
-claimed_at = now() on whatever it selected, and commits immediately — releasing the row lock
-before the actual HTTP check (which can take several seconds) ever starts, so a lock is never
-held for network I/O. A single worker instance sees this as a no-op: it always gets every due
-target back, just via two quick transactions instead of one bare SELECT.
+Row-claiming: a bare SELECT of due rows would let two concurrent worker instances *in the same
+region* both select and check the same due target, racing on the reschedule write.
+claim_due_targets() closes that gap with a claim-then-release-then-recheck pattern: a short
+transaction does SELECT ... FOR UPDATE SKIP LOCKED against this region's due,
+unclaimed-or-stale-claimed schedule rows, stamps claimed_at = now() on whatever it selected,
+and commits immediately — releasing the row lock before the actual HTTP check (which can take
+several seconds) ever starts, so a lock is never held for network I/O. A single worker instance
+sees this as a no-op: it always gets every due target back, just via two quick transactions
+instead of one bare SELECT. Two instances in *different* regions never contend for the same
+row at all, since each only ever queries its own region's rows.
 """
 
 import asyncio
@@ -64,34 +70,71 @@ NOTIFY_CHANNEL = "checks_inserted"
 CLAIM_TTL_SECONDS = 120
 
 
-async def claim_due_targets(conn: asyncpg.Connection) -> list[dict]:
+async def ensure_schedule_rows(conn: asyncpg.Connection, region: str) -> None:
     """
-    Select targets currently due for a check and claim them, atomically, so a concurrent
-    worker instance's own call to this function can never come back with the same target.
+    Guarantee every target has a target_region_schedule row for this region, before claiming.
 
-    SELECT ... FOR UPDATE SKIP LOCKED means a genuinely concurrent claim attempt on the same
-    row doesn't block waiting for this transaction — it just skips that row and returns
-    whatever else is due. The row lock is only held long enough to stamp claimed_at and
-    commit; the caller does the actual HTTP check afterward, outside any transaction.
-
-    A target is "due" if its schedule says so AND it isn't currently claimed by a still-live
-    claim: claimed_at is either NULL (never claimed / already cleared after a prior check) or
-    older than CLAIM_TTL_SECONDS (stale — treat as abandoned).
+    A target can exist with no schedule row for this region in two cases: it was created (by
+    the API, POST /targets) after this worker last ran this check, or this is the first time a
+    worker for this region has ever seen a pre-existing target (e.g. a brand-new region being
+    added). The API doesn't know what regions exist — REGION is a worker-only identity, not
+    shared/stored anywhere as a canonical list — so schedule rows are backfilled lazily here
+    instead of at target-creation time. New rows are due immediately (next_check_at = now()),
+    matching targets.next_check_at's old server_default behavior of checking a new target right
+    away. ON CONFLICT DO NOTHING makes this safe under concurrent same-region workers racing to
+    backfill the same missing row.
     """
+    await conn.execute(
+        """
+        INSERT INTO target_region_schedule (target_id, region, next_check_at, consecutive_failures)
+        SELECT t.id, $1, now(), 0
+        FROM targets t
+        LEFT JOIN target_region_schedule trs ON trs.target_id = t.id AND trs.region = $1
+        WHERE trs.target_id IS NULL
+        ON CONFLICT (target_id, region) DO NOTHING
+        """,
+        region,
+    )
+
+
+async def claim_due_targets(conn: asyncpg.Connection, region: str) -> list[dict]:
+    """
+    Select this region's targets currently due for a check and claim them, atomically, so a
+    concurrent worker instance in the same region can never come back with the same target.
+    (A worker in a different region never contends here at all — the WHERE region = $1 means
+    the two never even look at the same rows.)
+
+    SELECT ... FOR UPDATE OF trs SKIP LOCKED means a genuinely concurrent claim attempt on the
+    same row doesn't block waiting for this transaction — it just skips that row and returns
+    whatever else is due. "OF trs" scopes the lock to target_region_schedule rows only, not the
+    joined targets rows (no reason to contend with, say, a delete on targets). The row lock is
+    only held long enough to stamp claimed_at and commit; the caller does the actual HTTP check
+    afterward, outside any transaction.
+
+    A schedule row is "due" if its next_check_at says so AND it isn't currently claimed by a
+    still-live claim: claimed_at is either NULL (never claimed / already cleared after a prior
+    check) or older than CLAIM_TTL_SECONDS (stale — treat as abandoned).
+    """
+    await ensure_schedule_rows(conn, region)
+
     async with conn.transaction():
         rows = await conn.fetch(
             """
-            SELECT id, url, consecutive_failures
-            FROM targets
-            WHERE next_check_at <= now()
-              AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1))
-            FOR UPDATE SKIP LOCKED
+            SELECT t.id, t.url, trs.consecutive_failures
+            FROM target_region_schedule trs
+            JOIN targets t ON t.id = trs.target_id
+            WHERE trs.region = $1
+              AND trs.next_check_at <= now()
+              AND (trs.claimed_at IS NULL OR trs.claimed_at < now() - make_interval(secs => $2))
+            FOR UPDATE OF trs SKIP LOCKED
             """,
+            region,
             CLAIM_TTL_SECONDS,
         )
         if rows:
             await conn.execute(
-                "UPDATE targets SET claimed_at = now() WHERE id = ANY($1::int[])",
+                "UPDATE target_region_schedule SET claimed_at = now() WHERE region = $1 AND target_id = ANY($2::int[])",
+                region,
                 [row["id"] for row in rows],
             )
     return [dict(row) for row in rows]
@@ -111,16 +154,19 @@ async def insert_check(
     ttfb_ms: int | None,
     tls_cert_expires_at: datetime | None,
     tls_cert_issuer: str | None,
+    region: str,
 ) -> None:
     """Insert one row into checks — the honest historical record of this attempt, written
-    unconditionally regardless of how the target gets rescheduled afterwards."""
+    unconditionally regardless of how the target gets rescheduled afterwards. Tagged with the
+    region that performed it — backoff/claiming affects scheduling only, never whether or how
+    an actual check result gets recorded."""
     await conn.execute(
         """
         INSERT INTO checks (
             target_id, checked_at, status_code, latency_ms, is_up, error,
-            dns_ms, tcp_ms, tls_ms, ttfb_ms, tls_cert_expires_at, tls_cert_issuer
+            dns_ms, tcp_ms, tls_ms, ttfb_ms, tls_cert_expires_at, tls_cert_issuer, region
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         """,
         target_id,
         checked_at,
@@ -134,27 +180,31 @@ async def insert_check(
         ttfb_ms,
         tls_cert_expires_at,
         tls_cert_issuer,
+        region,
     )
 
 
 async def reschedule_target(
     conn: asyncpg.Connection,
     target_id: int,
+    region: str,
     is_up: bool,
     consecutive_failures_before: int,
 ) -> None:
     """
-    Update the target's scheduling state after a check. Success resets the failure streak and
-    returns to the normal CHECK_INTERVAL_SECONDS cadence; failure increments the streak and
-    schedules the next attempt using exponential backoff with jitter. Either way, this clears
-    claimed_at — the claim's job (keeping another worker instance from grabbing this target
-    while it was being checked) is done once this write lands.
+    Update this (target_id, region)'s scheduling state after a check. Success resets the
+    failure streak and returns to the normal CHECK_INTERVAL_SECONDS cadence; failure increments
+    the streak and schedules the next attempt using exponential backoff with jitter. Either
+    way, this clears claimed_at — the claim's job (keeping another worker instance in this same
+    region from grabbing this target while it was being checked) is done once this write lands.
     """
     if is_up:
         next_check_at = datetime.now(timezone.utc) + timedelta(seconds=settings.CHECK_INTERVAL_SECONDS)
         await conn.execute(
-            "UPDATE targets SET consecutive_failures = 0, next_check_at = $2, claimed_at = NULL WHERE id = $1",
+            "UPDATE target_region_schedule SET consecutive_failures = 0, next_check_at = $3, claimed_at = NULL "
+            "WHERE target_id = $1 AND region = $2",
             target_id,
+            region,
             next_check_at,
         )
     else:
@@ -162,8 +212,10 @@ async def reschedule_target(
         delay_seconds = compute_backoff_seconds(new_failures)
         next_check_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
         await conn.execute(
-            "UPDATE targets SET consecutive_failures = $2, next_check_at = $3, claimed_at = NULL WHERE id = $1",
+            "UPDATE target_region_schedule SET consecutive_failures = $3, next_check_at = $4, claimed_at = NULL "
+            "WHERE target_id = $1 AND region = $2",
             target_id,
+            region,
             new_failures,
             next_check_at,
         )
@@ -176,6 +228,7 @@ async def check_one(
     target_id: int,
     url: str,
     consecutive_failures_before: int,
+    region: str,
 ) -> None:
     """Check a single target, bounded by the semaphore, record its result, and reschedule it."""
     async with semaphore:
@@ -201,12 +254,12 @@ async def check_one(
                     "tls_cert_expires_at": None,
                     "tls_cert_issuer": None,
                 }
-                logger.info("[region=%s] Target %s blocked (SSRF): %s", settings.REGION, target_id, reason)
+                logger.info("[region=%s] Target %s blocked (SSRF): %s", region, target_id, reason)
             else:
                 result = await check_url(client, url, dns_ms)
                 logger.info(
                     "[region=%s] Target %s: %s %s ms (dns=%s tcp=%s tls=%s ttfb=%s) is_up=%s %s",
-                    settings.REGION,
+                    region,
                     target_id,
                     result["status_code"],
                     result["latency_ms"],
@@ -236,8 +289,9 @@ async def check_one(
                     ttfb_ms=result["ttfb_ms"],
                     tls_cert_expires_at=result["tls_cert_expires_at"],
                     tls_cert_issuer=result["tls_cert_issuer"],
+                    region=region,
                 )
-                await reschedule_target(conn, target_id, result["is_up"], consecutive_failures_before)
+                await reschedule_target(conn, target_id, region, result["is_up"], consecutive_failures_before)
                 # NOTIFY inside the same transaction: Postgres only actually delivers a
                 # notification once its transaction commits, so if the insert/reschedule above
                 # gets rolled back (e.g. the FK-violation case caught below), no notification
@@ -249,28 +303,30 @@ async def check_one(
             # checks.target_id foreign key once the target row is gone. Rather than let that
             # (or any other unexpected per-target error) propagate out of asyncio.gather() and
             # cancel every other concurrently in-flight check this cycle, log it and move on:
-            # a deleted target simply won't be selected again (its row, and next_check_at with
+            # a deleted target simply won't be selected again (its row, and schedule row with
             # it, no longer exists); any other target's state is untouched by this one failing.
             logger.exception(
                 "[region=%s] Check failed for target %s (it may have been deleted mid-check)",
-                settings.REGION,
+                region,
                 target_id,
             )
 
 
 async def run_cycle(pool: asyncpg.Pool, client: httpx.AsyncClient) -> None:
-    """Claim targets currently due for a check and check them concurrently (bounded by
-    CHECK_CONCURRENCY) — targets not yet due, or already claimed by another still-live worker,
-    are left alone until their next_check_at (or claim) expires."""
+    """Claim this worker's region's targets currently due for a check and check them
+    concurrently (bounded by CHECK_CONCURRENCY) — targets not yet due, or already claimed by
+    another still-live worker in the same region, are left alone until their next_check_at (or
+    claim) expires."""
+    region = settings.REGION
     async with pool.acquire() as conn:
-        targets = await claim_due_targets(conn)
+        targets = await claim_due_targets(conn, region)
     if not targets:
-        logger.debug("No targets due for a check")
+        logger.debug("[region=%s] No targets due for a check", region)
         return
     semaphore = asyncio.Semaphore(CHECK_CONCURRENCY)
     await asyncio.gather(
         *(
-            check_one(pool, client, semaphore, row["id"], row["url"], row["consecutive_failures"])
+            check_one(pool, client, semaphore, row["id"], row["url"], row["consecutive_failures"], region)
             for row in targets
         )
     )

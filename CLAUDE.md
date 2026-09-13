@@ -878,5 +878,75 @@ scheduling queries — see below.
   `insert_check` to be region-scoped against `target_region_schedule`, restoring real
   scheduling behavior.
 
+Phase 2, prompt 2.5 (region-scoped `get_due_targets`) is complete — step 4 of the 2.1 build
+order. **This restores real worker scheduling**, ending the temporary regression accepted in
+2.4. Backend/API/SSE payloads untouched, per this prompt's scope.
+- `claim_due_targets(conn, region)` now queries `target_region_schedule` joined to `targets`,
+  filtered by `region = $1`, with the same `FOR UPDATE ... SKIP LOCKED` + `claimed_at` stamp
+  pattern from prompt 2.2 — but scoped with `FOR UPDATE OF trs SKIP LOCKED` so the lock (and
+  skip-on-contention) applies only to the schedule row, not the joined `targets` row (no
+  reason to contend with e.g. a concurrent delete on `targets`). Two workers in the *same*
+  region still can't double-claim (same mechanism as 2.2, now on the new table); two workers
+  in *different* regions never even query the same rows, since each is scoped to its own
+  `region` — this is the region-scoping half of the 2.1 report's "both mechanisms needed
+  together" design.
+- `reschedule_target(conn, target_id, region, is_up, consecutive_failures_before)` now writes
+  `next_check_at`/`consecutive_failures`/`claimed_at` back to the matching
+  `(target_id, region)` row in `target_region_schedule` instead of `targets`.
+- **Real gap found and fixed, exactly as the prompt anticipated**: nothing created a
+  `target_region_schedule` row for a target's region — not target creation (`POST /targets`
+  only ever inserted into `targets`), and no other code path did it either. Without a fix, a
+  target created after this rewrite would simply never be checked (zero schedule rows = never
+  "due" in any region), and a brand-new region's first worker would see zero due targets
+  against an entire existing target list. Fixed with a new `ensure_schedule_rows(conn,
+  region)`, called at the start of every `claim_due_targets` call: an anti-join
+  (`targets LEFT JOIN target_region_schedule ... WHERE trs.target_id IS NULL`) backfills one
+  row per target missing this region's row, due immediately (`next_check_at = now()`,
+  matching the old `targets.next_check_at` server-default behavior for a new target),
+  `ON CONFLICT (target_id, region) DO NOTHING` so concurrent same-region workers racing to
+  backfill the same gap can't collide. **Deliberately lazy, not at target-creation time**:
+  the backend/API has no concept of "which regions exist" (`REGION` is a worker-only env var,
+  never written anywhere the API could read), so the worker — the only thing that actually
+  knows its own region — is the right place to self-register interest in any target it
+  hasn't seen yet.
+- `insert_check` gained a required `region` parameter (now that `claim_due_targets` works
+  again, `check_one` actually reaches `insert_check`, so `checks.region NOT NULL` — added
+  schema-only in 2.4 — needed a real value supplied here for the first time). Confirmed
+  unconditional: `insert_check` still runs before `reschedule_target` in the same
+  transaction, so `is_up=False` is recorded immediately regardless of backoff/claim state —
+  backoff/claiming affects only *when* the next check happens, never *whether* this one gets
+  honestly recorded.
+- `check_one`/`run_cycle` thread `region` (read once from `settings.REGION` in `run_cycle`)
+  through to `claim_due_targets`, `insert_check`, `reschedule_target`, and the existing
+  per-check log lines (now using the threaded value instead of re-reading `settings.REGION`
+  directly, for the small logical improvement of logging the region a check actually ran
+  under rather than a second independent read of global config).
+- `worker/tests/test_scheduling.py` updated for every new signature/SQL shape, plus a new
+  test asserting `ensure_schedule_rows`'s backfill runs before the claim SELECT. 35 worker
+  tests (was 34), all passing; 37 backend tests unaffected (no backend code touched).
+- **Verified end-to-end against the real dev stack**: rebuilt and restarted the `worker`
+  container — it immediately resumed real checking (confirmed via logs showing
+  `[region=local]`-tagged results and via direct query showing new `checks` rows with
+  `region='local'` and `target_region_schedule` rows advancing/`claimed_at` clearing
+  correctly), ending the 2.4-accepted regression. **Explicitly tested the gap-and-fix**:
+  inserted a target directly (simulating `POST /targets`, which creates no schedule row) —
+  confirmed it had zero `target_region_schedule` rows immediately after creation, then
+  confirmed the very next worker tick backfilled a `local` row for it and checked it (a real
+  `checks` row appeared, tagged `region='local'`). **Explicitly tested the brand-new-region
+  case** with a throwaway script (deleted after, not committed): called
+  `claim_due_targets(conn, "us-east-verify")` — a region with zero pre-existing schedule
+  rows — against the real dev DB's 23 existing targets; confirmed it backfilled and claimed
+  all 23, and confirmed the `local` region's own schedule rows were byte-for-byte unchanged
+  by the other region's activity (proving actual region isolation, not just isolation by
+  construction). Cleaned up all test data (`us-east-verify` rows, the directly-inserted test
+  target) afterward — verified via query that only `local` region rows remain (23, matching
+  the real target count).
+- Not touched in this prompt (explicitly out of scope, per the prompt): `backend/routers/
+  targets.py`, `backend/realtime.py`, any SSE/API payload exposure of `region`, any ADR. Per
+  the 2.1 report's build order, next is step 5 — backend/SSE payload changes to expose
+  `region` (the dashboard data model implications flagged back in the 2.1 report), at which
+  point an ADR documenting the SKIP LOCKED + region-scoping decision should also be written
+  per CLAUDE.md rule 5.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
