@@ -2197,5 +2197,85 @@ this prompt's explicit scope — nothing wired into alert-sending or forgot-pass
 downtime/cert-expiry alerting logic**, wiring `mail.send_email` into `realtime.py`'s
 `_handle_notification` (depends on 4.5, now complete).
 
+Phase 4, prompt 4.6 (`alert_history` schema + downtime/cert-expiry alerting) is complete.
+Alerting now genuinely fires from the backend, exactly per the 4.3 report's recommendation.
+- **`alert_history` migration `008`**, exactly the schema specified (target_id/region/
+  alert_type/last_state/last_sent_at/last_cert_expires_at, unique on
+  (target_id, region, alert_type), `ON DELETE CASCADE` from targets). New `AlertHistory` ORM
+  model — unlike `target_region_schedule`, this table is backend-owned (alerting logic lives
+  in `realtime.py`, per the Phase 4 design report), so it's a normal SQLAlchemy model like
+  every other backend table, not raw-asyncpg/worker-owned.
+- **Cooldown constants added as real `Settings` fields** (env-configurable per the prompt's
+  explicit ask, not just bare module constants like `CLAIM_TTL_SECONDS`):
+  `DOWNTIME_ALERT_COOLDOWN_SECONDS = 900` (matches `backoff.py`'s own cap),
+  `CERT_EXPIRY_REMINDER_COOLDOWN_DAYS = 3`. Also added `CERT_EXPIRY_WARN_DAYS = 14` (mirrors
+  the frontend's `lib/thresholds.ts` value — the backend had no equivalent constant before
+  this prompt, needed one to decide "is this cert now within the alerting window" at all) and
+  `FRONTEND_URL` (needed so the alert-evaluation logic can build real detail/settings links
+  for the templates, which deliberately don't know about routing themselves per 4.5's design).
+- **Real 4.5 gap closed**: the prompt's recovery-email requirement ("is_up=true and
+  last_state=='down' -> send a recovery/'back up' email") had no matching template — 4.5 only
+  built the three originally-scoped templates (downtime alert, cert-expiry alert, password
+  reset), not a recovery variant. Added `downtime_recovery_email` to `mail/templates.py` now,
+  since the behavior this prompt requires genuinely didn't exist yet — this is completing the
+  downtime-alert feature area this prompt is about, not scope creep into forgot-password/export.
+- **Implemented in `realtime.py`'s `_handle_notification`**, in the same session that already
+  resolves target -> owner and holds the fresh `Check` row, exactly per the report's
+  recommendation to reuse this existing seam rather than adding new infrastructure:
+  `_evaluate_downtime_alert` and `_evaluate_cert_expiry_alert`, each gated on the user's
+  `alert_on_downtime`/`alert_on_cert_expiry` preference before doing anything else (including
+  bookkeeping — a disabled preference means `alert_history` is never touched at all).
+  Downtime precedence implemented exactly as specified: suppressed while still down,
+  cooldown-gated against `last_sent_at` on a fresh down transition (this is what actually
+  dampens flapping — even a legitimate down-after-recovery transition respects the cooldown
+  from whichever email went out last, down or recovery), recovery email sent with no cooldown
+  gate of its own. Cert-expiry: fires on first crossing `<= 14` days, re-reminds at most every
+  3 days while unrenewed, and a changed `tls_cert_expires_at` (detected against
+  `last_cert_expires_at`) resets eligibility immediately regardless of the reminder cooldown.
+- **Region-awareness confirmed structurally, not just by inspection**: both evaluators only
+  ever query/write the `alert_history` row for the exact `(target_id, region)` that triggered
+  this specific notification — verified with a dedicated test seeding one target with a down
+  `local` check and an up `eu-west` check in the same call, confirming exactly one email fired
+  and only `local`'s `alert_history` row was touched.
+- **The failure-isolation requirement confirmed concretely, not just by code review**: the
+  entire alert-evaluation block sits in its own `try/except` around the email-sending step,
+  and a dedicated test (`test_sse_push_still_delivers_when_alert_evaluation_raises`) mocks
+  `send_email` to raise `RuntimeError`, then confirms the subscribed SSE queue still receives
+  the full, correct `check_update` payload and that no half-written `alert_history` row was
+  left behind (email is attempted before any bookkeeping write, so a raise can't leave stale
+  state either).
+- **Real test-environment gap found and fixed**: `test_mail.py`'s existing
+  `test_send_email_skips_without_an_api_key` asserted `settings.RESEND_API_KEY is None` against
+  the ambient environment — this broke the moment a **real Resend API key was added to this
+  project's own `.env`** (confirmed present, needed for eventual manual delivery
+  verification), since `docker compose run api` picks it up via `env_file`. Fixed properly
+  with `monkeypatch` rather than assuming an empty ambient environment; added two more
+  hermetic tests (key-configured send path, and a forced-failure path) mocking
+  `mail.client.resend.Emails.send_async` directly so no real network call is possible from the
+  test suite regardless of what's in `.env`. Every test in the new `test_alerting.py` likewise
+  patches `realtime.send_email` — necessary in this specific environment, not just defensive
+  style, since without it the suite would have attempted real Resend calls on every run.
+- 18 new backend tests (`test_alerting.py`, `test_mail.py`), 83 total (was 65), all passing
+  against a rebuilt `api` image.
+- **Verified live against the real dev database, deliberately without ever risking a real
+  email send**: recreated the running `api` container (confirmed the migration applied
+  cleanly to the real dev DB, `\d alert_history` matches the spec exactly), then ran the
+  alerting/SSE logic against real Postgres via `docker compose run --rm -e RESEND_API_KEY=`
+  (empty override for that one-off process only — the long-running `api` service's real key
+  from `.env` was never touched) so `send_email` was genuinely exercised but could only ever
+  safely no-op. Confirmed via a real registered account and a real target: a seeded down check
+  produced a real `alert_history` row (`last_state='down'`) and a real SSE push
+  (`is_up: false`); a subsequent seeded up check flipped the same row to `last_state='up'`
+  with a fresh `last_sent_at` and pushed `is_up: true` — the full downtime-then-recovery cycle,
+  against real infrastructure, with zero real outbound email risk. Workers were paused for the
+  duration (same "new/updated targets get picked up immediately" consideration as prior
+  prompts) and restarted after; verification account/target/checks/alert_history rows deleted
+  via the real `DELETE /auth/me` cascade, confirmed via SQL. All scratch scripts removed.
+- Not touched in this prompt, per its explicit scope: forgot-password, compliance export.
+
+**Next: continue Phase 4 per the 4.3 build order — prompt 4.7, forgot-password** (depends on
+4.5's Resend wrapper only, not on this prompt's alert_history/alerting logic), then **4.8,
+compliance export** (fully independent, could be reordered earlier if preferred).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

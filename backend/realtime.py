@@ -25,13 +25,15 @@ reasoning), so this is kept in sync by hand, not import.
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 from sqlalchemy import select
 
 from config import settings
 from database import AsyncSessionLocal
-from models import Check, Target
+from mail import cert_expiry_alert_email, downtime_alert_email, downtime_recovery_email, send_email
+from models import AlertHistory, Check, Target, User
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,139 @@ def _publish(user_id: int, payload: dict) -> None:
         queue.put_nowait(payload)
 
 
+async def _evaluate_downtime_alert(session, target: Target, check: Check, region: str, user: User) -> None:
+    """Send (or suppress) a downtime alert for this (target, region), based on the check that
+    just landed and what alert_history last recorded — see the Phase 4 design report:
+      - is_up=false, and (no row or last_state != 'down'), and the cooldown has elapsed since
+        the last email of any kind for this (target, region) -> send, upsert last_state='down'.
+      - is_up=false, last_state=='down' already -> suppress (still down, already alerted).
+      - is_up=true, last_state=='down' -> recovered; send a "back up" email, upsert
+        last_state='up'. No cooldown gate on recovery itself (per the Phase 4 report/prompt) —
+        but the *next* down transition still respects the cooldown against this email's own
+        last_sent_at, which is what actually dampens rapid flapping.
+    Does not commit — the caller commits once after both alert types are evaluated.
+    """
+    if not user.alert_on_downtime:
+        return
+
+    result = await session.execute(
+        select(AlertHistory).where(
+            AlertHistory.target_id == target.id,
+            AlertHistory.region == region,
+            AlertHistory.alert_type == "downtime",
+        )
+    )
+    row = result.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    target_label = target.name or target.url
+    detail_url = f"{settings.FRONTEND_URL}/dashboard/{target.id}"
+    settings_url = f"{settings.FRONTEND_URL}/settings"
+    checked_at = check.checked_at.isoformat() if check.checked_at else "unknown"
+
+    if not check.is_up:
+        if row is not None and row.last_state == "down":
+            return  # still down since the last alert — suppress
+        if row is not None and (now - row.last_sent_at).total_seconds() < settings.DOWNTIME_ALERT_COOLDOWN_SECONDS:
+            return  # a flapping target can't re-trigger faster than the cooldown
+        subject, body = downtime_alert_email(
+            target_label=target_label,
+            target_url=target.url,
+            region=region,
+            checked_at=checked_at,
+            error=check.error,
+            detail_url=detail_url,
+            settings_url=settings_url,
+        )
+        await send_email(user.email, subject, body)
+        if row is None:
+            session.add(
+                AlertHistory(target_id=target.id, region=region, alert_type="downtime", last_state="down", last_sent_at=now)
+            )
+        else:
+            row.last_state = "down"
+            row.last_sent_at = now
+    elif row is not None and row.last_state == "down":
+        subject, body = downtime_recovery_email(
+            target_label=target_label,
+            target_url=target.url,
+            region=region,
+            checked_at=checked_at,
+            detail_url=detail_url,
+            settings_url=settings_url,
+        )
+        await send_email(user.email, subject, body)
+        row.last_state = "up"
+        row.last_sent_at = now
+    # else: is_up=true and no row, or already 'up' — nothing to do, no bookkeeping needed.
+
+
+async def _evaluate_cert_expiry_alert(session, target: Target, check: Check, region: str, user: User) -> None:
+    """Send (or suppress) a cert-expiry alert for this (target, region). Fires once when
+    tls_cert_days_remaining first crosses <= CERT_EXPIRY_WARN_DAYS, then re-reminds at most
+    every CERT_EXPIRY_REMINDER_COOLDOWN_DAYS while still expiring and unrenewed. Renewal
+    (a changed tls_cert_expires_at from what alert_history last recorded) resets eligibility
+    immediately, regardless of the reminder cooldown, since it's a genuinely new expiry window
+    worth its own first alert. Does not commit — same caller-commits contract as the downtime
+    evaluator above."""
+    if not user.alert_on_cert_expiry:
+        return
+    if check.tls_cert_expires_at is None:
+        return  # no cert data on this check (plain http, or a failed check)
+
+    days_remaining = (check.tls_cert_expires_at - datetime.now(timezone.utc)).days
+    if days_remaining > settings.CERT_EXPIRY_WARN_DAYS:
+        return
+
+    result = await session.execute(
+        select(AlertHistory).where(
+            AlertHistory.target_id == target.id,
+            AlertHistory.region == region,
+            AlertHistory.alert_type == "cert_expiry",
+        )
+    )
+    row = result.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+
+    renewed = (
+        row is not None
+        and row.last_cert_expires_at is not None
+        and row.last_cert_expires_at != check.tls_cert_expires_at
+    )
+    cooldown_elapsed = row is not None and (
+        now - row.last_sent_at >= timedelta(days=settings.CERT_EXPIRY_REMINDER_COOLDOWN_DAYS)
+    )
+
+    if row is not None and not renewed and not cooldown_elapsed:
+        return  # already reminded recently about this same cert — suppress
+
+    subject, body = cert_expiry_alert_email(
+        target_label=target.name or target.url,
+        target_url=target.url,
+        region=region,
+        days_remaining=days_remaining,
+        expires_at=check.tls_cert_expires_at.isoformat(),
+        issuer=check.tls_cert_issuer,
+        detail_url=f"{settings.FRONTEND_URL}/dashboard/{target.id}",
+        settings_url=f"{settings.FRONTEND_URL}/settings",
+    )
+    await send_email(user.email, subject, body)
+    if row is None:
+        session.add(
+            AlertHistory(
+                target_id=target.id,
+                region=region,
+                alert_type="cert_expiry",
+                last_state="expiring",
+                last_sent_at=now,
+                last_cert_expires_at=check.tls_cert_expires_at,
+            )
+        )
+    else:
+        row.last_state = "expiring"
+        row.last_sent_at = now
+        row.last_cert_expires_at = check.tls_cert_expires_at
+
+
 async def _handle_notification(payload: str) -> None:
     """Resolve a notified target_id to its owner and publish the same status payload the
     REST endpoint would return for it (every region's latest check), so the frontend never
@@ -98,6 +233,31 @@ async def _handle_notification(payload: str) -> None:
         targets_by_id, checks_by_target, failures_by_target = _group_checks_by_target(rows)
         target = targets_by_id[target_id]
         payload_dict = build_target_status_payload(target, checks_by_target[target_id], failures_by_target[target_id])
+
+        # Alerting: evaluated in this same session/lookup, which already resolved target ->
+        # owner and has the fresh Check row for the region that actually triggered this
+        # notification — no second query round-trip needed, and this stays region-scoped by
+        # construction (it only ever evaluates *this* region's check against *this* region's
+        # alert_history rows, never a target-wide collapsed state). Wrapped in its own
+        # try/except: a Resend failure (or any other error here) must never block or corrupt
+        # the SSE push below, which is this handler's primary purpose and must always run.
+        check = checks_by_target[target_id].get(region)
+        if check is not None:
+            try:
+                user_result = await session.execute(select(User).where(User.id == target.user_id))
+                user = user_result.scalar_one_or_none()
+                if user is not None:
+                    await _evaluate_downtime_alert(session, target, check, region, user)
+                    await _evaluate_cert_expiry_alert(session, target, check, region, user)
+                    await session.commit()
+            except Exception:
+                logger.exception(
+                    "Alert evaluation failed for target %s region %s (check result was still "
+                    "recorded and the SSE push below still runs; only the alert email/bookkeeping "
+                    "for this event may be missing)",
+                    target_id,
+                    region,
+                )
 
     _publish(target.user_id, {"type": "check_update", "region": region, "target": payload_dict})
 

@@ -12,11 +12,17 @@ uvicorn as real, active importers.
 """
 
 from mail.client import send_email
-from mail.templates import cert_expiry_alert_email, downtime_alert_email, password_reset_email
+from mail.templates import (
+    cert_expiry_alert_email,
+    downtime_alert_email,
+    downtime_recovery_email,
+    password_reset_email,
+)
 
 __all__ = [
     "send_email",
     "downtime_alert_email",
+    "downtime_recovery_email",
     "cert_expiry_alert_email",
     "password_reset_email",
 ]

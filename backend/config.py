@@ -36,6 +36,28 @@ class Settings(BaseSettings):
     # domain is verified with Resend.
     RESEND_FROM_EMAIL: str = "Uptime Monitor <onboarding@resend.dev>"
 
+    # Base URL the backend uses to build links in outgoing email (detail page, settings page,
+    # password reset) — mail/templates.py takes fully-built URLs as arguments rather than
+    # knowing about frontend routing itself, so something has to own building them; that's
+    # realtime.py's alerting logic, using this setting. Same origin CORS already allows
+    # (main.py), just not previously named as a reusable setting.
+    FRONTEND_URL: str = "http://localhost:3000"
+
+    # Alerting (backend/realtime.py's NOTIFY handler — see the Phase 4 design report).
+    # A flapping target can't re-trigger a downtime email faster than this, regardless of how
+    # many genuine up/down transitions happen in between. 900s matches worker/backoff.py's own
+    # cap — the same point this project's backoff curve already treats a target as more than a
+    # transient blip.
+    DOWNTIME_ALERT_COOLDOWN_SECONDS: int = 900
+    # Mirrors the frontend's lib/thresholds.ts CERT_EXPIRY_WARN_DAYS — same "deliberately
+    # duplicated across services, kept in sync by hand" tradeoff as worker/ssrf.py vs
+    # backend/security/ssrf.py, since the frontend threshold isn't reachable from Python.
+    CERT_EXPIRY_WARN_DAYS: int = 14
+    # Once a cert is within CERT_EXPIRY_WARN_DAYS and unrenewed, re-remind at most this often
+    # rather than one-shot-forever (someone who hasn't renewed after the first email may still
+    # miss it) or on every single check (spam for a slow-moving, monotonic signal).
+    CERT_EXPIRY_REMINDER_COOLDOWN_DAYS: int = 3
+
     @model_validator(mode="after")
     def _enforce_cookie_secure_in_production(self) -> "Settings":
         """ENVIRONMENT=production always gets a secure cookie, even if COOKIE_SECURE

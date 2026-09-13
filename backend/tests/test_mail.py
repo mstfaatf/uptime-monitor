@@ -1,16 +1,41 @@
-"""Coverage for backend/mail/ (prompt 4.5): the Resend client wrapper and the three plain-text
-templates. Hermetic — no real Resend API calls (RESEND_API_KEY is unset in the test
-environment, which is exactly the no-op path this suite asserts)."""
+"""Coverage for backend/mail/ (prompts 4.5-4.6): the Resend client wrapper and the plain-text
+templates. Hermetic — no real Resend API calls. RESEND_API_KEY is controlled explicitly via
+monkeypatch in each test rather than assumed absent from the ambient environment: a real key
+may genuinely be configured in a developer's own .env (needed to actually verify alert
+delivery by hand), and a test asserting on that ambient global would be fragile/wrong to do
+so — it should control its own inputs."""
+
+from unittest.mock import AsyncMock, patch
 
 from config import settings
-from mail import cert_expiry_alert_email, downtime_alert_email, password_reset_email, send_email
+from mail import cert_expiry_alert_email, downtime_alert_email, downtime_recovery_email, password_reset_email, send_email
 
 
-async def test_send_email_skips_without_an_api_key():
-    """The test environment never sets RESEND_API_KEY — this is the real "safe degraded state"
-    path, not a mock standing in for it."""
-    assert settings.RESEND_API_KEY is None
+async def test_send_email_skips_without_an_api_key(monkeypatch):
+    monkeypatch.setattr(settings, "RESEND_API_KEY", None)
     sent = await send_email("nobody@example.com", "Subject", "Body")
+    assert sent is False
+
+
+async def test_send_email_sends_when_a_key_is_configured(monkeypatch):
+    """Mocks the Resend SDK call itself — this asserts send_email calls it with the right
+    shape, not that a real email is delivered (that's a live/manual verification concern, not
+    something a hermetic test should attempt)."""
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "re_test_fake_key")
+    with patch("mail.client.resend.Emails.send_async", new=AsyncMock(return_value={"id": "fake"})) as mock_send:
+        sent = await send_email("nobody@example.com", "Subject", "Body text")
+    assert sent is True
+    mock_send.assert_awaited_once()
+    call_args = mock_send.call_args[0][0]
+    assert call_args["to"] == ["nobody@example.com"]
+    assert call_args["subject"] == "Subject"
+    assert call_args["text"] == "Body text"
+
+
+async def test_send_email_returns_false_and_does_not_raise_when_resend_fails(monkeypatch):
+    monkeypatch.setattr(settings, "RESEND_API_KEY", "re_test_fake_key")
+    with patch("mail.client.resend.Emails.send_async", new=AsyncMock(side_effect=RuntimeError("boom"))):
+        sent = await send_email("nobody@example.com", "Subject", "Body")
     assert sent is False
 
 
@@ -44,6 +69,22 @@ def test_downtime_alert_email_does_not_duplicate_url_when_target_has_no_name():
     )
     assert body.count("https://example.com") == 1
     assert "No response" in body  # the null-error fallback
+
+
+def test_downtime_recovery_email_confirms_back_up_with_links():
+    subject, body = downtime_recovery_email(
+        target_label="My Site",
+        target_url="https://example.com",
+        region="local",
+        checked_at="2026-09-13 19:05:00 UTC",
+        detail_url="http://localhost:3000/dashboard/1",
+        settings_url="http://localhost:3000/settings",
+    )
+    assert "back up" in subject
+    assert "local" in subject
+    assert "responding again" in body
+    assert "http://localhost:3000/dashboard/1" in body
+    assert "http://localhost:3000/settings" in body
 
 
 def test_cert_expiry_alert_email_includes_days_expiry_and_issuer():

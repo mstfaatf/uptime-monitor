@@ -43,6 +43,31 @@ def downtime_alert_email(
     return subject, body
 
 
+def downtime_recovery_email(
+    target_label: str,
+    target_url: str,
+    region: str,
+    checked_at: str,
+    detail_url: str,
+    settings_url: str,
+) -> tuple[str, str]:
+    """Sent when a target's region recovers after a confirmed downtime alert — the "back up"
+    counterpart to downtime_alert_email, added in prompt 4.6 alongside the alerting logic that
+    actually needs both directions of the transition, not just the down side."""
+    target = _target_description(target_label, target_url)
+    subject = f"{target_label} is back up ({region})"
+    body = (
+        f"{target} is responding again, checked from {region}.\n"
+        f"\n"
+        f"Checked at: {checked_at}\n"
+        f"\n"
+        f"View details: {detail_url}\n"
+        f"\n"
+        f"Manage alert preferences: {settings_url}\n"
+    )
+    return subject, body
+
+
 def cert_expiry_alert_email(
     target_label: str,
     target_url: str,
