@@ -1880,5 +1880,71 @@ Three pre-existing UI bugs/gaps fixed before starting the alerting/export work p
 alerts with a cooldown, CSV/PDF export), including the `consecutive_failures` exposure
 recommended back in the 3.9 wrap-up.
 
+Phase 4, prompt 4.2 (landing page expansion, typography accents, copy pass) is complete.
+No "frontend-design" skill was available in this session's skill list to self-critique
+against as the prompt asked — substituted the project's own established 3.1 avoid-list
+(the same checklist CLAUDE.md has referenced throughout Phase 3) instead, flagged explicitly
+rather than silently guessed at.
+- **Landing page expansion** (`app/page.tsx`): replaced the old single 3-item benefits grid
+  with five real sections between the hero and footer: "How a check works" (the actual DNS ->
+  TCP -> TLS -> TTFB check lifecycle plus backoff-with-jitter behavior, in prose, with a plain
+  labeled phase row underneath), "What gets measured" (two columns, per-check data vs.
+  per-target analytics, naming real shipped Phase 3 features like the SLA%/heatmap/incident
+  timeline rather than vague claims), "Multiple regions, independently" (expanded explanation
+  plus a small mockup reusing the real `RegionBadge`/`SignalLight` components, labeled
+  "Illustrative reading" like the existing hero panel, not presented as live data), "Private by
+  default" (kept from the old grid, own paragraph), and "Built with" (the real stack by name,
+  deliberately not claiming any live deployment, since deployment is still Phase 5 and 3.4
+  already caught and fixed that exact false claim once before).
+- **Copy pass**: rewrote the hero paragraph and all new section copy to read like a person
+  describing a real tool — no em dashes anywhere (verified via grep across the file, zero
+  matches), restructured with commas/colons instead. Confirmed against the avoid-list: no
+  all-caps eyebrow labels, no arrow-suffixed buttons/links (the phase-row "->" and mockup are
+  sequence/data notation, not decorative CTA arrows, same precedent as the incident timeline's
+  "start -> end"), no middle-dot-joined meta text, no numbered markers outside the incident
+  timeline (plain bullets used instead), no fake testimonials, no pricing.
+- **Signal-color typography extended into the dashboard list view** (`app/dashboard/page.tsx`)
+  — the detail page already colored SLA%/cert-expiry text (Phase 3), but the dashboard's own
+  summary-strip counts and per-row latency numbers were still plain `--text-primary` regardless
+  of state. Before: all four state counts and every row's latency number rendered in the same
+  color no matter what they meant. After: each count colored to match its own state
+  (`--signal-up`/`--signal-warning`/`--signal-down`/`--signal-pending-text`), and each row's
+  latency number colored by that region's derived state via a new `latencyColor()` helper (down
+  -> red, degraded -> amber, up -> left at the default `--text-primary`, deliberately not
+  colored, so an accent still reads as "something worth noticing" rather than decoration
+  applied to every number on the page). Used the raw signal tokens for up/warning/down text
+  (already confirmed AA-safe for text by the 3.8 contrast audit) and the `--signal-pending-text`
+  contrast-adjusted variant for pending, never the raw `--signal-pending` hex, per the prompt.
+- **Checkered accent**: new `app/icon.svg`, a small monochrome 4x4 checkerboard favicon built
+  only from the locked palette's own hex values (`--bg-base`/`--text-primary`/`--border`,
+  copied literally since a standalone SVG file can't reference the page's CSS custom
+  properties). No favicon existed at all before this prompt. Chose the favicon over a patterned
+  divider or gauge-backdrop texture because it's the one placement that never competes with
+  real in-page data legibility (a browser tab icon, noticed only if you look for it) and
+  because this prompt's actual brief was fixing too much *empty* content space, so spending
+  visual weight on in-page decorative texture would have worked against that goal. Verified
+  served correctly (`GET /icon.svg` returns 200, `image/svg+xml`) and that Next's file-convention
+  auto-generated the `<link rel="icon">` tag pointing at it, via a live Playwright check against
+  the dev server, not just by creating the file and assuming the convention applies.
+- **Verified against the live dev server and real backend** (Playwright, not just tsc): full-
+  page screenshots of the landing page at both desktop (1280px) and mobile (400px) widths,
+  confirming the new sections read cleanly, side gutters hold, and the region mockup/phase-row
+  wrap sensibly narrow. Registered a throwaway user, created a real target, and seeded one
+  degraded (950ms, `local`) and one down (`eu-west`) check directly via SQL to screenshot the
+  dashboard's new colored counts/latency in a real non-trivial state (1 degraded amber, 1 down
+  red, avg-latency gauge red at 950ms, row latency "950 ms" rendered in amber) rather than only
+  the all-healthy case. Verification account and its seeded checks were deleted afterward via
+  the real `DELETE /auth/me` flow (confirmed via direct SQL count that both the target and its
+  checks were gone, cascade working as expected); all scratch scripts/screenshots removed.
+  `tsc --noEmit` clean throughout. Did not run `next build` since the user's dev server was
+  live on port 3000 (per the prompt-3.7 finding); live-stack Playwright screenshots stood in
+  for it, consistent with 4.1's approach.
+- Not touched in this prompt, per its explicit scope: `/about` (only the landing page's copy
+  was in scope), alerting, compliance export.
+
+**Next: continue Phase 4 — Alerting + compliance export** (Resend downtime + cert-expiry
+alerts with a cooldown, CSV/PDF export), including the `consecutive_failures` exposure
+recommended back in the 3.9 wrap-up.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

@@ -95,6 +95,16 @@ function RegionBadge({ region }: { region: string }) {
   );
 }
 
+// Only down/degraded latency gets an accent color, matching the LatencyGauge's own zone
+// coloring (lib/thresholds.ts) — an "up" reading stays the default text color so color
+// reads as a signal worth noticing, not decoration applied to every number on the page.
+function latencyColor(state: SignalState): string {
+  if (state === "down") return "var(--signal-down)";
+  if (state === "degraded") return "var(--signal-warning)";
+  if (state === "pending") return "var(--signal-pending-text)";
+  return "var(--text-primary)";
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const [items, setItems] = useState<TargetStatusRow[]>([]);
@@ -393,19 +403,27 @@ export default function DashboardPage() {
             <div className="flex items-center gap-5">
               <div className="flex items-center gap-2">
                 <SignalLight state="up" size="sm" />
-                <span className="font-mono text-sm">{counts.up}</span>
+                <span className="font-mono text-sm" style={{ color: "var(--signal-up)" }}>
+                  {counts.up}
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <SignalLight state="degraded" size="sm" />
-                <span className="font-mono text-sm">{counts.degraded}</span>
+                <span className="font-mono text-sm" style={{ color: "var(--signal-warning)" }}>
+                  {counts.degraded}
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <SignalLight state="down" size="sm" />
-                <span className="font-mono text-sm">{counts.down}</span>
+                <span className="font-mono text-sm" style={{ color: "var(--signal-down)" }}>
+                  {counts.down}
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <SignalLight state="pending" size="sm" />
-                <span className="font-mono text-sm">{counts.pending}</span>
+                <span className="font-mono text-sm" style={{ color: "var(--signal-pending-text)" }}>
+                  {counts.pending}
+                </span>
               </div>
             </div>
             <div className="ml-auto flex flex-col items-center">
@@ -557,7 +575,7 @@ export default function DashboardPage() {
                             <div key={region} className="flex items-center gap-3">
                               <RegionBadge region={region} />
                               <SignalLight state={state} size="sm" showLabel />
-                              <span className="font-mono text-sm" style={{ color: "var(--text-primary)" }}>
+                              <span className="font-mono text-sm" style={{ color: latencyColor(state) }}>
                                 {check.latency_ms != null ? `${check.latency_ms} ms` : "—"}
                               </span>
                               <span className="font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
