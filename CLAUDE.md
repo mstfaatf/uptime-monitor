@@ -2496,5 +2496,56 @@ not built** — `reportlab` per the 4.3 report's recommendation (pure-Python, av
 verification** — matching the pattern every prior phase has closed with (0.7, 1.6, 2.8, 3.9) —
 plus, whenever wanted, the deferred PDF export follow-up.
 
+**Phase 4, prompt 4.9 (wrap-up + full verification) is complete. Phase 4 is genuinely,
+verifiably done** — every piece (nav/delete-account/legend fixes, landing expansion,
+degraded-trigger precedence, Resend client, downtime + cert-expiry alerting, forgot-password,
+CSV export) confirmed working, with the two alert paths not yet proven with a real send
+(cert-expiry, and a full forgot-password round-trip) closed out in this pass.
+- **147 tests total** (111 backend + 36 worker), all passing against freshly rebuilt images.
+  No coverage gaps found against what the prompt named — `test_alerting.py` (18),
+  `test_password_reset.py` (9), `test_export.py` (16), and `test_check_timing.py`'s
+  `consecutive_failures` exposure tests already cover cooldown/recovery/flapping, token
+  expiry/reuse, export ownership, and the degraded-trigger's API dependency respectively — no
+  new tests needed.
+- **Cert-expiry alert proven live for the first time** (4.6.1 only proved downtime/recovery):
+  seeded a near-expiry cert, fired a real notification — a real email sent, `alert_history`
+  recorded correctly. Backdated past the 3-day reminder cooldown and re-notified: a real
+  second reminder sent. Re-notified again immediately: correctly suppressed.
+- **Downtime/recovery regression-checked live** on the same target (reusing the mechanism, not
+  repeating 4.6.1's exhaustive original drill) — both alert types tracked independently for
+  one target/region with no interference, confirming nothing in 4.7/4.8's later changes to
+  `auth.py`/`targets.py` touched `realtime.py`'s alerting path.
+- **Forgot-password proven as a genuine full round-trip for the first time** (4.7 deliberately
+  used only throwaway `@example.com` accounts): real request against the real account, real
+  send, a known-token substitution to complete a real reset (the same legitimate technique
+  from 4.7 — raw tokens only ever exist in the sent email, by design), confirmed login with
+  the new password, then restored the original password via `change-password` — net zero
+  change to the real credential, full flow proven for real.
+- **CSV export reconfirmed** with genuinely divergent seeded per-region data (`local` up/100%
+  SLA, `eu-west` down/0% SLA, same target) — no collapsing, matching 4.8's original proof.
+- **4.1 regressions held**: brand-link routing, landing page's authenticated CTA swap, and
+  delete-account's real sign-out all reconfirmed via a fresh browser-driven run.
+- **Phase 0-3 regressions all held**: ownership (404 not 403 cross-user, 401 anonymous, across
+  detail/checks/export/delete), rate limiting exact on all five limited endpoints including the
+  new forgot-password (3) and reset-password (5) limits, `JWT_SECRET` fail-fast (real container
+  crash and clean recovery), cookie flags (`HttpOnly; SameSite=lax`, no `Secure` in dev,
+  confirmed via raw header inspection), per-user SSE filtering (two real concurrent
+  `EventSource` connections, exactly 1 event to the owner and 0 to the other user), and
+  per-region independence in both the status API and export output.
+- **One honest, out-of-scope finding**: 31 leftover test accounts turned up in the dev DB, but
+  all at id 3-39 with timestamps from days before this session started — pre-existing cruft
+  from Phase 0-3's own historical verification, not something this session left behind.
+  Confirmed zero accounts remain at id 40+ (everything created this session, including this
+  wrap-up's own verification, was cleaned up). Not fixed here, flagged for whenever convenient.
+- Real account's 7 original targets and restored password confirmed untouched throughout.
+- **Assessment: Phase 4 is genuinely done.** PDF export staying deferred is the right call, not
+  a gap — CSV already satisfies the compliance-export requirement functionally, and
+  `reportlab` remains a clean, scoped follow-up whenever wanted, not a Phase 5 blocker. Nothing
+  else needs revisiting before deploy.
+
+**Phase 4 complete. Next: Phase 5 — Deploy** (Neon for Postgres, Railway for the API and both
+worker instances, Vercel for the frontend, CORS updated to the real domain, CI pipeline) per
+CLAUDE.md's phase plan.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
