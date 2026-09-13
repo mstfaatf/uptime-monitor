@@ -1798,5 +1798,87 @@ authenticated page — all built, tested, and verified.** No known gaps remain. 
 CSV/PDF export), including building the `consecutive_failures` exposure as part of that
 work rather than as a separate Phase 3 addition, per the 3.9 recommendation.
 
+Phase 4, prompt 4.1 (auth-aware navigation, delete account, dashboard legend) is complete.
+Three pre-existing UI bugs/gaps fixed before starting the alerting/export work proper.
+- **Root cause of the nav bug, confirmed before fixing**: the session cookie was never being
+  cleared. `SiteHeader`'s brand link was hardcoded to `"/"` and neither it nor the landing page
+  (`app/page.tsx`) ever checked auth state at all — an authenticated user clicking the brand
+  link, or just loading `/`, always got the signed-out variant regardless of session validity.
+  Same root cause for `/login`/`/register`: neither had any auth check, so an authenticated
+  user visiting them directly saw the form again instead of being redirected.
+- New `frontend/lib/use-auth-status.ts` — a small `useAuthStatus()` hook wrapping a single
+  `/auth/me` fetch, factored out since `SiteHeader`, the landing page, `/login`, and `/register`
+  all now need the same authenticated/loading state. No shared auth context was introduced
+  (each caller still fires its own request) — consistent with this app's existing per-page
+  independent-fetch convention (dashboard, settings), and not enough duplication yet
+  (2 callers on the landing page) to justify a global provider.
+- `components/site-header.tsx` (used by `/`, `/about`, `/login`, `/register`) is now
+  auth-aware: brand link routes to `/dashboard` when authenticated, `/` otherwise; nav swaps
+  "Log in" for a "Sign out" button (calls `/auth/logout`, then routes home) when authenticated.
+  This fix applies everywhere `SiteHeader` is used, including `/about` — a deliberate, in-scope
+  side effect of fixing the shared component, not new landing-page content.
+- `app/page.tsx` (landing): hero CTA swaps Register/Log in for "See my dashboard"
+  (`/dashboard`) / "Sign out" when a valid session is present, per the prompt. Marketing copy/
+  benefits/footer untouched, per this prompt's explicit scope.
+- `app/login/page.tsx` and `app/register/page.tsx`: both now redirect an authenticated visitor
+  straight to `/dashboard` via a `useEffect` on `useAuthStatus()`, rendering nothing until the
+  check resolves (avoids flashing the form before the redirect fires).
+- **Delete account**: confirmed no `DELETE /auth/me` (or equivalent) existed —
+  `backend/routers/auth.py` only had register/login/logout/me/change-password/preferences.
+  Added it: `await db.delete(current_user)` + `clear_session_cookie(response)`, 204 response.
+  **Cascade is via the database's existing `ON DELETE CASCADE` foreign keys**, not explicit
+  per-table cleanup code — `targets.user_id -> users.id`, `checks.target_id -> targets.id`,
+  and `target_region_schedule.target_id -> targets.id` were all already declared CASCADE (see
+  migrations 001 and 006), so one `DELETE FROM users WHERE id = ...` cascades all the way
+  down at the DB level. **Ownership is enforced structurally, not by a filter clause**:
+  `current_user` comes from `get_current_user`, resolved strictly from the caller's own
+  session cookie — there is no id parameter an attacker could substitute, so this can only
+  ever delete the caller's own account. 4 new backend tests
+  (`backend/tests/test_account_deletion.py`): auth-required, account+cascaded-checks actually
+  gone (verified via direct SQL count, not just via the API), session cleared, and a second
+  user's data is untouched when the first deletes their account. 57 backend tests total (was
+  53), all passing against a rebuilt `api` image; the running `api` container was recreated
+  from that image afterward.
+- Frontend delete-account UI lives in a new "Danger zone" section on `/settings`, in its own
+  `rounded-sm` (small radius) box with a `--signal-down`-colored border and heading — no new
+  colors introduced, both tokens already existed. **Confirmation pattern: type-to-confirm
+  (type the account's exact email), not a modal** — stated reasoning inline in the component:
+  this project has no Dialog primitive yet (would mean a new Radix dependency for one
+  single use), and typing the exact email is a stronger deliberate-action barrier for an
+  irreversible operation than clicking through a modal's own confirm button. The final
+  "Permanently delete account" button stays disabled until the typed text matches the
+  account's real email exactly.
+- **Dashboard legend**: a compact single row of `SignalLight` dot+label pairs (all four
+  states — up/degraded/down/pending, reusing the exact locked `SIGNAL_STATE_LABELS`
+  microcopy) added directly below the summary strip on `/dashboard`, in the same
+  bordered-strip instrument-panel treatment as the summary strip itself — not a separate
+  boxed explainer competing with the real data, per the prompt.
+- **Verified end-to-end against the live stack** (Playwright driving the real dev server on
+  port 3000 against the real API, not mocks): registered a throwaway user in-browser so the
+  session cookie landed in the test browser context; confirmed the logged-out landing page
+  shows Register/Log in, the logged-in landing page swaps to See my dashboard/Sign out, the
+  brand link genuinely navigates to `/dashboard` when authenticated, `/login` and `/register`
+  both genuinely redirect an authenticated visitor to `/dashboard`, the dashboard legend
+  renders all four state labels after adding a real target, the delete-confirm button is
+  disabled for a wrong typed email and enabled for the correct one, deleting redirects to `/`
+  and immediately shows the signed-out landing page, and — checked server-side, not just via
+  the UI's own success state — `/auth/me` returns 401 and logging back in with the same
+  credentials returns 401 after deletion. Also screenshotted the landing page (both auth
+  states), the dashboard legend, and the settings danger-zone section to confirm the styling
+  reads correctly (small radius, signal-down border/text, no competing visual weight against
+  the real dashboard data). All scratch verification scripts/screenshots deleted afterward;
+  no leftover test accounts (the verification/screenshot accounts were the ones deleted as
+  part of testing the delete flow itself). `tsc --noEmit` clean throughout. Did not run
+  `next build` this prompt — the user's own dev server was live on port 3000 throughout, and
+  per the prompt-3.7 finding, `next build` corrupts a concurrently-running `next dev`'s shared
+  `.next` directory regardless of whether it's cleaned first; live-stack Playwright
+  verification stood in for it instead.
+- Not touched in this prompt, per its explicit scope: landing page marketing copy/typography
+  accents, alerting, compliance export.
+
+**Next: continue Phase 4 — Alerting + compliance export** (Resend downtime + cert-expiry
+alerts with a cooldown, CSV/PDF export), including the `consecutive_failures` exposure
+recommended back in the 3.9 wrap-up.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

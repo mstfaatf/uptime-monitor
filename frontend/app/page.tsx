@@ -1,7 +1,12 @@
+"use client";
+
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { SiteHeader } from "@/components/site-header";
 import { HeroPanel } from "@/components/hero-panel";
 import { Button } from "@/components/ui/button";
+import { apiJson } from "@/lib/api";
+import { useAuthStatus } from "@/lib/use-auth-status";
 
 const BENEFITS = [
   {
@@ -19,6 +24,17 @@ const BENEFITS = [
 ];
 
 export default function LandingPage() {
+  const router = useRouter();
+  const { authenticated, loading } = useAuthStatus();
+
+  async function handleSignOut() {
+    try {
+      await apiJson("/auth/logout", { method: "POST" });
+    } finally {
+      router.refresh();
+    }
+  }
+
   return (
     <>
       <SiteHeader />
@@ -34,12 +50,25 @@ export default function LandingPage() {
               the request a slowdown actually happened.
             </p>
             <div className="mt-8 flex gap-3">
-              <Button asChild>
-                <Link href="/register">Register</Link>
-              </Button>
-              <Button asChild variant="outline">
-                <Link href="/login">Log in</Link>
-              </Button>
+              {!loading && authenticated ? (
+                <>
+                  <Button asChild>
+                    <Link href="/dashboard">See my dashboard</Link>
+                  </Button>
+                  <Button type="button" variant="outline" onClick={handleSignOut}>
+                    Sign out
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button asChild>
+                    <Link href="/register">Register</Link>
+                  </Button>
+                  <Button asChild variant="outline">
+                    <Link href="/login">Log in</Link>
+                  </Button>
+                </>
+              )}
             </div>
           </div>
           <HeroPanel />

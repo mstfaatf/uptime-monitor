@@ -128,3 +128,24 @@ async def update_preferences(
     await db.flush()
     await db.refresh(current_user)
     return UserResponse.model_validate(current_user)
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_account(
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently delete the authenticated user's account and everything scoped to it.
+
+    targets.user_id, checks.target_id, and target_region_schedule.target_id are all declared
+    ON DELETE CASCADE (see alembic/versions/001_initial_users_targets_checks.py and
+    .../006_add_region_and_target_schedule.py), so a single DELETE on the user row cascades
+    through targets -> checks and targets -> target_region_schedule at the database level —
+    no explicit per-table cleanup needed here. current_user comes from get_current_user, which
+    resolves strictly from the caller's own session cookie, so this can only ever delete the
+    caller's own row and everything that transitively references it — never another user's.
+    """
+    await db.delete(current_user)
+    clear_session_cookie(response)
+    return None

@@ -1,17 +1,25 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiJson } from "@/lib/api";
+import { useAuthStatus } from "@/lib/use-auth-status";
 import { AuthForm } from "@/components/auth-form";
 import { SiteHeader } from "@/components/site-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function RegisterPage() {
   const router = useRouter();
+  const { authenticated, loading: authChecking } = useAuthStatus();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  // An already-authenticated user hitting /register directly should land on the dashboard,
+  // not be shown the form again.
+  useEffect(() => {
+    if (!authChecking && authenticated) router.replace("/dashboard");
+  }, [authChecking, authenticated, router]);
 
   async function handleSubmit(email: string, password: string) {
     setError("");
@@ -29,6 +37,8 @@ export default function RegisterPage() {
       setLoading(false);
     }
   }
+
+  if (authChecking || authenticated) return null;
 
   return (
     <>

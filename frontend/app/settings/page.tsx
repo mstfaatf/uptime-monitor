@@ -35,6 +35,15 @@ export default function SettingsPage() {
   const [passwordSuccess, setPasswordSuccess] = useState("");
   const [changingPassword, setChangingPassword] = useState(false);
 
+  // Delete account: type-to-confirm rather than a modal dialog — this project has no Dialog
+  // primitive yet (would mean pulling in a new Radix component for one single use), and
+  // requiring the exact email to be typed is a stronger deliberate-action barrier for an
+  // irreversible operation than clicking through a modal's own confirm button.
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const [deletingAccount, setDeletingAccount] = useState(false);
+
   useEffect(() => {
     (async () => {
       const res = await apiFetch("/auth/me");
@@ -107,6 +116,27 @@ export default function SettingsPage() {
     } finally {
       router.replace("/login");
       router.refresh();
+    }
+  }
+
+  async function handleDeleteAccount() {
+    if (!me || deleteConfirmText !== me.email) return;
+    setDeleteError("");
+    setDeletingAccount(true);
+    try {
+      const res = await apiFetch("/auth/me", { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const msg = typeof data.detail === "string" ? data.detail : "Failed to delete account.";
+        setDeleteError(msg);
+        setDeletingAccount(false);
+        return;
+      }
+      router.replace("/");
+      router.refresh();
+    } catch {
+      setDeleteError("Network error. Try again.");
+      setDeletingAccount(false);
     }
   }
 
@@ -254,6 +284,74 @@ export default function SettingsPage() {
                   {changingPassword ? "Changing…" : "Change password"}
                 </Button>
               </form>
+            </section>
+
+            <section
+              className="mt-6 rounded-sm border p-5"
+              style={{ borderColor: "var(--signal-down)", background: "var(--bg-surface)" }}
+            >
+              <h2 className="font-semibold" style={{ color: "var(--signal-down)" }}>
+                Danger zone
+              </h2>
+              <p className="mt-1 text-sm" style={{ color: "var(--text-secondary)" }}>
+                Permanently delete your account, every target you've added, and their full
+                check history. This cannot be undone.
+              </p>
+
+              {!showDeleteConfirm ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-4"
+                  style={{ borderColor: "var(--signal-down)", color: "var(--signal-down)" }}
+                  onClick={() => setShowDeleteConfirm(true)}
+                >
+                  Delete account
+                </Button>
+              ) : (
+                <div className="mt-4 flex flex-col gap-3">
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="delete-confirm">
+                      Type <span className="font-mono">{me.email}</span> to confirm
+                    </Label>
+                    <Input
+                      id="delete-confirm"
+                      type="text"
+                      value={deleteConfirmText}
+                      onChange={(e) => setDeleteConfirmText(e.target.value)}
+                      autoComplete="off"
+                      disabled={deletingAccount}
+                    />
+                  </div>
+                  {deleteError && (
+                    <p className="text-sm" style={{ color: "var(--signal-down)" }}>
+                      {deleteError}
+                    </p>
+                  )}
+                  <div className="flex gap-3">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      disabled={deleteConfirmText !== me.email || deletingAccount}
+                      onClick={handleDeleteAccount}
+                    >
+                      {deletingAccount ? "Deleting…" : "Permanently delete account"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={deletingAccount}
+                      onClick={() => {
+                        setShowDeleteConfirm(false);
+                        setDeleteConfirmText("");
+                        setDeleteError("");
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              )}
             </section>
           </>
         )}

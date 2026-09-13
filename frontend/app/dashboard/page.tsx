@@ -417,6 +417,22 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {!loading && items.length > 0 && (
+          <div
+            className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-sm border px-4 py-2"
+            style={{ borderColor: "var(--border)" }}
+          >
+            {(["up", "degraded", "down", "pending"] as SignalState[]).map((state) => (
+              <div key={state} className="flex items-center gap-2">
+                <SignalLight state={state} size="sm" />
+                <span className="font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
+                  {SIGNAL_STATE_LABELS[state]}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
         <section
           className="mt-8 max-w-md rounded border p-5"
           style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
