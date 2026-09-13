@@ -679,5 +679,48 @@ instance would independently select and check whatever's currently due, so this 
 as the first piece of Phase 2, before any multi-region check-dispatch logic is layered on top
 of it, not after.
 
+Phase 2, prompt 2.1 (familiarization + design proposal) is complete. Read-only — no
+application code or schema changes in this prompt; full report delivered directly in the
+conversation (not saved to a file), reread the conversation history if picking this up cold.
+- Confirmed and traced the known gap precisely: `get_due_targets` has no claiming, so two
+  concurrent workers can select the same due target, both fire real HTTP requests against it,
+  and race on the `reschedule_target` write (lost-update, not a crash — `checks` has no
+  uniqueness constraint so duplicate observation rows are harmless, but duplicate outbound
+  traffic to the target and inconsistent final scheduling state are real problems).
+- Proposed row-claiming: `SELECT ... FOR UPDATE SKIP LOCKED` plus a new nullable
+  `claimed_at` column on the schedule state, claimed-and-released in a short transaction
+  (not held for the full HTTP check) so locks aren't tied up for network I/O latency; a stale
+  claim (crashed worker) self-heals via a time-based check rather than a heartbeat/lease
+  system.
+- Proposed multi-region schema: `region` column on `checks`; scheduling state
+  (`next_check_at`/`consecutive_failures`/`claimed_at`) moves off `targets` into a new
+  per-target-per-region table, since each region's worker should independently track its own
+  success/failure history against a target rather than sharing one global clock — this also
+  means region-scoping (each worker only queries its own region's rows) and `SKIP LOCKED`
+  (for same-region horizontal scaling) are both needed together, not one replacing the other.
+  Recommended 2 regions for this portfolio project — enough to exercise the coordination and
+  independent-display story, more would just add hosting cost without a new architectural
+  lesson.
+- Recommended per-region results stay independently tracked and displayed (no single
+  collapsed up/down verdict across regions) — this is a personal monitoring tool for the
+  target's owner, not a public status page, so hiding which specific region sees a problem
+  would destroy exactly the diagnostic signal (and the Phase 1 timing-breakdown investment)
+  that makes multi-region checking useful here.
+- Flagged (not built): SSE notify payload needs to carry region so the frontend can tell
+  which region an incoming `check_update` is for; `TargetStatusResponse.latest_check` needs
+  to become per-region (a dict/list, not a single latest check) once regions are independent;
+  the dashboard's current full-row-replace reducer would need to merge into a region's slot
+  instead. All deferred to Phase 3 per the existing phase plan.
+- Recommended build order: row-claiming first (proven against the current single-region
+  schema, since it's needed even for two same-region replicas) → `REGION` env var plumbing →
+  schema migration (checks.region + per-target-per-region schedule table, replacing the
+  `targets` scheduling columns) → region-scoped `get_due_targets` → backend/SSE payload
+  changes (+ ADR written at this point, once both halves of the coordination story are
+  implemented) → second worker instance actually run concurrently as the integration test
+  proving no double-checks/lost updates, mirroring how Phase 1 verified each piece against
+  the live stack rather than trusting unit tests alone.
+- No code changes, no new files, no migrations in this prompt — report only, pending review
+  before Phase 2 implementation begins.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
