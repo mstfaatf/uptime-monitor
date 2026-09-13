@@ -2277,5 +2277,74 @@ Alerting now genuinely fires from the backend, exactly per the 4.3 report's reco
 4.5's Resend wrapper only, not on this prompt's alert_history/alerting logic), then **4.8,
 compliance export** (fully independent, could be reordered earlier if preferred).
 
+Prompt 4.6.1 (live Resend delivery verification) is complete. **Live email delivery is now
+verified end to end against the real, production Resend API — downtime alert, recovery
+alert, and cooldown suppression all confirmed with real sends, not mocks.** Not a numbered
+Phase 4 prompt (a direct follow-up closing the one thing 4.6 deliberately deferred).
+- **Blocked twice before any verification could start, both resolved by asking rather than
+  guessing**: (1) the recipient needed to be a real, checkable inbox — since `RESEND_FROM_EMAIL`
+  is still Resend's sandbox address, delivery is restricted to the Resend account's own
+  registered address, and this session has a standing instruction never to hand the user's
+  email to a third-party service without them explicitly asking — user confirmed using their
+  own address for this test. (2) That account (`m.attifff@gmail.com`, id=1) already existed in
+  the dev DB with real, pre-existing monitored targets (reddit, bbc, github, etc.) and no known
+  password — user shared the password directly rather than have it guessed or reset unprompted.
+  Logged in normally via `POST /auth/login`; the 7 pre-existing targets were never touched, and
+  exactly one throwaway target was added and later removed.
+- **Real bug #1, found live, fixed**: the very first real send attempt failed with
+  `resend.exceptions.ResendError: No async HTTP client configured. Install httpx with: pip
+  install resend[async]` — `backend/requirements.txt` had `resend>=2.0.0` without the `[async]`
+  extra, so `httpx` (which `resend.Emails.send_async` requires) was never installed. **Exactly
+  why 4.6's own test suite never caught this**: every single test mocked either
+  `mail.client.resend.Emails.send_async` or `realtime.send_email` directly — correct for
+  keeping the suite hermetic (no real network calls), but it also means the real SDK internals
+  were never actually exercised by any test, so a packaging gap like this could only surface
+  through a genuine live call. Fixed: `resend[async]>=2.0.0`.
+- **Real bug #2, found live, more serious, fixed**: neither `_evaluate_downtime_alert` nor
+  `_evaluate_cert_expiry_alert` checked `send_email`'s return value — a failed send (exactly
+  what bug #1 was doing on every attempt) was still being recorded in `alert_history` as
+  `last_state='down'`/`'expiring'` with a real `last_sent_at`, identical to a real success. This
+  meant a genuine delivery failure would have **permanently suppressed the real alert with no
+  retry** via the "already alerted" check, even after whatever broke the send got fixed — the
+  user would silently never be notified. Why 4.6's tests didn't catch this either: every
+  "should send" test mocked `send_email` to `return_value=True`; the only failure case tested
+  was an *exception* (the try/except safety net), never a clean `return False`. Fixed: both
+  evaluators now check `sent = await send_email(...)` and return early without touching
+  `alert_history` when `sent` is `False`, so the next check retries from scratch. Added 3
+  regression tests (`test_failed_*_send_is_not_recorded_as_alerted`) covering all three alert
+  paths (downtime, recovery, cert-expiry) — 86 backend tests total (was 83), all passing
+  against a rebuilt `api` image.
+- **Verified live, with real Resend sends, against the real running stack** (not the empty-key
+  override 4.6 used): added one throwaway target (`https://example.com:8081/` — a real,
+  publicly-resolving host on a closed port, chosen after a `.invalid` TLD was correctly
+  rejected by the existing creation-time SSRF/DNS check) to the real account. The **real**
+  worker's real check cycle produced a genuine `is_up=false` for it; the real, already-running
+  `api` container's real LISTEN loop picked up the real NOTIFY and — after the fixes above —
+  sent a real downtime alert with no errors logged, confirmed via `alert_history` showing
+  `last_state='down'` with a real timestamp. Since there's no edit-target endpoint to "fix" a
+  target's URL in place, recovery and the cooldown-suppression check were driven by inserting a
+  real check row for the *same* `target_id` (preserving the same `alert_history` row) and
+  firing a real `pg_notify('checks_inserted', '130:local')` by hand — the exact wire format the
+  worker itself uses — so the real listener with the real key processed it identically to a
+  worker-originated event. Confirmed: the recovery email flipped the row to `last_state='up'`
+  with a fresh timestamp and no errors; a third failure fired 70 seconds later, still well
+  inside the 900s cooldown from the recovery send, correctly produced **zero** further emails
+  — `alert_history` stayed byte-identical, proving the flapping dampener holds under a real
+  send path, the one behavior that genuinely couldn't be proven any other way. `eu-west`'s own
+  `alert_history` row was independently confirmed untouched by every one of these `local`-only
+  events, reconfirming region-scoping under real conditions.
+- **What was not independently verified**: Resend's API key used here is `sending`-scoped
+  (confirmed via a 401 `"restricted_api_key"` when attempting to query send history), so
+  delivery status couldn't be cross-checked against Resend's own records — the absence of any
+  error in the API logs across all three real sends is strong indirect evidence, but actual
+  inbox receipt can only be confirmed by the user checking `m.attifff@gmail.com` directly.
+- Cleanup: the throwaway target (and its `alert_history`/`checks` rows, via cascade) deleted
+  via the real API; confirmed via SQL that nothing related to it remains. All 7 pre-existing
+  real targets on the account untouched throughout. Workers were never paused this run
+  (deliberately, so the first failure came from a genuine worker cycle, not a seeded one).
+
+**Next: continue Phase 4 per the 4.3 build order — prompt 4.7, forgot-password** (depends on
+4.5's Resend wrapper only), then **4.8, compliance export** (fully independent).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

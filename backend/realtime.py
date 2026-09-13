@@ -112,7 +112,14 @@ async def _evaluate_downtime_alert(session, target: Target, check: Check, region
             detail_url=detail_url,
             settings_url=settings_url,
         )
-        await send_email(user.email, subject, body)
+        sent = await send_email(user.email, subject, body)
+        if not sent:
+            # A failed send (bad key, Resend outage, or — found live in prompt 4.6.1 — a
+            # misconfigured async client) must NOT be recorded as "already alerted": doing so
+            # would permanently suppress the real alert via the "still down" check above, with
+            # no retry, even after whatever broke the send is fixed. Leaving no row (or an
+            # untouched existing one) means the very next check retries this from scratch.
+            return
         if row is None:
             session.add(
                 AlertHistory(target_id=target.id, region=region, alert_type="downtime", last_state="down", last_sent_at=now)
@@ -129,7 +136,9 @@ async def _evaluate_downtime_alert(session, target: Target, check: Check, region
             detail_url=detail_url,
             settings_url=settings_url,
         )
-        await send_email(user.email, subject, body)
+        sent = await send_email(user.email, subject, body)
+        if not sent:
+            return  # same reasoning as above — retry on the next check, don't fake success
         row.last_state = "up"
         row.last_sent_at = now
     # else: is_up=true and no row, or already 'up' — nothing to do, no bookkeeping needed.
@@ -184,7 +193,9 @@ async def _evaluate_cert_expiry_alert(session, target: Target, check: Check, reg
         detail_url=f"{settings.FRONTEND_URL}/dashboard/{target.id}",
         settings_url=f"{settings.FRONTEND_URL}/settings",
     )
-    await send_email(user.email, subject, body)
+    sent = await send_email(user.email, subject, body)
+    if not sent:
+        return  # same reasoning as the downtime evaluator — a failed send retries next check
     if row is None:
         session.add(
             AlertHistory(

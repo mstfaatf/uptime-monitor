@@ -300,6 +300,54 @@ async def test_alerting_is_region_scoped(client):
     assert eu_row is None  # eu-west was never evaluated by this notification at all
 
 
+async def test_failed_downtime_send_is_not_recorded_as_alerted(client):
+    """Found live in prompt 4.6.1: a real Resend failure (send_email returning False, not
+    raising) was being silently recorded as 'already alerted', permanently suppressing the
+    real alert with no retry even after the underlying problem was fixed. A failed send must
+    leave no alert_history row behind, so the very next check retries it."""
+    await client.post("/auth/register", json={"email": "sendfails1@example.com", "password": "pw"})
+    created = await client.post("/targets", json={"url": "https://example.com/send-fails-1"})
+    target_id = created.json()["id"]
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="Connection timed out")
+
+    with patch("realtime.send_email", new=AsyncMock(return_value=False)) as mock_send:
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_send.assert_awaited_once()
+    assert await _get_alert_history(target_id, "local", "downtime") is None
+
+
+async def test_failed_recovery_send_is_not_recorded_as_alerted(client):
+    await client.post("/auth/register", json={"email": "sendfails2@example.com", "password": "pw"})
+    created = await client.post("/targets", json={"url": "https://example.com/send-fails-2"})
+    target_id = created.json()["id"]
+    sent_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    await _insert_alert_history(target_id, "local", "downtime", "down", sent_at)
+    await _insert_check(target_id, is_up=True, status_code=200, latency_ms=150)
+
+    with patch("realtime.send_email", new=AsyncMock(return_value=False)) as mock_send:
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_send.assert_awaited_once()
+    row = await _get_alert_history(target_id, "local", "downtime")
+    assert row["last_state"] == "down"  # unchanged — the failed recovery send didn't fake success
+    assert row["last_sent_at"].replace(tzinfo=timezone.utc) == sent_at
+
+
+async def test_failed_cert_expiry_send_is_not_recorded_as_alerted(client):
+    await client.post("/auth/register", json={"email": "sendfails3@example.com", "password": "pw"})
+    created = await client.post("/targets", json={"url": "https://example.com/send-fails-3"})
+    target_id = created.json()["id"]
+    expires_at = datetime.now(timezone.utc) + timedelta(days=9)
+    await _insert_check(target_id, tls_cert_expires_at=expires_at, tls_cert_issuer="CN=R3")
+
+    with patch("realtime.send_email", new=AsyncMock(return_value=False)) as mock_send:
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_send.assert_awaited_once()
+    assert await _get_alert_history(target_id, "local", "cert_expiry") is None
+
+
 async def test_sse_push_still_delivers_when_alert_evaluation_raises(client):
     """The core requirement of this prompt: a Resend/alert-evaluation failure must never block
     or corrupt the SSE push, which is _handle_notification's primary purpose. Forces a failure
