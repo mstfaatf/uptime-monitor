@@ -2026,5 +2026,69 @@ across every page.
 alerts with a cooldown, CSV/PDF export), including the `consecutive_failures` exposure
 recommended back in the 3.9 wrap-up.
 
+Phase 4, prompt 4.3 (familiarization + design report for alerting/compliance export) is
+complete. Read-only — no application code or new files, per this prompt's scope. Full report
+delivered directly in the conversation (not saved to a file); reread the conversation history
+if picking this up cold.
+- Confirmed the 3.7 alert-preference stub precisely: `users.alert_on_downtime`/
+  `alert_on_cert_expiry` (migration 007) exist, are exposed via `UserResponse`/
+  `PATCH /auth/preferences`, and are read by nothing yet (confirmed via `auth.py`'s own
+  docstring). Recommended no schema extension — two global per-user toggles already meets
+  the "at minimum" bar and nothing in CLAUDE.md's plan asks for per-target granularity.
+- Proposed a new `alert_history` table (`target_id, region, alert_type, last_state,
+  last_sent_at, last_cert_expires_at`, unique on `(target_id, region, alert_type)`) combining
+  state-transition suppression (don't re-alert every check while continuously down) with a
+  15-minute cooldown floor (matches `backoff.py`'s own 900s cap) so a flapping target can't
+  out-run state tracking; cert-expiry alerts get a separate 3-day repeat-reminder cadence with
+  renewal detected via a changed `tls_cert_expires_at`.
+- **Recommended alerting fire from the backend, specifically extending
+  `realtime.py`'s existing `_handle_notification`** — read the full file first: it already
+  fires once per committed, region-aware check, already resolves target→owner, and already
+  has the fresh `Check` row in scope before publishing. Recommended against the worker
+  (would mean every worker instance independently carrying Resend credentials and duplicating
+  the alert-decision per region, when it should be made exactly once per check regardless of
+  region count).
+- **Resolved a real subtlety in the deferred `consecutive_failures` trigger** by re-reading
+  `worker/main.py`'s `reschedule_target`: a success resets `consecutive_failures = 0`
+  immediately, so the field can only ever be non-zero on a check that itself just failed —
+  it cannot express "flaky but currently up." Reframed the proposal accordingly: a failed
+  check is "degraded" (not immediately "down") until `consecutive_failures` crosses a
+  threshold (proposed 3, aligned with backoff's ~120s-at-3-failures point) — a debounce on
+  the down classification itself, not a new trigger on the up path. Requires exposing
+  `target_region_schedule.consecutive_failures` through the backend API for the first time
+  (a second join in `_latest_checks_per_region_query`; the ORM model already has parity for
+  exactly this) and updating `deriveState` in both places it currently lives (`lib/status.ts`
+  and the still-duplicated copy in `app/dashboard/page.tsx`).
+- Resend: `RESEND_API_KEY` proposed as optional (`str | None = None`), deliberately not
+  required-with-no-default like `JWT_SECRET` — a missing key is a safe degraded state (no
+  emails sent), not a security hole, so shouldn't block local dev. New `backend/email/`
+  module (`client.py` wrapping the `resend` package behind one `send_email()`,
+  `templates.py` for three plain-text templates) shared by alerting and forgot-password —
+  one integration point, not two.
+- Forgot-password: new `password_reset_tokens` table (SHA-256 token hash, not argon2 —
+  a random 32-byte token has no dictionary to defend against, so the slow-hash rationale
+  behind password storage doesn't apply), 1-hour expiry, `POST /auth/forgot-password`
+  (`3/minute`, always-200 generic response to prevent enumeration) and
+  `POST /auth/reset-password` (`5/minute`), two new frontend pages (`/forgot-password`,
+  `/reset-password`) that don't reuse `AuthForm` as-is since neither page is email+password
+  shaped.
+- Compliance export: recommended CSV first (stdlib `csv`, no new dependency) with PDF
+  (`reportlab`, pure-Python, avoids `weasyprint`'s system-level Pango/Cairo dependency) as an
+  explicit later add-on. `region` required on the export endpoint, never "all regions
+  merged," matching `GET /targets/{id}/checks`'s existing rule. Flagged that the SLA%/
+  incident computation currently only exists in TypeScript and needs a Python
+  re-implementation for server-side generation — same "deliberately duplicated across
+  services" tradeoff already established for `ssrf.py`/`checker.py`.
+- **Proposed build order**: 4.4 consecutive_failures trigger (fully independent) → 4.5 Resend
+  client wrapper (shared prerequisite for both 4.6 and 4.7 — build once) → 4.6 alert_history
+  schema + alerting logic (depends on 4.5) → 4.7 forgot-password (depends on 4.5 only, not
+  4.6) → 4.8 compliance export (fully independent, could even be reordered earlier) → 4.9
+  Phase 4 wrap-up/regression verification, matching every prior phase's closing pattern.
+- No code written, no files created, per this prompt's explicit scope. Pending review of the
+  report before 4.4 begins.
+
+**Next: Phase 4 implementation begins at prompt 4.4** (consecutive_failures degraded trigger),
+per the build order above, pending the user's review of this report.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
