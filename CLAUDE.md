@@ -2600,5 +2600,65 @@ conversation (not saved to a file); reread the conversation history if picking t
 **Next: Phase 5 implementation begins at prompt 5.2** (Neon provisioning + first migration
 run), per the build order above, pending the user's review of this report.
 
+Phase 5, prompt 5.2 (Neon provisioning + first production migration) is complete. No
+application code changed — documentation only (`backend/README.md`, `worker/README.md`). No
+deployed service points at this database yet, per this prompt's explicit scope.
+- **Neon project provisioned** — region **us-east-2 (AWS)**, database `neondb`, pooled
+  connection host (`...-pooler...`). Ran `alembic upgrade head` once from a local Docker
+  container (the already-built `api` image, run standalone with `docker run`, not via
+  `docker compose`, so the real dev stack was never touched) pointed at the Neon connection
+  string. All 9 migrations (`001`→`009`) applied cleanly; `alembic current`/`alembic history`
+  confirm `alembic_version` landed at `009` (head).
+- **Schema verified identical to local, not just assumed**: wrote a throwaway diff script
+  (asyncpg, deleted after use — not committed) comparing `information_schema.columns`,
+  `pg_indexes`, and `pg_constraint` between local Postgres and Neon. Columns (45) and indexes
+  (17) matched exactly with zero differences. The only constraint-set difference was Neon's
+  newer catalog materializing column-level `NOT NULL` constraints as explicit `pg_constraint`
+  rows — a PostgreSQL 17+ catalog behavior change, not present on local's PG16 — confirmed via
+  the column-level `is_nullable` comparison showing zero real differences; a metadata
+  representation difference only, not a functional/migration risk.
+- **Postgres version confirmed**: Neon runs PostgreSQL 18.6; local dev runs `postgres:16-alpine`
+  — two major versions apart. No incompatibility found; all migrations (including the
+  `postgresql_ops`-using index from migration 006) applied without modification.
+  `password_reset_tokens`/`alert_history` (Phase 4 tables) also present and correctly shaped.
+- **Confirmed empty, no local carryover**: every table has 0 rows except `alembic_version` (1
+  row, correctly `009`) — matches the plan from 5.1: production Neon is populated only via
+  migrations-from-scratch, never a data copy, so the 31 leftover local test accounts (ids
+  3-39) never reach it.
+- **Real, load-bearing connection-string finding, verified empirically rather than assumed
+  from the 5.1 report's prediction**: Neon's dashboard gives a libpq-style string
+  (`?sslmode=require&channel_binding=require`). Tested all four combinations directly against
+  the real Neon instance: `sslmode=require` works for the **sync/psycopg2** path (Alembic's
+  `env.py`) but throws `TypeError: connect() got an unexpected keyword argument 'sslmode'` on
+  **asyncpg** (both SQLAlchemy's async engine and raw `asyncpg.connect()`); `ssl=require` is
+  the reverse — works on asyncpg, fails on psycopg2/sync with `invalid dsn: invalid connection
+  option "ssl"`.
+- **New problem beyond what 5.1 anticipated, flagged (not fixed) for 5.3**: `backend/
+  Dockerfile`'s boot command (`alembic upgrade head && exec uvicorn ...`) reads **one**
+  `DATABASE_URL` for both the sync migration step and the asyncpg app runtime — but those two
+  steps need incompatible query-string shapes on the same URL. A single production
+  `DATABASE_URL` value cannot satisfy both today; deploying the backend as-is against this
+  connection string would fail at either the migration step or app startup depending on which
+  form is chosen. This needs a real code fix in 5.3 (e.g. `alembic/env.py` translating
+  `ssl=`→`sslmode=` for its own sync connection, or `database.py` passing
+  `connect_args={"ssl": "require"}` to the async engine instead of relying on the query
+  string) before the backend can actually be deployed to Railway. The worker has no
+  equivalent problem — it only ever uses the asyncpg path, confirmed in `worker/README.md`.
+- Documented all of the above in `backend/README.md` (new "DATABASE_URL (production — Neon)"
+  section) and `worker/README.md` (same section, worker-specific) — host pattern, the
+  `ssl=require` vs `sslmode=require` distinction, the Postgres-version/schema-diff findings,
+  and the flagged dual-DATABASE_URL conflict. No real credential or connection string was
+  committed anywhere — confirmed via a full repo grep for the Neon host/password fragments
+  after finishing, zero matches outside this conversation.
+- Not touched in this prompt, per its explicit scope: `CORS_ORIGINS`/`COOKIE_SAMESITE` code
+  changes, any Railway service, any Vercel config, `database.py`/`alembic/env.py` code (the
+  fix for the flagged DATABASE_URL conflict above is 5.3's job, not this prompt's).
+
+**Next: Phase 5, prompt 5.3 — backend Railway deploy.** Per the 5.1 build order, this needs to
+resolve the newly-flagged `ssl=require`-vs-`sslmode=require` dual-DATABASE_URL conflict above
+(a real blocker discovered in 5.2, not anticipated in 5.1) in addition to the originally-planned
+`COOKIE_SAMESITE`/`CORS_ORIGINS` production-awareness changes, before the `api` service can be
+deployed and verified against Neon.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

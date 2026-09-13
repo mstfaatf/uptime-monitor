@@ -21,6 +21,20 @@ consistency with the `api` service, but nothing here currently reads a value fro
 | `HTTP_VERIFY_SSL` | Verify TLS certificates for checked URLs (`true`/`false`) | `true`. Set to `false` only for local/dev if CA verification fails (insecure). |
 | `REGION` | Identifies which region this worker instance is checking from. Tagged onto log lines now; will be tagged onto `checks` rows once the multi-region schema migration lands. Set a distinct value per instance (e.g. `us-east`, `eu-west`) once more than one worker runs. | `local` |
 
+## DATABASE_URL (production — Neon)
+
+The worker talks to Postgres via raw `asyncpg` (see `config.py`'s `asyncpg_database_url`, which
+strips a `+asyncpg` dialect prefix if present). Verified directly against the real Neon instance
+this project provisions: `postgresql+asyncpg://<user>:<password>@<host>-pooler.<region>.aws.neon.tech/<db>?ssl=require`
+connects successfully via both `asyncpg.connect()` directly and SQLAlchemy's async engine.
+
+Neon's dashboard instead hands out `?sslmode=require&channel_binding=require` (libpq-style) —
+that form does **not** work with asyncpg (`TypeError: connect() got an unexpected keyword
+argument 'sslmode'`), so it must be rewritten to `?ssl=require` before use here. Unlike the
+backend (see `backend/README.md`'s DATABASE_URL section), the worker only ever uses the asyncpg
+path — no sync/psycopg2 migration step runs in this service — so `ssl=require` is the only form
+the worker ever needs, with no conflicting dual-use requirement on the single env var.
+
 ## Run locally
 
 1. **From repo root**, ensure Postgres and API migrations are up (e.g. `docker compose up -d db api` and API has run migrations).

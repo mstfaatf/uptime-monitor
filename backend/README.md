@@ -21,6 +21,50 @@ FastAPI backend for the multi-user uptime monitoring dashboard. Handles authenti
 
 Alembic uses the same `DATABASE_URL` and converts it to a sync driver (`postgresql://`) internally.
 
+## DATABASE_URL (production — Neon)
+
+Neon's dashboard hands out a libpq-style connection string:
+
+```
+postgresql://<user>:<password>@<host>-pooler.<region>.aws.neon.tech/<db>?sslmode=require&channel_binding=require
+```
+
+That string works as-is for **Alembic's migration path** (sync engine via `psycopg2` — see
+`alembic/env.py`, which only strips a `+asyncpg` prefix if present and passes the rest through
+unchanged; `sslmode`/`channel_binding` are real libpq parameters psycopg2 understands natively).
+
+It does **not** work unmodified for the **app's own runtime connection** (SQLAlchemy's `asyncpg`
+dialect, used by `database.py`'s async engine): `asyncpg` doesn't recognize `sslmode`/
+`channel_binding` as connection kwargs and raises `TypeError: connect() got an unexpected keyword
+argument 'sslmode'`. For the asyncpg path, the query string must instead be `?ssl=require`:
+
+```
+postgresql+asyncpg://<user>:<password>@<host>-pooler.<region>.aws.neon.tech/<db>?ssl=require
+```
+
+Both forms were verified directly against the real Neon instance this project provisions:
+`sslmode=require&channel_binding=require` succeeds via psycopg2/sync, fails via asyncpg;
+`ssl=require` succeeds via asyncpg (both SQLAlchemy's async engine and raw `asyncpg.connect()`),
+**fails via psycopg2/sync** (`invalid dsn: invalid connection option "ssl"`).
+
+**Open problem, not yet resolved (flagged for the prompt that wires up the Railway `api`
+deploy)**: `backend/Dockerfile`'s boot command is `alembic upgrade head && exec uvicorn ...` —
+both steps read the *same* `DATABASE_URL` env var, but each needs a different query-string shape
+(`sslmode=require` for the migration step, `ssl=require` for the app). A single production
+`DATABASE_URL` value cannot satisfy both today. This needs a code fix (e.g. `alembic/env.py`
+translating `ssl=` to `sslmode=` for its sync connection, or `database.py` adding
+`connect_args={"ssl": "require"}` instead of relying on the query string) before this backend can
+actually be deployed — not fixed in this pass, since Neon provisioning didn't touch application
+code by design.
+
+Postgres version: Neon currently runs PostgreSQL 18.6; local dev runs `postgres:16-alpine`. All
+9 migrations (`001`–`009`) applied cleanly against Neon with no errors. A full column/index/
+constraint diff between the two found the schema functionally identical (same 45 columns, same
+17 indexes, same nullability throughout) — the only difference was that Neon's newer catalog
+materializes column-level `NOT NULL` constraints as explicit `pg_constraint` rows (a PostgreSQL
+17+ catalog change), which PG16 doesn't do; this is a metadata/introspection difference only, not
+a functional one.
+
 ## Setup
 
 1. **Create a virtual environment** (recommended):
