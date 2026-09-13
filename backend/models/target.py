@@ -3,13 +3,14 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
 
 if TYPE_CHECKING:
     from models.check import Check
+    from models.target_region_schedule import TargetRegionSchedule
     from models.user import User
 
 
@@ -23,21 +24,19 @@ class Target(Base):
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    # Worker scheduling state — see backend/alembic/versions/003_add_targets_scheduling_columns.py.
-    # next_check_at defaults to now() so a newly created target is due for a check immediately.
-    next_check_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
-    )
-    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-
-    # Row-claiming for concurrency-safe scheduling across worker instances — see
-    # backend/alembic/versions/005_add_targets_claimed_at.py and worker/main.py's
-    # claim_due_targets()/CLAIM_TTL_SECONDS. NULL means unclaimed.
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Worker scheduling state (next_check_at, consecutive_failures, claimed_at) used to live
+    # directly on this table — see backend/alembic/versions/003_add_targets_scheduling_columns.py
+    # and .../005_add_targets_claimed_at.py. Moved to models.target_region_schedule.
+    # TargetRegionSchedule in backend/alembic/versions/006_add_region_and_target_schedule.py:
+    # each checking region now tracks its own due-time/backoff/claim state per target
+    # independently, since reachability can genuinely differ by region.
 
     __table_args__ = (UniqueConstraint("user_id", "normalized_url", name="uq_targets_user_id_normalized_url"),)
 
     user: Mapped["User"] = relationship("User", back_populates="targets")
     checks: Mapped[list["Check"]] = relationship(
         "Check", back_populates="target", cascade="all, delete-orphan", order_by="Check.checked_at.desc()"
+    )
+    region_schedules: Mapped[list["TargetRegionSchedule"]] = relationship(
+        "TargetRegionSchedule", back_populates="target", cascade="all, delete-orphan"
     )

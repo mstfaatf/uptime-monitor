@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -22,6 +22,11 @@ class Check(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_up: Mapped[bool] = mapped_column(Boolean, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Which region's worker instance performed this check — see
+    # backend/alembic/versions/006_add_region_and_target_schedule.py. Not nullable: every
+    # check has always been performed by some worker instance identified by REGION.
+    region: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # DNS/TCP/TLS/TTFB timing breakdown (see backend/alembic/versions/004_*). All nullable:
     # a check that failed before reaching a given phase has no timing for it.

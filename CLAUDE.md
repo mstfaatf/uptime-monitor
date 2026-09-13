@@ -806,5 +806,77 @@ prompt's scope.
   a per-target-per-region schedule table and adding `region` to `checks` — the biggest single
   change in Phase 2, planned as its own dedicated prompt.
 
+Phase 2, prompt 2.4 (schema migration: `checks.region` + `target_region_schedule`) is
+complete — step 3 of the 2.1 build order, schema-only. **This intentionally leaves the worker
+temporarily unable to schedule checks** until the very next prompt (step 4) rewrites its
+scheduling queries — see below.
+- New Alembic migration `006_add_region_and_target_schedule.py`:
+  1. `checks.region` added nullable, backfilled, then set `NOT NULL` (the standard safe
+     pattern for a NOT NULL column on a table with existing rows).
+  2. New table `target_region_schedule(target_id, region, next_check_at,
+     consecutive_failures, claimed_at)` with a composite primary key on `(target_id, region)`
+     (doubles as the uniqueness constraint) plus an index on `(region, next_check_at)` for the
+     region-scoped due-query step 4 will add.
+  3. Data migration seeds one `target_region_schedule` row per existing target, carrying
+     `next_check_at`/`consecutive_failures`/`claimed_at` forward **exactly** (not reset to
+     "due now" — that would cause a check storm the moment this migration lands).
+  4. A hard gate — a PL/pgSQL `DO` block that `RAISE EXCEPTION`s and aborts the whole
+     migration transaction if `target_region_schedule`'s row count doesn't match `targets`'
+     row count — runs before the old columns are dropped, so a silent seeding bug would fail
+     the migration loudly rather than quietly losing a target's schedule.
+  5. Only after that gate passes: `next_check_at`/`consecutive_failures`/`claimed_at` (and
+     their index) are dropped from `targets`.
+- **Seed region value: `"local"`** — matches `worker/config.py`'s `REGION` default added in
+  prompt 2.3. Every check this project has ever recorded, and every target's current schedule
+  state, genuinely was produced by the single local worker instance, so labeling the
+  historical data under the same identity the worker itself already reports is the accurate
+  choice, not an arbitrary placeholder.
+- Backend models updated to match: `Target` no longer has the three scheduling columns (with
+  a comment pointing at their new home); `Check` gained `region` (`String`, not null); new
+  `backend/models/target_region_schedule.py` (`TargetRegionSchedule`) added and registered in
+  `models/__init__.py` and `alembic/env.py` so the table has ORM/autogenerate parity, even
+  though only the worker (via raw asyncpg SQL) reads/writes it today — the backend API doesn't
+  query it yet.
+- **Explicit, accepted temporary regression** (this is the "stub minimally or note it"
+  fork from this prompt's instructions — chose "note it," not stubbing): `worker/main.py` was
+  deliberately **not touched** in this prompt (schema-only, rewriting scheduling queries is
+  step 4/next prompt). Once this migration lands, `claim_due_targets`'s and
+  `reschedule_target`'s queries against `targets.next_check_at`/`consecutive_failures`/
+  `claimed_at` fail with a real `asyncpg.exceptions.UndefinedColumnError` on every cycle.
+  This does **not** crash the worker process or put the container in a restart loop — `main()`'s
+  existing outer-loop `try/except` around `run_cycle()` (already there since Phase 1, the same
+  path that already self-heals the worker racing the API's migration on a fresh
+  `docker compose up`) logs `"Cycle failed"` and retries every `SCHEDULER_TICK_SECONDS` (5s)
+  forever. Verified live: rebuilt and restarted the `worker` container after the migration
+  landed, confirmed the container stays `Up` and repeats the same caught
+  `UndefinedColumnError` indefinitely rather than crash-looping. **No checks are actually
+  performed by the worker from this prompt until the next one lands** — flagging this clearly
+  since it's a real (if brief, single-developer-environment) functional gap, not swept under
+  the rug.
+- `backend/tests/test_check_timing.py`'s raw `INSERT INTO checks` fixture updated to include
+  `region` (`"local"`) — a mechanical fixture fix required by the new `NOT NULL` column, not a
+  worker/query-logic change. No other test file inserts into `checks` directly.
+- **Verified end-to-end against the real dev stack**: migration `005 → 006` ran cleanly;
+  confirmed via direct query that all 23 existing targets got exactly one seeded
+  `target_region_schedule` row each (`region='local'`) with their prior schedule state carried
+  forward unchanged, and all existing `checks` rows backfilled to `region='local'`. **Tested
+  the downgrade for real** (`alembic downgrade 005`): `targets` regained its three columns
+  with the original values correctly restored from `target_region_schedule`, `checks.region`
+  and `target_region_schedule` were dropped — then re-ran `alembic upgrade head` to restore
+  the final state before finishing. 37 backend tests pass (conftest reruns the full migration
+  chain 001→006 from scratch against the test DB each session, so this also proves the whole
+  chain applies cleanly, not just 005→006 incrementally). 34 worker tests pass unchanged
+  (hermetic/mocked — they don't touch a real schema, so they can't and don't catch the
+  real-DB failure mode described above; that's expected, not a gap in this prompt's own
+  verification, which used the real dev DB instead).
+- Not touched in this prompt (explicitly out of scope, per the prompt and the 2.1 build
+  order): any worker query/scheduling logic, region-scoped `claim_due_targets`, `insert_check`
+  supplying `region` (also currently missing it — moot right now since `claim_due_targets`
+  already fails first and `insert_check` is never reached, but it will need `region` added
+  too once step 4 gets past the claim step), backend API/SSE payload exposure of `region`, any
+  ADR. Next per the 2.1 build order: step 4 — rewrite `claim_due_targets`/`reschedule_target`/
+  `insert_check` to be region-scoped against `target_region_schedule`, restoring real
+  scheduling behavior.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

@@ -24,6 +24,7 @@ async def _insert_check(target_id: int, **overrides) -> None:
         "ttfb_ms": 90,
         "tls_cert_expires_at": None,
         "tls_cert_issuer": None,
+        "region": "local",
     }
     values.update(overrides)
     async with engine.begin() as conn:
@@ -32,10 +33,10 @@ async def _insert_check(target_id: int, **overrides) -> None:
                 """
                 INSERT INTO checks (
                     target_id, checked_at, status_code, latency_ms, is_up, error,
-                    dns_ms, tcp_ms, tls_ms, ttfb_ms, tls_cert_expires_at, tls_cert_issuer
+                    dns_ms, tcp_ms, tls_ms, ttfb_ms, tls_cert_expires_at, tls_cert_issuer, region
                 ) VALUES (
                     :target_id, :checked_at, :status_code, :latency_ms, :is_up, :error,
-                    :dns_ms, :tcp_ms, :tls_ms, :ttfb_ms, :tls_cert_expires_at, :tls_cert_issuer
+                    :dns_ms, :tcp_ms, :tls_ms, :ttfb_ms, :tls_cert_expires_at, :tls_cert_issuer, :region
                 )
                 """
             ),
