@@ -59,11 +59,19 @@ export default {
       },
       borderRadius: {
         // Instrument-panel radius throughout (2-4px), not shadcn's generated 0.5rem (8px)
-        // default — every radius utility a component might use tops out at 4px.
+        // default. Every keyword a shadcn component might reach for — sm/md/lg were the ones
+        // seen in 3.2, xl/2xl/3xl showed up once Card was added in 3.4 — is capped at 4px, so
+        // nothing above --radius survives no matter which one a future `shadcn add` component
+        // happens to use.
+        none: '0px',
         DEFAULT: 'var(--radius)',
         sm: 'var(--radius-sm)',
         md: 'var(--radius)',
         lg: 'var(--radius)',
+        xl: 'var(--radius)',
+        '2xl': 'var(--radius)',
+        '3xl': 'var(--radius)',
+        full: '9999px',
       },
       fontFamily: {
         // Wired to next/font/google's CSS variables in app/layout.tsx.

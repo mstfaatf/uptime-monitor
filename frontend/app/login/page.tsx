@@ -4,16 +4,16 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiJson } from "@/lib/api";
+import { AuthForm } from "@/components/auth-form";
+import { SiteHeader } from "@/components/site-header";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleSubmit(email: string, password: string) {
     setError("");
     setLoading(true);
     try {
@@ -31,39 +31,32 @@ export default function LoginPage() {
   }
 
   return (
-    <main>
-      <h1>Log in</h1>
-      <form onSubmit={handleSubmit}>
-        <div className="form-group">
-          <label htmlFor="email">Email</label>
-          <input
-            id="email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-            autoComplete="email"
-          />
-        </div>
-        <div className="form-group">
-          <label htmlFor="password">Password</label>
-          <input
-            id="password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            autoComplete="current-password"
-          />
-        </div>
-        {error && <p className="error-message">{error}</p>}
-        <button type="submit" disabled={loading}>
-          {loading ? "Logging in…" : "Log in"}
-        </button>
-      </form>
-      <p style={{ marginTop: "1rem" }}>
-        No account? <Link href="/register">Register</Link>
-      </p>
-    </main>
+    <>
+      <SiteHeader />
+      <main className="mx-auto flex max-w-5xl justify-center px-6 py-16">
+        <Card className="w-full max-w-sm">
+          <CardHeader>
+            <CardTitle>Log in</CardTitle>
+            <CardDescription>Access your monitored targets.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <AuthForm
+              submitLabel="Log in"
+              loadingLabel="Logging in…"
+              passwordAutoComplete="current-password"
+              error={error}
+              loading={loading}
+              onSubmit={handleSubmit}
+            />
+            <p className="mt-6 text-sm" style={{ color: "var(--text-secondary)" }}>
+              No account?{" "}
+              <Link href="/register" className="underline" style={{ color: "var(--text-primary)" }}>
+                Register
+              </Link>
+            </p>
+          </CardContent>
+        </Card>
+      </main>
+    </>
   );
 }

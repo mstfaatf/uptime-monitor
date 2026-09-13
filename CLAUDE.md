@@ -1295,5 +1295,71 @@ isolation on a scratch route, per this prompt's scope — no real page touched.
   view, auth pages, landing/about pages. Next per the 3.1 build order: prompt 3.4 — auth and
   static pages.
 
+Phase 3, prompt 3.4 (auth + static pages: `/login`, `/register`, `/`, `/about`) is complete.
+Dashboard, detail view, and settings untouched, per this prompt's scope.
+- **Asked and settled before building**: the landing page omits any "demo account" mention
+  entirely (CLAUDE.md's feature list calls for a seeded read-only demo account, but no backend
+  support exists for it — seeding, read-only enforcement — and building that wasn't this
+  prompt's scope). User chose "omit for now" over a disabled placeholder or building it for
+  real; revisit once the backend work actually exists.
+- Added shadcn `button`, `input`, `label`, `card` primitives (`components/ui/`). **Found and
+  fixed a real gap in 3.2's "no shadcn default survives" claim**: `Card` uses `rounded-xl`,
+  a Tailwind radius keyword 3.2 never overrode (only `sm`/`md`/`lg` were touched, since no
+  component using `xl` existed yet) — would have silently rendered at Tailwind's default
+  0.75rem/12px. Fixed by extending `tailwind.config.ts`'s `borderRadius` to cap `xl`/`2xl`/
+  `3xl` at `var(--radius)` too, so no future shadcn component can reintroduce a >4px radius
+  no matter which keyword it reaches for. Also stripped shadcn's default `shadow`/`shadow-sm`
+  classes from `Button`/`Input`/`Card` — a soft drop shadow wasn't in the locked spec at all,
+  and the avoid-list flags exactly this look; depth now comes from the border + tonal surface
+  steps only. Verified via the compiled build CSS: only `var(--radius)`/`var(--radius-sm)`
+  appear as `border-radius` values anywhere in the output.
+- `components/auth-form.tsx`: extracted the shared email/password form shell out of
+  `/login`/`/register` (per 3.1's finding — they were near-identical hand-rolled forms). Owns
+  field markup and local field state; each page still owns its own API call, error, and
+  loading state, since that's real per-page behavior, not visual duplication. No form
+  library pulled in (no react-hook-form/zod) — plain `useState`, matching the prompt's "don't
+  over-engineer a form library into this."
+- `components/site-header.tsx`: shared header for the four public/auth pages only (a
+  `SignalLight` "up" + wordmark as the logo/home link, "About"/"Log in" nav) — deliberately
+  **not** added to `app/layout.tsx`, so the dashboard's own separate header stays untouched
+  until 3.5.
+- **Landing page concept** (stated before building, per the prompt): the hero pairs a large
+  lit `SignalLight` and a sample `LatencyGauge` reading — real product components, not
+  illustration — beside plain copy about the network-level detail each check captures.
+  `components/hero-panel.tsx` holds this (a small client component so the page's one
+  motion moment — the hero's `SignalLight` starting `pending` and powering on to `up` ~500ms
+  after mount — lives in one place; reuses `SignalLight`'s existing opacity transition, no new
+  animation code). The sample timing breakdown (DNS/TCP/TLS/TTFB) is laid out as a small grid
+  with a labeled "Illustrative reading" caption, not a middle-dot-joined string (the avoid-list
+  explicitly flags that pattern) and not presented as real/live data. Three benefit blocks
+  below the hero (network-layer detail, independent multi-region results, private-by-default)
+  are plain text columns behind a single border-top divider, not a card grid — each describes
+  real, already-built functionality, nothing invented. Footer is one GitHub link.
+- **Caught and fixed a factual-accuracy issue while drafting `/about`**: initial copy claimed
+  the stack is "deployed on Vercel, Railway, and Neon" — false today, since deployment is
+  Phase 5 and hasn't happened. Corrected to describe the stack without asserting a live
+  deployment status that doesn't exist yet.
+- **Polish fix found via screenshot, not caught by code review**: the hero's `items-center`
+  row alignment centered the (shorter) copy column against the (taller) panel, leaving the
+  headline oddly low and a large gap before the benefits divider. Changed to
+  `md:items-start` — confirmed via a before/after screenshot comparison.
+- Verified with real screenshots (Playwright, scratch scripts outside the repo, not
+  committed): all four pages plus a 400px-wide mobile capture of the landing page — responsive
+  stacking, side gutters, and button sizing all held up. Considered but did not change the
+  shadcn default button height (36px) against the frontend-design skill's 44px mockup
+  hit-target guidance — treated that guidance as scoped to generated mobile mockups, not a
+  hard rule for a desktop-oriented web app, and 36-40px buttons are standard across comparable
+  professional tools (GitHub, Linear, Vercel). Flagging the call rather than silently making
+  it. `tsc --noEmit` and `next build` both clean throughout.
+- Self-critique against the 3.1 avoid-list: no Inter/gradient, no uniform soft-shadow card
+  grid, no all-caps eyebrow labels, no arrow appended to button/link text, no middle-dot-joined
+  meta text anywhere (including the hero's timing sample, deliberately grid-laid-out instead),
+  no numbered markers on the non-sequential benefit list, no single-word headline color accent.
+- Not touched in this prompt (explicitly out of scope, per the prompt): dashboard, detail
+  view, settings. The `/dev/components` scratch route from 3.3 is still present and still
+  needs deleting before the Phase 3 wrap-up prompt. Next per the 3.1 build order: prompt 3.5 —
+  dashboard list view rewrite (fixes the confirmed `latest_checks` bug, region badges, summary
+  strip with `SignalLight`/`LatencyGauge` wired to real data).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
