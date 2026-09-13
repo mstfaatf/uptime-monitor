@@ -1062,15 +1062,75 @@ verified against real concurrent worker processes, not just unit tests or mocked
 - Not touched in this prompt (explicitly out of scope, confirmed via API/logs/scripts only,
   never the dashboard UI, per the prompt): any frontend code.
 
-**Phase 2 is complete.** Row-claiming, region config, per-region scheduling schema,
-region-scoped scheduling queries, region-aware API/SSE payloads, a running second-region
-worker instance, and the coordination ADR are all in place, individually and end-to-end
-verified. **Next: Phase 3 — UI refresh + analytics** (Tailwind/shadcn, all new pages, summary
-strip, latency chart, heatmap, incident timeline, SLA %, landing page + demo account, forgot
-password) per CLAUDE.md's phase plan. The dashboard's current TypeScript types
+Phase 2, prompt 2.8 (wrap-up + full regression verification) is complete. **Phase 2 is now
+fully verified, not just individually implemented** — every piece was re-proven together
+against real concurrent processes and real traffic in this pass, including the two scenarios
+flagged as previously untested (orphaned-claim self-heal, precise same-region no-double-check).
+- **Coverage gaps closed**: added `test_ensure_schedule_rows_new_rows_are_due_immediately` and
+  an anti-join assertion (`LEFT JOIN target_region_schedule trs` / `WHERE trs.target_id IS
+  NULL`) on the existing backfill test; strengthened the claim-query test to assert the exact
+  self-heal clause text (`trs.claimed_at IS NULL OR trs.claimed_at < now() - make_interval(...)`)
+  instead of a loose substring check that wouldn't have caught the OR-staleness half being
+  dropped. Worker suite: 36 tests (was 35). Backend suite unchanged at 38 (no backend code
+  touched this prompt). **74 total**, up from 65 at the end of Phase 1.
+- **Live end-to-end two-region run**: forced all 46 schedule rows (23 targets × 2 regions) due
+  at once — 23 checks per region completed within ~1.1-1.2s (confirms real concurrency under
+  the Phase 1 `CHECK_CONCURRENCY=15` cap, not sequential execution). Confirmed per-region
+  backoff independence on a real persistently-failing target (`consecutive_failures` 6 in
+  `eu-west` vs 40 in `local`, both correctly capped-and-jittered around 900s) and per-region
+  reset-on-success. Confirmed the Phase 0 redirect+SSRF path (`www.github.com` → `github.com`,
+  real cert on the final hop) and Phase 1 timing/cert capture are unchanged and populate
+  correctly per region. Re-confirmed divergent per-region data via the live authenticated API
+  (one region `is_up=true`, the other `is_up=false` for the same target, both intact).
+- **Orphaned-claim self-heal, verified live for the first time this phase**: stamped a fresh
+  `claimed_at` on a real schedule row and confirmed it was left untouched across several real
+  ticks; aged it to 130s old (past the 120s TTL) and confirmed the very next tick reclaimed
+  and successfully checked it, clearing `claimed_at` and rescheduling normally. Previously this
+  was only proven via mocked tests and a deterministic lock-hold script (2.2) that tested "two
+  simultaneous claimants" but not "a claim goes stale and is later reclaimed."
+- **Same-region no-double-check, verified more rigorously than 2.7**: ran a genuine second real
+  `local`-region worker process alongside the original (not a throwaway script this time),
+  forced repeated contention — both processes won claims across the burst (real contention,
+  not one-sided), zero overlapping target IDs at any point. Precisely queried the minimum time
+  gap between any two checks of the same `(target_id, region)`: **~3.85 seconds**, consistent
+  with separate due-cycles roughly a tick apart, never the sub-second gap an actual double-claim
+  would produce.
+- **SSE/dashboard resilience to the new payload shape**: `tsc --noEmit` and `npm run build`
+  both clean. Since no browser-automation tool exists in this environment (flagged
+  consistently since the 0.7 wrap-up), captured a real SSE event stream and replayed the
+  frontend's exact reducer/render logic (from `frontend/app/dashboard/page.tsx`) against it in
+  Node — confirmed no exception is thrown, no event is dropped, and rendering safely degrades
+  to "Pending"/"—" (since `latest_check` no longer exists on the new `latest_checks` shape)
+  rather than crashing. Real UI verification remains Phase 3's job.
+- **Phase 0/1 regression check — no regressions found**: cross-user ownership (empty lists,
+  404 not 403 on cross-user delete, 401 on anonymous access to `/targets` *and*
+  `/targets/stream`), rate limiting (login 5-then-429, register 3-then-429, target-creation
+  10-then-429, all exact), `JWT_SECRET` fail-fast (stripped from `.env`, real container boot
+  crashed with the same `ValidationError` as every prior wrap-up, restored and recovered
+  cleanly), and SSE per-user filtering under the new region-aware payload (re-confirmed with
+  two fresh users) all still hold exactly as before.
+- **ADR corrected against actual shipped code** (`docs/adr/001-multi-region-coordination.md`):
+  added the `FOR UPDATE OF trs SKIP LOCKED` join-scoping detail (the ADR previously described
+  a bare `FOR UPDATE SKIP LOCKED`, omitting that the claim query joins to `targets` and scopes
+  the lock to only the schedule-table side); added the two new live-verification results above
+  (precise ~3.85s min-gap measurement, orphaned-claim self-heal) to the Decision/Consequences
+  sections as now-proven facts rather than only-designed-and-assumed ones. Everything else in
+  the ADR checked out accurate against the current code.
+- All test data (regression-check users/targets, SSE capture target, divergence-test target,
+  the extra `worker-local2` process) cleaned up afterward; confirmed via query that only the
+  real 23 targets × 2 regions (46 schedule rows, all unclaimed) remain.
+
+**Phase 2 is genuinely, fully complete and verified.** Row-claiming, region config,
+per-region scheduling schema, region-scoped scheduling queries, region-aware API/SSE
+payloads, a running second-region worker instance, and an accurate coordination ADR are all
+in place, individually and end-to-end proven against real infrastructure. **Next: Phase 3 —
+UI refresh + analytics** (Tailwind/shadcn, all new pages, summary strip, latency chart,
+heatmap, incident timeline, SLA %, landing page + demo account, forgot password) per
+CLAUDE.md's phase plan. The dashboard's current TypeScript types
 (`frontend/app/dashboard/page.tsx`) still expect the old single `latest_check` shape and will
-need updating to `latest_checks: Record<string, LatestCheck>` as part of that work — flagged
-in 2.6 and again here, not silently left stale.
+need updating to `latest_checks: Record<string, LatestCheck>` as part of that work — confirmed
+in this prompt that the mismatch degrades safely (no crash, no dropped events) rather than
+breaking, but it still needs real UI work, not just safety.
 
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

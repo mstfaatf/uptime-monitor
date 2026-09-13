@@ -44,6 +44,14 @@ happens afterward, entirely outside any transaction or lock.
   a row is due again once `claimed_at` is older than a fixed TTL (120 seconds — chosen with
   roughly 2x headroom over the worst realistic single-check duration: up to 5 redirect hops,
   each capped at a 10-second HTTP timeout). No heartbeat or lease-renewal mechanism was needed.
+  Verified directly by simulating a crash: aging a live claim's `claimed_at` past the 120s
+  window causes the very next scheduling tick to reclaim and successfully check that row,
+  while a claim younger than the window is correctly left untouched.
+- The claim query joins `target_region_schedule` to `targets` (to return the target's URL
+  alongside its schedule row), so the lock is scoped with `FOR UPDATE OF <schedule-table-alias>
+  SKIP LOCKED` rather than a bare `FOR UPDATE SKIP LOCKED` — locking (and skip-contending on)
+  only the schedule row, not the joined `targets` row, which nothing else has any reason to
+  contend with.
 
 ### 2. Scheduling state lives per `(target_id, region)`, not per target
 
@@ -122,7 +130,11 @@ reporting down," not collapse the regions into one boolean silently.
   mocked unit tests): a genuine second same-region process log-showed exactly the expected
   claim-splitting behavior with zero overlap, and a genuine second-region process backfilled
   and began independently scheduling every pre-existing target without disturbing the first
-  region's schedule state at all.
+  region's schedule state at all. Verified precisely, not just by absence of visible overlap:
+  under repeated forced contention, the smallest time gap between any two checks of the same
+  `(target_id, region)` was ~3.85 seconds — consistent with two distinct due-cycles roughly a
+  scheduling tick apart, never the sub-second/near-simultaneous gap an actual double-claim
+  would produce.
 - A target's per-region history (timing breakdown, TLS cert info, uptime) is preserved exactly
   as observed by each region, which is what the planned latency-chart, timing-waterfall, and
   SLA-percentage dashboard features need to work with per region rather than a blended average.

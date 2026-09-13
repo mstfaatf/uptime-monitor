@@ -94,6 +94,23 @@ async def test_claim_due_targets_backfills_schedule_rows_before_claiming():
     assert "INSERT INTO target_region_schedule" in backfill_sql
     assert "ON CONFLICT" in backfill_sql
     assert backfill_region == "us-east"
+    # Precisely the anti-join that limits the backfill to targets actually missing a row for
+    # this region — not a plain INSERT that could duplicate or clobber an existing schedule.
+    assert "LEFT JOIN target_region_schedule trs" in backfill_sql
+    assert "WHERE trs.target_id IS NULL" in backfill_sql
+
+
+async def test_ensure_schedule_rows_new_rows_are_due_immediately():
+    """A target missing a schedule row for this region gets one seeded as due right now
+    (next_check_at = now()), not scheduled out into the future — matching the old
+    targets.next_check_at server-default behavior of checking a brand-new target right away."""
+    conn = _mock_conn()
+
+    await main.ensure_schedule_rows(conn, "us-east")
+
+    backfill_sql, backfill_region = conn.execute.call_args.args
+    assert "SELECT t.id, $1, now(), 0" in backfill_sql
+    assert backfill_region == "us-east"
 
 
 async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim():
@@ -105,7 +122,11 @@ async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim
     select_sql, region_arg, ttl_arg = conn.fetch.call_args.args
     assert "target_region_schedule" in select_sql
     assert "next_check_at <= now()" in select_sql
-    assert "claimed_at" in select_sql
+    # Precisely the self-heal clause from 2.2/2.5: a stale claim (older than CLAIM_TTL_SECONDS)
+    # must be treated as due, not just a NULL one — a looser "claimed_at" substring check
+    # wouldn't catch a regression that dropped the "OR ... stale" half and left a target
+    # permanently stuck once claimed.
+    assert "trs.claimed_at IS NULL OR trs.claimed_at < now() - make_interval(secs => $2)" in select_sql
     assert "FOR UPDATE OF trs SKIP LOCKED" in select_sql
     assert region_arg == "us-east"
     assert ttl_arg == main.CLAIM_TTL_SECONDS
