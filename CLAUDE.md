@@ -2346,5 +2346,73 @@ Phase 4 prompt (a direct follow-up closing the one thing 4.6 deliberately deferr
 **Next: continue Phase 4 per the 4.3 build order — prompt 4.7, forgot-password** (depends on
 4.5's Resend wrapper only), then **4.8, compliance export** (fully independent).
 
+Phase 4, prompt 4.7 (forgot-password flow) is complete.
+- **`password_reset_tokens` migration `009`**, exactly the schema specified, plus the
+  `ix_password_reset_tokens_token_hash` index. New `PasswordResetToken` ORM model (backend-owned,
+  same as `AlertHistory` — the flow lives entirely in `routers/auth.py`, no worker involvement).
+- **Token handling**: `secrets.token_urlsafe(32)` generated, only its SHA-256 hex digest ever
+  stored (never the raw token) — deliberately not argon2, since a 32-byte random token has no
+  dictionary to defend against, unlike a human-chosen password; using the slow hash here would
+  just make every lookup needlessly expensive for no real security gain. `RESET_TOKEN_EXPIRY_MINUTES
+  = 60`, shared by both the DB expiry and the "expires in N minutes" line in the email itself so
+  the two can never drift apart.
+- **`POST /auth/forgot-password`** (`3/minute`): always returns the identical generic 200
+  message regardless of whether the account exists (anti-enumeration, same shape reasoning
+  `/auth/change-password`'s 401 already relies on). Token creation happens independent of
+  whether the email actually sends — confirmed live (below) that a failed send still leaves a
+  real, usable token row, which is correct: token issuance and email delivery are different
+  concerns, and Phase 4.6.1 already established the "don't fake bookkeeping on a failed send"
+  principle for a different table (`alert_history`) — this endpoint never had that risk since
+  it doesn't skip writing the token based on send success at all.
+- **`POST /auth/reset-password`** (`5/minute`): validates not-expired/not-used, sets the new
+  password, marks this token used, and marks every *other* outstanding token for the same user
+  used too (defense in depth — an earlier unused reset email shouldn't stay live after a later
+  one is redeemed). **Known, accepted limitation, stated explicitly per the prompt**: this app's
+  sessions are stateless JWTs with no server-side revocation list, so a reset does not invalidate
+  any other already-logged-in session for the same user — not fixed here.
+- **Frontend**: `/forgot-password` (email only) and `/reset-password` (`new password` +
+  `confirm`, reads `?token=` via `useSearchParams`, wrapped in a `<Suspense>` boundary — required
+  by the Next.js App Router for any client component using `useSearchParams`, or the build fails
+  static generation for that route) — neither reuses `AuthForm` (email+password shaped, doesn't
+  fit either page), each is its own small form per the prompt. "Forgot your password?" link
+  added to `/login`, below the existing "Register" link.
+- 9 new backend tests (`test_password_reset.py`), 95 total (was 86), all passing against a
+  rebuilt `api` image. Hermetic — `routers.auth.send_email` mocked in every test, same
+  necessity established in 4.6.1 (a genuine `RESEND_API_KEY` lives in this project's own `.env`).
+  Coverage: real account gets a token + email attempt, unknown email gets the identical
+  response with no token/email, a valid token actually changes the password (old rejected, new
+  accepted), token reuse rejected, expired token rejected, bogus token rejected, redeeming one
+  token invalidates a still-outstanding earlier one for the same user, both rate limits exact.
+- **Verified live against the real dev database and the real running stack, deliberately without
+  spamming a real inbox this time** (this prompt didn't ask for delivery verification the way
+  4.6.1 did — token creation itself has no address-validity dependency, so a throwaway
+  `@example.com` account was enough): recreated the `api` container (confirmed migration `009`
+  applied cleanly, `\d password_reset_tokens` matches the spec exactly); called the real
+  `POST /auth/forgot-password` over HTTP for a throwaway `@example.com` account — Resend
+  correctly rejected the address with a clear `ValidationError` ("Please use our testing email
+  address instead of domains like example.com"), cleanly caught, no crash, endpoint still
+  correctly returned the generic 200 — and confirmed the token row was created anyway. Since the
+  raw token only ever existed in that one (failed) email body, and even direct DB access can't
+  recover it from the stored hash by design, substituted a known raw token into the same valid
+  row (a legitimate test technique, not a security bypass in the app) to drive the real
+  `POST /auth/reset-password` endpoint over HTTP end to end: old password rejected after reset,
+  new password accepted, token-reuse correctly rejected. Then ran the **full flow through an
+  actual browser** against the live dev server — registered a throwaway account, triggered a
+  real `forgot-password` call, substituted a known token again, navigated to
+  `/reset-password?token=...`, filled and submitted the real form, confirmed redirect to
+  `/login`, and confirmed old/new password behavior over the real API from within that same
+  browser session. Also screenshotted `/login` (new link visible), `/forgot-password` (both
+  states), and `/reset-password` (both the no-token error state and the real form) to confirm
+  visual correctness. All throwaway accounts/tokens deleted afterward (via the real
+  `DELETE /auth/me` cascade); confirmed via SQL that none remain. All scratch scripts removed.
+  `tsc --noEmit` clean; `next build` not run (dev server was live on port 3000), matching this
+  project's established practice.
+- Not touched in this prompt, per its explicit scope: `alert_history`/alerting (already done in
+  4.6/4.6.1), compliance export.
+
+**Next: continue Phase 4 per the 4.3 build order — prompt 4.8, compliance export** (fully
+independent of everything else in Phase 4), which per the 4.3 report closes out the phase's
+remaining scope ahead of a wrap-up/regression-verification prompt.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

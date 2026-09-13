@@ -8,7 +8,14 @@ from sqlalchemy import engine_from_config, pool
 from sqlalchemy.orm import sessionmaker
 
 from database import Base
-from models import AlertHistory, Check, Target, TargetRegionSchedule, User  # noqa: F401 — register with Base.metadata
+from models import (  # noqa: F401 — register with Base.metadata
+    AlertHistory,
+    Check,
+    PasswordResetToken,
+    Target,
+    TargetRegionSchedule,
+    User,
+)
 
 config = context.config
 if config.config_file_name is not None:

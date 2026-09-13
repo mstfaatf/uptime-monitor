@@ -1,4 +1,8 @@
-"""Auth endpoints: register, login, logout, me."""
+"""Auth endpoints: register, login, logout, me, password reset."""
+
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr
@@ -6,11 +10,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user, hash_password, verify_password, create_session_cookie, clear_session_cookie
+from config import settings
 from database import get_db
-from models import User
+from mail import password_reset_email, send_email
+from models import PasswordResetToken, User
 from rate_limit import limiter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# How long a password-reset link stays valid. Also used as the "expires in N minutes" figure
+# in the email itself, so the two can never drift apart.
+RESET_TOKEN_EXPIRY_MINUTES = 60
 
 
 class RegisterBody(BaseModel):
@@ -41,6 +51,23 @@ class ChangePasswordBody(BaseModel):
 class PreferencesUpdateBody(BaseModel):
     alert_on_downtime: bool | None = None
     alert_on_cert_expiry: bool | None = None
+
+
+class ForgotPasswordBody(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordBody(BaseModel):
+    token: str
+    new_password: str
+
+
+def _hash_reset_token(token: str) -> str:
+    """SHA-256, not argon2: the token is a 32-byte cryptographically random value with no
+    dictionary to defend against, unlike a human-chosen password — a fast hash is the correct
+    tool here, and using argon2 would just make every lookup needlessly slow. See migration
+    009's docstring for the full reasoning."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 @router.post("/register", response_model=UserResponse)
@@ -149,3 +176,85 @@ async def delete_account(
     await db.delete(current_user)
     clear_session_cookie(response)
     return None
+
+
+@router.post("/forgot-password")
+@limiter.limit("3/minute")
+async def forgot_password(
+    request: Request,
+    body: ForgotPasswordBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """Always returns the same generic response whether or not the account exists —
+    anti-enumeration, the same reasoning /auth/change-password's 401 shape already relies on
+    (a response shouldn't reveal information an attacker couldn't otherwise get). If the
+    account exists, generates a reset token, stores its hash, and emails the raw token as a
+    link — the raw token itself is never persisted anywhere, only its hash."""
+    result = await db.execute(select(User).where(User.email == body.email))
+    user = result.scalar_one_or_none()
+    if user is not None:
+        raw_token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=RESET_TOKEN_EXPIRY_MINUTES)
+        db.add(
+            PasswordResetToken(
+                user_id=user.id,
+                token_hash=_hash_reset_token(raw_token),
+                expires_at=expires_at,
+            )
+        )
+        await db.flush()
+        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={raw_token}"
+        subject, body_text = password_reset_email(reset_url=reset_url, expires_in_minutes=RESET_TOKEN_EXPIRY_MINUTES)
+        await send_email(user.email, subject, body_text)
+    return {"detail": "If that email is registered, a password reset link has been sent."}
+
+
+@router.post("/reset-password")
+@limiter.limit("5/minute")
+async def reset_password(
+    request: Request,
+    body: ResetPasswordBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """Consume a reset token: verify it's unexpired and unused, set the new password, mark
+    this token used, and invalidate every other outstanding token for the same user (defense
+    in depth — an earlier, still-unused reset email shouldn't remain usable after a successful
+    reset via a later one).
+
+    Known, accepted limitation: this app's sessions are stateless JWTs with no server-side
+    revocation list, so a password reset does not invalidate any other already-logged-in
+    session for this user. Not fixed here — flagged, not silently ignored.
+    """
+    token_hash = _hash_reset_token(body.token)
+    result = await db.execute(select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash))
+    reset_token = result.scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if reset_token is None or reset_token.used_at is not None or reset_token.expires_at < now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="This reset link is invalid or has expired."
+        )
+
+    user_result = await db.execute(select(User).where(User.id == reset_token.user_id))
+    user = user_result.scalar_one_or_none()
+    if user is None:
+        # The account was deleted after this token was issued — it's now orphaned.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="This reset link is invalid or has expired."
+        )
+
+    user.password_hash = hash_password(body.new_password)
+    reset_token.used_at = now
+
+    others = await db.execute(
+        select(PasswordResetToken).where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.id != reset_token.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+    )
+    for other in others.scalars():
+        other.used_at = now
+
+    await db.flush()
+    return {"ok": True}

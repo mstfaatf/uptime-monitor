@@ -64,6 +64,11 @@ export default function LoginPage() {
                 Register
               </Link>
             </p>
+            <p className="mt-2 text-sm" style={{ color: "var(--text-secondary)" }}>
+              <Link href="/forgot-password" className="underline" style={{ color: "var(--text-primary)" }}>
+                Forgot your password?
+              </Link>
+            </p>
           </CardContent>
         </Card>
       </main>
