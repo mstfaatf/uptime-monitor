@@ -25,3 +25,16 @@ async def test_target_creation_rate_limited_after_ten_per_minute(client):
         assert resp.status_code == 201
     limited = await client.post("/targets", json={"url": "https://example.com/overflow"})
     assert limited.status_code == 429
+
+
+async def test_change_password_rate_limited_after_five_per_minute(client):
+    await client.post("/auth/register", json={"email": "ratelimited-pwchange@example.com", "password": "pw"})
+    for _ in range(5):
+        resp = await client.post(
+            "/auth/change-password", json={"current_password": "wrong", "new_password": "new"}
+        )
+        assert resp.status_code == 401
+    limited = await client.post(
+        "/auth/change-password", json={"current_password": "wrong", "new_password": "new"}
+    )
+    assert limited.status_code == 429

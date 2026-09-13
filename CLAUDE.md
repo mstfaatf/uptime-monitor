@@ -1526,5 +1526,79 @@ and auth/static pages untouched, per this prompt's scope.
   was edited. Next per the 3.1 build order: prompt 3.7 — `/settings` (password-reset and
   alert-preference UI stubs, ahead of Phase 4's real Resend wiring).
 
+Phase 3, prompt 3.7 (`/settings`) is complete. No other page touched; no alerting/email
+logic built (that's still entirely Phase 4).
+- **Asked and settled before building**: the prompt's wording ("wired to whatever
+  password-change endpoint already exists from earlier phases") assumed one existed — it
+  didn't (`backend/routers/auth.py` had only register/login/logout/me). Asked whether to
+  build a real minimal endpoint now or stub the form disabled; user chose to build it for
+  real, reasoning that unlike alert emails (needs Phase 4's Resend integration) or CSV export
+  (Phase 4, file generation), password change is small, self-contained, and has no external
+  dependency — much closer to the alert-preferences case, which the prompt already explicitly
+  authorized building minimal backend support for.
+- **Backend additions** (migration `007_add_users_alert_preferences.py`): two plain boolean
+  columns on `users` (`alert_on_downtime`, `alert_on_cert_expiry`, both default `true`) rather
+  than a separate preferences table — there are only two of them and they're global per-user,
+  not per-target, so a whole extra table would be premature. `POST /auth/change-password`
+  (verify current password via the existing `verify_password`, rehash, update; 401 on a wrong
+  current password — same shape as `/auth/login`'s failure, not a distinct error type, so it
+  can't be used to probe how close a guess was; rate-limited 5/minute, matching login, even
+  though CLAUDE.md's rule 6 doesn't name this endpoint specifically — same abuse shape) and
+  `PATCH /auth/preferences` (partial update — only fields present in the request body change).
+  `UserResponse` (shared by register/login/me) now includes both preference fields via
+  `UserResponse.model_validate(user)`, replacing the three call sites that previously
+  hand-listed `id`/`email` and would otherwise have silently omitted the new fields. 8 new
+  backend tests (roundtrip password change + old-password-now-rejected, wrong-current-password
+  rejected with the target user confirmed unchanged, auth-required on both new endpoints,
+  partial-preference-update semantics, new-user defaults, the rate-limit boundary) — 53
+  backend tests total, all passing. `api` image rebuilt and the running container recreated
+  from it so the live stack actually serves the new endpoints, not just the test suite.
+- Frontend: alert toggles use shadcn's `Switch` (added fresh, drop-shadow stripped like every
+  other primitive so far — same reasoning as 3.4/3.6). Toggling is optimistic (flips
+  immediately, reverts with an inline error if the `PATCH` fails) rather than waiting on the
+  network round-trip first. The change-password form adds a client-side "confirm new
+  password" field (not required by the prompt, small effort, meaningfully better UX) checked
+  before the request is even sent.
+- Microcopy is deliberately honest about scope: "Sending itself isn't wired up yet — these
+  toggles just save your preference for when it is," directly under the Alert preferences
+  heading, so nothing implies working email delivery that doesn't exist.
+- **Verified against the live stack with real requests, not mocked state**: registered a
+  throwaway user, confirmed fresh defaults (`alert_on_downtime`/`alert_on_cert_expiry` both
+  `true`) via the real register response, then drove the actual page with Playwright — flipped
+  the downtime-alerts switch (real `PATCH`) and ran the full password-change form (real
+  `POST`). Confirmed server-side, not just from the UI's own success message: the old password
+  now gets `401` on `/auth/login`, the new one gets `200`, and the toggled preference persisted
+  in the same response. Mobile layout confirmed responsive (one minor, non-blocking cosmetic
+  note: the header's "← Back to dashboard" link can wrap awkwardly at narrow widths — inherited
+  unchanged from the same header pattern in 3.6's detail page, not a regression introduced
+  here; worth a look in a future polish pass, not fixed now).
+- **Root-caused a recurring dev-server-corruption issue properly this time**: 3.6's wrap-up
+  attributed the port-3000 dev server breakage to `rm -rf .next` specifically. This prompt
+  proved that diagnosis incomplete — running a plain `npm run build` with **no** prior `rm -rf`
+  still 404'd the live dev server's static chunks, because `next build` and `next dev` both
+  write to the same `.next` directory; any production build while the dev server is running
+  against that directory corrupts its manifest, regardless of whether it's cleaned first.
+  Restarted the dev server (confirmed healthy after) — flagging the corrected root cause
+  explicitly so a future prompt doesn't re-diagnose it from scratch: **don't run `next build`
+  at all while the user's own dev server is live on port 3000**, or budget for a restart every
+  time one does.
+- Self-critique against the 3.1 avoid-list: clean. No Inter/gradient, no uniform soft-shadow
+  cards (two genuine content sections, not decorative filler), no all-caps eyebrow labels, no
+  middle-dot-joined meta text, no numbered markers (correctly absent — nothing on this page is
+  a genuine sequence), no single-word headline accent. The header's leading "←" is the same
+  wayfinding pattern already reasoned about in 3.6, not the avoided trailing-CTA-arrow tell.
+- **A known gap, not fixed here**: nothing links to `/settings` from any other page yet (same
+  situation as the dashboard → detail-page link gap flagged in 3.6). Flagging for 3.8/3.9.
+- Verification user and scratch scripts cleaned up afterward (no target data was created this
+  prompt, so nothing to delete there); confirmed stack healthy via `docker compose ps` before
+  finishing.
+- Not touched in this prompt (explicitly out of scope, per the prompt): list view, detail
+  view, auth/static pages, any alerting/email-sending logic. Next per the 3.1 build order:
+  prompt 3.8 — motion/polish pass (the one orchestrated dashboard load-in already exists from
+  3.5; this prompt is about auditing hover states, `prefers-reduced-motion` coverage across
+  every custom component, and toast wiring for real-time events) — and it's a natural point to
+  also close the two known navigation gaps (dashboard → detail page, and a settings link)
+  flagged in 3.6 and here.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

@@ -26,9 +26,21 @@ class LoginBody(BaseModel):
 class UserResponse(BaseModel):
     id: int
     email: str
+    alert_on_downtime: bool
+    alert_on_cert_expiry: bool
 
     class Config:
         from_attributes = True
+
+
+class ChangePasswordBody(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class PreferencesUpdateBody(BaseModel):
+    alert_on_downtime: bool | None = None
+    alert_on_cert_expiry: bool | None = None
 
 
 @router.post("/register", response_model=UserResponse)
@@ -48,7 +60,7 @@ async def register(
     await db.flush()
     await db.refresh(user)
     create_session_cookie(response, user.id, user.email)
-    return UserResponse(id=user.id, email=user.email)
+    return UserResponse.model_validate(user)
 
 
 @router.post("/login", response_model=UserResponse)
@@ -65,7 +77,7 @@ async def login(
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     create_session_cookie(response, user.id, user.email)
-    return UserResponse(id=user.id, email=user.email)
+    return UserResponse.model_validate(user)
 
 
 @router.post("/logout")
@@ -78,4 +90,41 @@ async def logout(response: Response):
 @router.get("/me", response_model=UserResponse)
 async def me(current_user: User = Depends(get_current_user)):
     """Return current authenticated user."""
-    return UserResponse(id=current_user.id, email=current_user.email)
+    return UserResponse.model_validate(current_user)
+
+
+@router.post("/change-password")
+@limiter.limit("5/minute")
+async def change_password(
+    request: Request,
+    body: ChangePasswordBody,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Change the authenticated user's password. Requires the current password — same
+    401-on-bad-credentials shape as /auth/login, not a distinct error type, so this endpoint
+    can't be used to probe whether a password guess is close. Rate-limited for the same reason
+    login is: repeated current-password guessing."""
+    if not verify_password(body.current_password, current_user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect")
+    current_user.password_hash = hash_password(body.new_password)
+    await db.flush()
+    return {"ok": True}
+
+
+@router.patch("/preferences", response_model=UserResponse)
+async def update_preferences(
+    body: PreferencesUpdateBody,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update alert-preference toggles. UI-only groundwork for Phase 4's alerting — nothing
+    reads these fields to actually send an email yet. Only the fields present in the request
+    body are changed; omitted fields keep their current value."""
+    if body.alert_on_downtime is not None:
+        current_user.alert_on_downtime = body.alert_on_downtime
+    if body.alert_on_cert_expiry is not None:
+        current_user.alert_on_cert_expiry = body.alert_on_cert_expiry
+    await db.flush()
+    await db.refresh(current_user)
+    return UserResponse.model_validate(current_user)
