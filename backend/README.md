@@ -63,6 +63,8 @@ Alembic uses the same `DATABASE_URL` and converts it to a sync driver (`postgres
    | `COOKIE_SECURE` | Secure (HTTPS only) | `false` (see `ENVIRONMENT` above) |
    | `COOKIE_SAMESITE` | SameSite policy | `lax` |
    | `COOKIE_MAX_AGE` | Cookie max age in seconds | `604800` (7 days) |
+   | `RESEND_API_KEY` | Resend API key for transactional email (downtime/cert-expiry alerts, password reset) | unset — email sending no-ops (logged, not sent) rather than failing |
+   | `RESEND_FROM_EMAIL` | Sender identity for outgoing mail | `Uptime Monitor <onboarding@resend.dev>` (Resend's sandbox address; works without a verified domain) |
 
    Example `backend/.env`:
 
@@ -150,9 +152,12 @@ accordingly before running `pytest`.
 Coverage: full auth flow (register/login/logout/me, duplicate email, wrong password), ownership
 enforcement across all target endpoints (the most important tests here — user A can never read,
 list, or delete user B's targets), URL normalization + duplicate-target 409s, SSRF blocking at
-creation time, the `JWT_SECRET` fail-fast behavior, and rate limiting on login/register/target
-creation. Worker-side SSRF and redirect-handling tests live in `worker/tests/` instead — see
-`worker/README.md` — since the worker is a separately deployed service with its own dependencies.
+creation time, the `JWT_SECRET` fail-fast behavior, rate limiting on login/register/target
+creation, and the `mail/` package's Resend wrapper + email templates (hermetic — no real
+Resend API calls; `RESEND_API_KEY` is unset in the test environment, exercising the real
+no-op path rather than a mock standing in for it). Worker-side SSRF and redirect-handling
+tests live in `worker/tests/` instead — see `worker/README.md` — since the worker is a
+separately deployed service with its own dependencies.
 
 ## Endpoints
 

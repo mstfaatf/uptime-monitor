@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     COOKIE_SAMESITE: str = "lax"
     COOKIE_MAX_AGE: int = 60 * 60 * 24 * 7  # 7 days in seconds
 
+    # Resend (transactional email — downtime/cert-expiry alerts, password reset). Unlike
+    # JWT_SECRET, this has no fail-fast requirement: a missing key means email-sending degrades
+    # safely to a log-and-skip no-op (see mail/client.py), not a security hole, so local dev
+    # shouldn't need a real Resend account just to boot the app.
+    RESEND_API_KEY: str | None = None
+    # Sender identity for outgoing mail. Defaults to Resend's own sandbox address, which sends
+    # without requiring a verified custom domain — fine for dev/testing. Override once a real
+    # domain is verified with Resend.
+    RESEND_FROM_EMAIL: str = "Uptime Monitor <onboarding@resend.dev>"
+
     @model_validator(mode="after")
     def _enforce_cookie_secure_in_production(self) -> "Settings":
         """ENVIRONMENT=production always gets a secure cookie, even if COOKIE_SECURE

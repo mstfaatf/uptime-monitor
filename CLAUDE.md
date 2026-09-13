@@ -2140,5 +2140,62 @@ dependency.
 **Next: continue Phase 4 per the 4.3 build order — prompt 4.5, the shared Resend client
 wrapper** (prerequisite for both the alerting logic in 4.6 and forgot-password in 4.7).
 
+Phase 4, prompt 4.5 (Resend client wrapper + email templates) is complete. Plumbing only, per
+this prompt's explicit scope — nothing wired into alert-sending or forgot-password logic yet.
+- **Real deviation from the prompt's literal instruction, found before writing any code and
+  worth flagging clearly**: the prompt said "create `backend/email/client.py`". Verified
+  first (not assumed) that a package literally named `email` at `backend/`'s root would
+  shadow Python's stdlib `email` module for the whole app — `backend/` sits directly on
+  `sys.path` (confirmed via `sys.path[0] == ''`, resolving to `/app`, same as every other
+  unqualified top-level import like `config`/`database`), and grepping installed
+  site-packages showed `starlette/responses.py`, `fastapi/routing.py`, and `uvicorn/server.py`
+  all import the stdlib `email` module directly — this would have broken core request
+  handling, not just this feature. Used **`backend/mail/`** instead (confirmed no existing
+  stdlib/installed module by that name), everything else built exactly as specified. Verified
+  live in the container: stdlib `email` still resolves to `/usr/local/lib/python3.12/email/`
+  with the new package present.
+- `backend/config.py`: `RESEND_API_KEY: str | None = None` (optional, unlike `JWT_SECRET` —
+  a missing key degrades safely to log-and-skip, not a startup failure) and
+  `RESEND_FROM_EMAIL` (defaults to Resend's own sandbox sender address, which works without a
+  verified custom domain — a small necessary addition beyond the prompt's literal ask, since
+  the Resend SDK requires a `from` address on every send and there was nowhere else for one to
+  come from).
+- `backend/mail/client.py`: `send_email(to, subject, body) -> bool` wraps
+  `resend.Emails.send_async` (the SDK's real async method, confirmed via its PyPI docs and
+  live introspection in the container before use, not assumed) as plain-text mail (`text`
+  field). Returns `False` and logs, without raising, both when no key is configured and when
+  a real send fails — email is always a side effect of some other action and should never
+  itself break the caller.
+- `backend/mail/templates.py`: three functions (`downtime_alert_email`,
+  `cert_expiry_alert_email`, `password_reset_email`), each returning `(subject, body)`, no
+  templating engine. Templates format text only — they take already-built full URLs
+  (`detail_url`, `settings_url`, `reset_url`) as plain string arguments rather than knowing
+  about `FRONTEND_URL`/routing themselves, keeping them free of config/env coupling; whatever
+  wires them up in 4.6/4.7 owns building those URLs. Both alert templates end with a
+  "Manage alert preferences: {settings_url}" line; password reset ends with a
+  standard "ignore this if you didn't request it" line instead (not an alert type, no
+  preferences to manage). A small `_target_description()` helper avoids printing a target's
+  URL twice when it has no name (`target_label == target_url`).
+- `resend>=2.0.0` added to `backend/requirements.txt`. `RESEND_API_KEY`/`RESEND_FROM_EMAIL`
+  documented in `.env.example` and `backend/README.md`'s env var table.
+- 5 new tests (`backend/tests/test_mail.py`), hermetic — no real Resend calls, since
+  `RESEND_API_KEY` is genuinely unset in the test environment (exercising the real no-op path,
+  not a mock standing in for it): `send_email` returns `False` without a key; both alert
+  templates include the right facts and links; the label/url dedup case; password-reset
+  includes the link+expiry and deliberately has no settings link. 65 backend tests total (was
+  60), all passing against a rebuilt `api` image. Also verified live in the container
+  (not just via pytest): `resend.Emails.send_async` exists, the `mail` package imports
+  cleanly, `send_email` with no key returns `False` without raising, and all three templates'
+  rendered output read correctly (spot-checked printed output for tone/content, not just
+  substring assertions). The running `api` container was recreated from the rebuilt image and
+  `/health` reconfirmed `{"status":"ok"}`.
+- Not touched in this prompt, per its explicit scope: `alert_history`, any hook into
+  `realtime.py`'s `_handle_notification`, forgot-password endpoints/tables/pages. The `mail`
+  package is fully built and tested but not yet called from anywhere in the app.
+
+**Next: continue Phase 4 per the 4.3 build order — prompt 4.6, `alert_history` schema +
+downtime/cert-expiry alerting logic**, wiring `mail.send_email` into `realtime.py`'s
+`_handle_notification` (depends on 4.5, now complete).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
