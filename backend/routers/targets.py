@@ -15,7 +15,7 @@ from sqlalchemy.orm import aliased
 import realtime
 from auth import get_current_user
 from database import get_db
-from models import Check, Target, User
+from models import Check, Target, TargetRegionSchedule, User
 from rate_limit import limiter
 from security.ssrf import is_url_blocked
 
@@ -83,6 +83,14 @@ class LatestCheckResponse(BaseModel):
     tls_cert_expires_at: str | None
     tls_cert_issuer: str | None
     tls_cert_days_remaining: int | None
+    # How many consecutive failures this (target, region) is currently on, per
+    # target_region_schedule — resets to 0 the moment a check succeeds (see
+    # worker/main.py's reschedule_target), so this is only ever non-zero on a check that
+    # itself failed. Null when there's no schedule row yet for this region (e.g. a
+    # historical CheckHistoryEntry, where a "live schedule state" reading doesn't apply to a
+    # past check) rather than a live latest-check reading. Used to debounce the down/degraded
+    # classification — see lib/thresholds.ts's CONSECUTIVE_FAILURES_DOWN_THRESHOLD.
+    consecutive_failures: int | None = None
 
 
 class TargetStatusResponse(BaseModel):
@@ -106,8 +114,13 @@ class CheckHistoryEntry(LatestCheckResponse):
     region: str
 
 
-def _check_to_response_dict(check: Check) -> dict:
-    """Build the LatestCheckResponse-shaped dict for one check row."""
+def _check_to_response_dict(check: Check, consecutive_failures: int | None = None) -> dict:
+    """Build the LatestCheckResponse-shaped dict for one check row. consecutive_failures is a
+    separate, optional argument (not read off `check`) because it comes from
+    target_region_schedule, a different table keyed by (target_id, region) — it's only ever
+    supplied for a *latest* check (see build_target_status_payload), never for a historical
+    CheckHistoryEntry, where a live schedule-state reading doesn't correspond to that past
+    check."""
     days_remaining = None
     if check.tls_cert_expires_at is not None:
         days_remaining = (check.tls_cert_expires_at - datetime.now(timezone.utc)).days
@@ -124,29 +137,47 @@ def _check_to_response_dict(check: Check) -> dict:
         "tls_cert_expires_at": check.tls_cert_expires_at.isoformat() if check.tls_cert_expires_at else None,
         "tls_cert_issuer": check.tls_cert_issuer,
         "tls_cert_days_remaining": days_remaining,
+        "consecutive_failures": consecutive_failures,
     }
 
 
-def build_target_status_payload(target: Target, checks_by_region: dict[str, Check]) -> dict:
+def build_target_status_payload(
+    target: Target,
+    checks_by_region: dict[str, Check],
+    failures_by_region: dict[str, int] | None = None,
+) -> dict:
     """Build the same {target + latest_checks} shape used by GET /targets/status, for reuse by
     the SSE push in realtime.py — one place decides what a "target status" looks like, so the
     two delivery paths (poll and push) can never silently drift apart. checks_by_region holds
-    each region's single most recent check for this target (empty if none yet in any region)."""
+    each region's single most recent check for this target (empty if none yet in any region);
+    failures_by_region holds that region's current target_region_schedule.consecutive_failures
+    (missing/None if no schedule row exists yet for that region)."""
+    failures_by_region = failures_by_region or {}
     return {
         "id": target.id,
         "url": target.url,
         "name": target.name,
         "created_at": target.created_at.isoformat(),
-        "latest_checks": {region: _check_to_response_dict(check) for region, check in checks_by_region.items()},
+        "latest_checks": {
+            region: _check_to_response_dict(check, failures_by_region.get(region))
+            for region, check in checks_by_region.items()
+        },
     }
 
 
 def _latest_checks_per_region_query(user_id: int | None = None, target_id: int | None = None):
-    """Shared query shape for "target(s) + each region's latest check": used by both the
-    /status list endpoint (filtered by user_id) and realtime's single-target lookup (filtered
-    by target_id). Returns one (Target, Check) row per (target, region) that has at least one
-    check, plus one (Target, None) row for a target with no checks in any region yet — a
-    target is never dropped just because it (or one region) has no data."""
+    """Shared query shape for "target(s) + each region's latest check (+ that region's current
+    consecutive_failures)": used by both the /status list endpoint (filtered by user_id) and
+    realtime's single-target lookup (filtered by target_id). Returns one
+    (Target, Check, consecutive_failures) row per (target, region) that has at least one check,
+    plus one (Target, None, None) row for a target with no checks in any region yet — a target
+    is never dropped just because it (or one region) has no data.
+
+    target_region_schedule is joined on (target_id, region) taken from the ranked Check
+    subquery, not from a fixed column of Target — a target's region set is only known from
+    whichever regions it actually has checks in. consecutive_failures is None whenever no
+    schedule row exists yet for that (target, region), e.g. immediately after target creation,
+    before any worker has picked it up."""
     ranked = (
         select(
             Check,
@@ -158,9 +189,14 @@ def _latest_checks_per_region_query(user_id: int | None = None, target_id: int |
     latest_check = aliased(Check, ranked)
 
     stmt = (
-        select(Target, latest_check)
+        select(Target, latest_check, TargetRegionSchedule.consecutive_failures)
         .select_from(Target)
         .outerjoin(ranked, (ranked.c.target_id == Target.id) & (ranked.c.rn == 1))
+        .outerjoin(
+            TargetRegionSchedule,
+            (TargetRegionSchedule.target_id == ranked.c.target_id)
+            & (TargetRegionSchedule.region == ranked.c.region),
+        )
     )
     if user_id is not None:
         stmt = stmt.where(Target.user_id == user_id).order_by(Target.created_at.desc())
@@ -169,19 +205,26 @@ def _latest_checks_per_region_query(user_id: int | None = None, target_id: int |
     return stmt
 
 
-def _group_checks_by_target(rows) -> tuple[dict[int, Target], dict[int, dict[str, Check]]]:
-    """Collapse the (Target, Check|None) rows from _latest_checks_per_region_query — one row
-    per (target, region) — into per-target Target objects and {region: Check} dicts, preserving
-    the order targets first appeared in (the query's own ORDER BY, when applied)."""
+def _group_checks_by_target(
+    rows,
+) -> tuple[dict[int, Target], dict[int, dict[str, Check]], dict[int, dict[str, int]]]:
+    """Collapse the (Target, Check|None, consecutive_failures|None) rows from
+    _latest_checks_per_region_query — one row per (target, region) — into per-target Target
+    objects, {region: Check} dicts, and {region: consecutive_failures} dicts, preserving the
+    order targets first appeared in (the query's own ORDER BY, when applied)."""
     targets_by_id: dict[int, Target] = {}
     checks_by_target: dict[int, dict[str, Check]] = {}
-    for target, check in rows:
+    failures_by_target: dict[int, dict[str, int]] = {}
+    for target, check, consecutive_failures in rows:
         if target.id not in targets_by_id:
             targets_by_id[target.id] = target
             checks_by_target[target.id] = {}
+            failures_by_target[target.id] = {}
         if check is not None:
             checks_by_target[target.id][check.region] = check
-    return targets_by_id, checks_by_target
+            if consecutive_failures is not None:
+                failures_by_target[target.id][check.region] = consecutive_failures
+    return targets_by_id, checks_by_target, failures_by_target
 
 
 @router.get("/status", response_model=list[TargetStatusResponse])
@@ -192,9 +235,11 @@ async def list_targets_status(
     """Return each target owned by the user with its latest check per region (one target per
     id, no duplicates; each region's own most recent result reported independently)."""
     result = await db.execute(_latest_checks_per_region_query(user_id=current_user.id))
-    targets_by_id, checks_by_target = _group_checks_by_target(result.all())
+    targets_by_id, checks_by_target, failures_by_target = _group_checks_by_target(result.all())
     return [
-        TargetStatusResponse(**build_target_status_payload(target, checks_by_target[target_id]))
+        TargetStatusResponse(
+            **build_target_status_payload(target, checks_by_target[target_id], failures_by_target[target_id])
+        )
         for target_id, target in targets_by_id.items()
     ]
 
@@ -312,9 +357,11 @@ async def get_target_detail(
     rows = result.all()
     if not rows or rows[0][0].user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
-    targets_by_id, checks_by_target = _group_checks_by_target(rows)
+    targets_by_id, checks_by_target, failures_by_target = _group_checks_by_target(rows)
     target = targets_by_id[target_id]
-    return TargetStatusResponse(**build_target_status_payload(target, checks_by_target[target_id]))
+    return TargetStatusResponse(
+        **build_target_status_payload(target, checks_by_target[target_id], failures_by_target[target_id])
+    )
 
 
 @router.get("/{target_id}/checks", response_model=list[CheckHistoryEntry])

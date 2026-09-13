@@ -106,3 +106,65 @@ async def test_status_reports_negative_days_remaining_for_an_expired_cert(client
     resp = await client.get("/targets/status")
     latest = resp.json()[0]["latest_checks"]["local"]
     assert latest["tls_cert_days_remaining"] < 0
+
+
+async def _insert_schedule_row(target_id: int, region: str, consecutive_failures: int) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                INSERT INTO target_region_schedule (target_id, region, next_check_at, consecutive_failures)
+                VALUES (:target_id, :region, now(), :consecutive_failures)
+                """
+            ),
+            {"target_id": target_id, "region": region, "consecutive_failures": consecutive_failures},
+        )
+
+
+async def test_status_exposes_consecutive_failures_from_schedule_row(client):
+    """Prompt 4.4: consecutive_failures is read from target_region_schedule (a table the API
+    never queried before this), joined on (target_id, region) from the latest check's own
+    region — not a fixed column of the target."""
+    await client.post("/auth/register", json={"email": "failures@example.com", "password": "pw"})
+    created = await client.post("/targets", json={"url": "https://example.com/failures"})
+    target_id = created.json()["id"]
+
+    await _insert_schedule_row(target_id, "local", consecutive_failures=2)
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="Connection timed out")
+
+    resp = await client.get("/targets/status")
+    latest = resp.json()[0]["latest_checks"]["local"]
+    assert latest["consecutive_failures"] == 2
+
+
+async def test_status_consecutive_failures_null_without_a_schedule_row(client):
+    """No target_region_schedule row exists yet (e.g. immediately after target creation, before
+    any worker has picked it up) — consecutive_failures must be null, not 0 or missing."""
+    await client.post("/auth/register", json={"email": "noschedule@example.com", "password": "pw"})
+    created = await client.post("/targets", json={"url": "https://example.com/no-schedule"})
+    target_id = created.json()["id"]
+
+    await _insert_check(target_id)  # no matching target_region_schedule row inserted
+
+    resp = await client.get("/targets/status")
+    latest = resp.json()[0]["latest_checks"]["local"]
+    assert latest["consecutive_failures"] is None
+
+
+async def test_target_detail_and_checks_history_expose_consecutive_failures_correctly(client):
+    """GET /targets/{id} (latest per region) should carry the live schedule reading; GET
+    /targets/{id}/checks (historical rows) should not fabricate one for a past check."""
+    await client.post("/auth/register", json={"email": "detailfailures@example.com", "password": "pw"})
+    created = await client.post("/targets", json={"url": "https://example.com/detail-failures"})
+    target_id = created.json()["id"]
+
+    await _insert_schedule_row(target_id, "local", consecutive_failures=1)
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="Connection timed out")
+
+    detail = await client.get(f"/targets/{target_id}")
+    assert detail.status_code == 200
+    assert detail.json()["latest_checks"]["local"]["consecutive_failures"] == 1
+
+    history = await client.get(f"/targets/{target_id}/checks?region=local")
+    assert history.status_code == 200
+    assert history.json()[0]["consecutive_failures"] is None

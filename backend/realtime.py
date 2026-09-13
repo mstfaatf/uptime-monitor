@@ -95,9 +95,9 @@ async def _handle_notification(payload: str) -> None:
             # The target was deleted between the NOTIFY firing and this lookup running —
             # nothing to push, and (since it's gone) no owner to push it to.
             return
-        targets_by_id, checks_by_target = _group_checks_by_target(rows)
+        targets_by_id, checks_by_target, failures_by_target = _group_checks_by_target(rows)
         target = targets_by_id[target_id]
-        payload_dict = build_target_status_payload(target, checks_by_target[target_id])
+        payload_dict = build_target_status_payload(target, checks_by_target[target_id], failures_by_target[target_id])
 
     _publish(target.user_id, {"type": "check_update", "region": region, "target": payload_dict})
 

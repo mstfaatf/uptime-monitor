@@ -10,7 +10,7 @@ import { LatencyGauge } from "@/components/latency-gauge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { LATENCY_WARN_MS, CERT_EXPIRY_WARN_DAYS } from "@/lib/thresholds";
+import { LATENCY_WARN_MS, CERT_EXPIRY_WARN_DAYS, CONSECUTIVE_FAILURES_DOWN_THRESHOLD } from "@/lib/thresholds";
 
 type LatestCheck = {
   checked_at: string | null;
@@ -25,6 +25,7 @@ type LatestCheck = {
   tls_cert_expires_at?: string | null;
   tls_cert_issuer?: string | null;
   tls_cert_days_remaining?: number | null;
+  consecutive_failures?: number | null;
 };
 
 // Keyed by region — see backend/routers/targets.py's TargetStatusResponse (since prompt 2.6).
@@ -55,12 +56,18 @@ function isValidUrl(s: string): boolean {
   }
 }
 
-// The locked degraded-state contract, applied per region: a region that hasn't reported yet
-// is "pending"; a failed check is "down"; a successful check that's slow or has a
-// soon-to-expire cert is "degraded"; everything else is "up". See lib/thresholds.ts.
+// The locked degraded-state contract, applied per region (extended in prompt 4.4): a region
+// that hasn't reported yet is "pending"; a failed check is "degraded" until
+// consecutive_failures crosses the threshold (still retrying, not confirmed down yet), then
+// "down" — authoritative and evaluated first, latency/cert thresholds never apply to a failed
+// check; a successful check that's slow or has a soon-to-expire cert is "degraded"; everything
+// else is "up". See lib/thresholds.ts.
 function deriveState(check: LatestCheck | undefined): SignalState {
   if (!check || check.checked_at == null) return "pending";
-  if (!check.is_up) return "down";
+  if (!check.is_up) {
+    const failures = check.consecutive_failures ?? 0;
+    return failures < CONSECUTIVE_FAILURES_DOWN_THRESHOLD ? "degraded" : "down";
+  }
   const slow = check.latency_ms != null && check.latency_ms > LATENCY_WARN_MS;
   const certExpiringSoon =
     check.tls_cert_days_remaining != null && check.tls_cert_days_remaining <= CERT_EXPIRY_WARN_DAYS;

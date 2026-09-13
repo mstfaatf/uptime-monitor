@@ -13,6 +13,11 @@ export type LatestCheck = {
   tls_cert_expires_at?: string | null;
   tls_cert_issuer?: string | null;
   tls_cert_days_remaining?: number | null;
+  // From target_region_schedule, not the check row itself — resets to 0 the moment a check
+  // succeeds, so it's only meaningful (non-null) on a check that itself failed. Null when no
+  // schedule row exists yet for this region. See lib/thresholds.ts's
+  // CONSECUTIVE_FAILURES_DOWN_THRESHOLD.
+  consecutive_failures?: number | null;
 };
 
 export type TargetDetail = {

@@ -2090,5 +2090,55 @@ if picking this up cold.
 **Next: Phase 4 implementation begins at prompt 4.4** (consecutive_failures degraded trigger),
 per the build order above, pending the user's review of this report.
 
+Phase 4, prompt 4.4 (consecutive_failures-based degraded trigger) is complete — implements the
+4.3 report's proposal exactly. Independent of the rest of Phase 4, no Resend/alert_history
+dependency.
+- **`CONSECUTIVE_FAILURES_DOWN_THRESHOLD = 3`**, added as a named constant in
+  `frontend/lib/thresholds.ts` (frontend-only — the backend doesn't apply this threshold
+  itself, it only exposes the raw count; the classification stays a display concern).
+- **Precedence rule, implemented exactly as specified** in both `frontend/lib/status.ts`
+  (`deriveState`, used by the detail page) and the still-duplicated inline copy in
+  `app/dashboard/page.tsx` (deliberately **not** consolidated as part of this change, per the
+  prompt): no check yet -> pending; `is_up=false` -> `consecutive_failures < threshold` ->
+  degraded, else -> down (authoritative, evaluated first — latency/cert thresholds never
+  apply here); `is_up=true` -> slow or expiring-cert -> degraded, else -> up.
+- **Backend**: `backend/routers/targets.py`'s `_latest_checks_per_region_query` now also
+  outer-joins `target_region_schedule` on `(target_id, region)` — keyed off the ranked Check
+  subquery's own region column, not a fixed column of `Target`, since a target's region set is
+  only known from which regions it actually has checks in. This is the first time the backend
+  API has read `target_region_schedule` at all (previously worker-only via raw asyncpg); the
+  ORM model already had full parity for exactly this. `_group_checks_by_target` now returns a
+  third dict (`failures_by_target`); `build_target_status_payload`/`_check_to_response_dict`
+  thread it through as a new optional `consecutive_failures` field on `LatestCheckResponse`.
+  All three call sites updated: `GET /targets/status`, `GET /targets/{id}`, and
+  `realtime.py`'s `_handle_notification` (the SSE push path) — so a pushed update carries the
+  same field a polled fetch would.
+- **Deliberately null, not fabricated, for historical entries**: `GET /targets/{id}/checks`
+  (past check rows) always returns `consecutive_failures: null` — it's a *live* schedule-table
+  reading, not a fact recorded on the check row itself, so there's no honest value to attach
+  to a check from an hour ago. Only the two "latest check" endpoints (and the SSE push) carry
+  a real value.
+- 3 new backend tests (`backend/tests/test_check_timing.py`): the field is populated correctly
+  from a real `target_region_schedule` row, is `null` (not `0` or missing) when no schedule
+  row exists yet for that region, and the detail-vs-history split above is exercised
+  explicitly. 60 backend tests total (was 57), all passing against a rebuilt `api` image; the
+  running `api` container was recreated from it.
+- **Verified end-to-end against the live stack, not just the test suite**: paused both worker
+  containers (same "new targets get checked immediately, overwriting seeded state" gotcha
+  documented in the 4.3 UI-pass notes), created two real targets via the live API, seeded one
+  at `consecutive_failures=2` and one at `=3` (both `is_up=false`) directly via SQL, and
+  confirmed via both the raw `GET /targets/status` JSON and a Playwright screenshot of the
+  real dashboard that the 2-failures target renders "Degraded" (amber) and the 3-failures
+  target renders "No signal" (down, red) — the exact boundary the threshold is supposed to
+  draw. Verification account and its targets deleted afterward via the real
+  `DELETE /auth/me` flow; confirmed via SQL that no rows remained. Workers restarted and
+  confirmed `Up` again. `tsc --noEmit` clean throughout.
+- Not touched in this prompt, per its explicit scope: Resend, `alert_history`, forgot-password,
+  compliance export, and the known `lib/status.ts`/`app/dashboard/page.tsx` `deriveState`
+  duplication (left in place, both copies updated identically).
+
+**Next: continue Phase 4 per the 4.3 build order — prompt 4.5, the shared Resend client
+wrapper** (prerequisite for both the alerting logic in 4.6 and forgot-password in 4.7).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
