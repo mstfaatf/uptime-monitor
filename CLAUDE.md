@@ -2414,5 +2414,87 @@ Phase 4, prompt 4.7 (forgot-password flow) is complete.
 independent of everything else in Phase 4), which per the 4.3 report closes out the phase's
 remaining scope ahead of a wrap-up/regression-verification prompt.
 
+Phase 4, prompt 4.8 (compliance export, CSV) is complete. **PDF export is explicitly deferred,
+not built** — `reportlab` per the 4.3 report's recommendation (pure-Python, avoids
+`weasyprint`'s system-level Pango/Cairo dependency), left as a clearly-flagged follow-up.
+- **`GET /targets/{id}/export?region=&format=csv&from=&to=`**: ownership-enforced identically
+  to every other target-scoped endpoint (404 not 403), `region` required — never "all regions
+  merged," matching `GET /targets/{id}/checks`'s existing rule. `format` is validated (only
+  `csv` accepted today) so requesting `pdf` gets a clear 400 explaining it's planned but not
+  built, rather than silently receiving CSV under the wrong label. `from`/`to` (optional, ISO
+  8601) bound the date range; omitted means unbounded on that side. No new dependency — stdlib
+  `csv` only, per the prompt.
+- **New `backend/export.py`**: `compute_sla`/`compute_incidents` re-implemented in Python from
+  the existing TypeScript (`app/dashboard/[id]/page.tsx`'s `computeSla`,
+  `components/incident-timeline.tsx`'s `computeIncidents`) — the same deliberate cross-service
+  duplication already established for `security/ssrf.py` vs `worker/ssrf.py`, not a new
+  pattern, kept in sync by hand since export generation runs server-side in Python and the
+  frontend's own logic runs client-side in TypeScript with no shared runtime. Incidents are
+  returned chronologically (oldest first), not reversed like the frontend's own most-recent-
+  first UI ordering — a CSV report reads more naturally in the same order as the raw check
+  rows beneath it in the same file.
+- **Real correctness decision, not just a port of the frontend logic**: `TLS Cert Days
+  Remaining` in the export is computed relative to each row's own `checked_at`, not `now()`
+  the way the live API's `_check_to_response_dict` computes it. The live API is always
+  describing the *latest* check, so "as of right now" is the right frame; a historical export
+  is mostly *not* the latest check, so a `now()`-relative figure on an old row would be
+  actively misleading (e.g. reading a large negative number for a cert that was perfectly
+  fine at the time but has since expired). Verified directly with a dedicated test asserting
+  the correct figure on a 100-day-old row, and confirmed live (below) with real seeded data.
+- **CSV structure**: a summary section (target/URL/region/date range/total checks/SLA%,
+  then an "Incidents" sub-table with start/end/duration) followed by a blank line and the raw
+  check-row table (`checked_at, is_up, status_code, latency_ms, dns_ms, tcp_ms, tls_ms,
+  ttfb_ms, tls_cert_days_remaining, error`) — one file, readable both as a human report and as
+  tabular data once past the summary section. Filename is a fixed `target-{id}-{region}-
+  checks.csv`, deliberately not built from `target.name`/`url` — both are user-controlled
+  strings, and interpolating them raw into a `Content-Disposition` header risks malformed
+  headers (quotes/semicolons are syntactically meaningful there) for no real benefit, since the
+  file's own contents already say what target it is.
+- **Frontend**: the "Export (coming soon)" button is now a real, enabled link (disabled only
+  when the target has no regions/checks yet) pointing straight at the export endpoint with the
+  currently-selected region tab. Implemented as a plain `<a href>` (via `Button asChild`), not
+  a fetch-and-blob dance — a top-level navigation already carries the session cookie
+  (`SameSite=lax` allows this), and the backend's `Content-Disposition: attachment` header is
+  what actually triggers a real download, no client-side JS needed for that part. **Scoping
+  note**: no date-range picker UI was built — the endpoint supports `from`/`to`, but the
+  prompt's ask was "wire the button," and the button exports the selected region's full
+  history; a range-picker UI is a reasonable future addition, not built here to avoid scope
+  creep beyond what was asked.
+- **Sync vs. streaming, confirmed with real numbers rather than re-guessing**: queried the real
+  dev DB before answering — the largest single (target, region) pair currently has ~295 rows;
+  at the default 300s check interval that's ~288 rows/day, so even a full year of continuous
+  history for one (target, region) would be ~105K rows. A synchronous in-memory CSV build
+  handles that in well under a second, backed by the existing `ix_checks_target_id_checked_at`
+  index for the query itself. The 4.3 report's synchronous recommendation is confirmed, not
+  revised.
+- 16 new backend tests (`test_export.py`): pure-function coverage for `compute_sla`/
+  `compute_incidents`/`build_csv` (including the checked_at-vs-now() correctness case) using a
+  lightweight fake-Check stand-in (no DB needed for pure logic), plus endpoint coverage
+  (auth-required, ownership 404, unsupported-format 400, region required, correct headers/
+  content-type/filename, region-scoping, date-range filtering). 111 backend tests total (was
+  95), all passing against a rebuilt `api` image. One test bug caught and fixed along the way
+  (not a production bug): a hand-built query string with an unencoded `+00:00` UTC offset
+  broke on `+` being interpreted as a space — fixed by using httpx's `params=` dict instead of
+  string interpolation, which encodes correctly.
+- **Verified live end to end, including a real browser-triggered file download**: recreated the
+  `api` container, seeded a real target with realistic check history (a healthy run, a 40-
+  minute incident, a later cert renewal) via direct SQL (workers paused for the duration, same
+  "new targets get checked immediately" consideration as prior prompts, restarted after), then
+  used Playwright to load the real detail page, click the real "Export CSV (local)" button, and
+  capture the actual downloaded file — confirmed the correct filename
+  (`target-131-local-checks.csv`), correct SLA% (66.67%, matching 4 of 6 checks up), the exact
+  40-minute incident window, and per-row `TLS Cert Days Remaining` figures correctly relative
+  to each row's own `checked_at`. Screenshotted the enabled button rendering correctly
+  ("Export CSV (local)") before triggering the download. Verification account/target/checks
+  deleted afterward via the real `DELETE /auth/me` cascade; confirmed via SQL that nothing
+  remained. All scratch scripts removed. `tsc --noEmit` clean; `next build` not run (dev
+  server was live on port 3000).
+- Not touched in this prompt, per its explicit scope: PDF export (deferred), a date-range
+  picker UI (scoping note above), forgot-password/alerting (already done in 4.6-4.7).
+
+**Next: Phase 4's remaining scope per the 4.3 build order is prompt 4.9, wrap-up/regression
+verification** — matching the pattern every prior phase has closed with (0.7, 1.6, 2.8, 3.9) —
+plus, whenever wanted, the deferred PDF export follow-up.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

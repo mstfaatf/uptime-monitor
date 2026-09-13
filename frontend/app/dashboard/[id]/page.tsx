@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { apiFetch } from "@/lib/api";
+import { API_BASE, apiFetch } from "@/lib/api";
 import { SignalLight } from "@/components/signal-light";
 import { LatencyGauge } from "@/components/latency-gauge";
 import { LatencyChart } from "@/components/latency-chart";
@@ -160,9 +160,24 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
               </a>
             )}
           </div>
-          <Button type="button" variant="outline" disabled title="CSV/PDF export is coming in a future update.">
-            Export (coming soon)
-          </Button>
+          {selectedRegion ? (
+            // A plain <a> to the export endpoint, not a fetch-and-blob dance: the browser
+            // already sends the session cookie on a top-level navigation like this (SameSite=
+            // lax allows it), and the backend's Content-Disposition: attachment header is what
+            // actually triggers a download instead of navigating away from the app — no client
+            // JS needed to make that happen. Exports the currently-selected region's full
+            // history (no date-range picker UI yet — the endpoint supports from/to, but this
+            // prompt's scope was wiring the button, not building range controls).
+            <Button asChild variant="outline">
+              <a href={`${API_BASE}/targets/${targetId}/export?region=${encodeURIComponent(selectedRegion)}&format=csv`}>
+                Export CSV ({selectedRegion})
+              </a>
+            </Button>
+          ) : (
+            <Button type="button" variant="outline" disabled title="No check history yet to export.">
+              Export CSV
+            </Button>
+          )}
         </div>
 
         {regions.length === 0 ? (

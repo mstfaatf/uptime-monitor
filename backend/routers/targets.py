@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy import func, select
@@ -15,6 +15,7 @@ from sqlalchemy.orm import aliased
 import realtime
 from auth import get_current_user
 from database import get_db
+from export import build_csv
 from models import Check, Target, TargetRegionSchedule, User
 from rate_limit import limiter
 from security.ssrf import is_url_blocked
@@ -393,6 +394,67 @@ async def get_target_checks(
     )
     checks = result.scalars().all()
     return [CheckHistoryEntry(**_check_to_response_dict(check), region=check.region) for check in checks]
+
+
+@router.get("/{target_id}/export")
+async def export_target_checks(
+    target_id: int,
+    region: str,
+    format: str = "csv",
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export this target's check history for one region as a compliance CSV: a summary
+    section (SLA %, incident list) followed by the raw check rows in the requested date range.
+    `region` is required — same "never all regions merged" rule as GET /targets/{id}/checks;
+    exporting means picking one region, run it again for another if needed. `from`/`to`
+    (optional, ISO 8601) bound the range; omitted means unbounded on that side. A single
+    synchronous response is fine at this project's real scale — see the export prompt's
+    report for the actual row-count numbers behind that call. PDF is not built yet;
+    `format` is validated so a caller gets a clear error instead of silently receiving CSV
+    under a different label."""
+    if format != "csv":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only format=csv is available today. PDF export is planned but not built yet.",
+        )
+
+    result = await db.execute(select(Target).where(Target.id == target_id, Target.user_id == current_user.id))
+    target = result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+
+    query = select(Check).where(Check.target_id == target_id, Check.region == region)
+    if from_ is not None:
+        query = query.where(Check.checked_at >= from_)
+    if to is not None:
+        query = query.where(Check.checked_at <= to)
+    query = query.order_by(Check.checked_at.asc())
+
+    checks_result = await db.execute(query)
+    checks = checks_result.scalars().all()
+
+    csv_text = build_csv(
+        target_label=target.name or target.url,
+        target_url=target.url,
+        region=region,
+        range_from=from_,
+        range_to=to,
+        checks=checks,
+    )
+
+    # A fixed, id-based filename rather than interpolating target.name/url directly — both are
+    # user-controlled strings, and putting them raw into a Content-Disposition header risks
+    # malformed headers (quotes, semicolons are syntactically meaningful there) for no real
+    # benefit; the file's own contents already say what target this is.
+    filename = f"target-{target_id}-{region}-checks.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.delete("/{target_id}", status_code=status.HTTP_204_NO_CONTENT)
