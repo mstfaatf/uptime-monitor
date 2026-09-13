@@ -1009,17 +1009,68 @@ changes remain explicitly out of scope (Phase 3), per the 2.1 report.
   and the frontend wasn't running against this response shape as part of this prompt's
   verification), any ADR.
 
-**Phase 2 (multi-region + coordination) is now functionally complete** on the backend/worker
-side: row-claiming, region config, per-region scheduling schema, region-scoped scheduling
-queries, and region-aware API/SSE payloads are all in place and verified end-to-end. Two
-items remain before Phase 2 is fully closed out per the original phase plan: (1) the ADR
-documenting the `SKIP LOCKED` + region-scoping coordination decision (CLAUDE.md rule 5 requires
-this for the multi-region coordination approach specifically), and (2) actually running a
-second worker instance with a distinct `REGION` concurrently against the same dev DB as a
-final integration proof (per the 2.1 report's own build order, this was always meant to be the
-last step, after every piece it depends on — which is now all in place). Phase 3 (UI refresh +
-analytics, including the dashboard consuming `latest_checks` per region) is the next phase
-after that per CLAUDE.md's phase plan.
+Phase 2, prompt 2.7 (second-region integration test + ADR) is complete — step 6 of the 2.1
+build order, the last piece. **Phase 2 (multi-region + coordination) is now fully complete**,
+verified against real concurrent worker processes, not just unit tests or mocked scripts.
+- **`docs/adr/001-multi-region-coordination.md`** — the first ADR in this repo (CLAUDE.md's
+  planned `docs/adr/` batch of 4-5 is otherwise still a Phase 6 deliverable; this one was
+  written now because CLAUDE.md rule 5 explicitly requires it once more than one worker
+  instance exists, and both halves of the design — `SKIP LOCKED`/`claimed_at` claiming and
+  per-target-per-region scheduling/independent display — are now implemented and provable).
+  Documents the claiming design, the scheduling-state-shape decision, and the
+  independent-per-region-display decision together, each with alternatives considered and
+  rejected (bare SELECT / advisory locks / a separate leases table for claiming; shared
+  per-target state / a JSON blob column for scheduling shape; "down if down anywhere" /
+  "down only if down everywhere" for display) and why, plus consequences including the
+  `target_region_schedule` row-count tradeoff (targets × regions) and the lazy-backfill
+  tradeoff from 2.5.
+- `docker-compose.yml` gained a second worker service, **`worker-eu-west`** (`REGION:
+  eu-west`), identical to the existing `worker` service (which now sets `REGION: local`
+  explicitly, matching its long-standing implicit default — no behavior change) in every
+  other respect — same image, same DB, same env. Documented in `worker/README.md`.
+- **Verified end-to-end against real concurrently-running Docker processes** (not scripts or
+  mocks):
+  - Started `worker` (`local`) and `worker-eu-west` (`eu-west`) together against the existing
+    23 real dev targets. `worker-eu-west` immediately self-healed via `ensure_schedule_rows`
+    (from 2.5) — backfilled and began independently scheduling all 23 targets under
+    `eu-west` — confirmed via query that `target_region_schedule` ended with exactly 23 rows
+    per region, and that `local`'s existing rows were untouched by the new region's activity.
+  - **Re-verified the same-region no-double-check guarantee with two real processes**, a
+    stronger proof than 2.2's mocked/scripted version: ran a second, genuinely independent
+    worker process also on `REGION=local` alongside the existing one, then repeatedly forced
+    all `local` targets due to create real contention. Both processes won claims across the
+    burst (confirming real, not one-sided, contention) with zero overlapping target IDs at
+    any point. Directly queried `checks` for the minimum time gap between any two consecutive
+    checks of the same `(target_id, region)` during the burst: **~3.85 seconds** — consistent
+    with two distinct due-cycles roughly a tick apart, never the sub-second/near-simultaneous
+    gap a genuine double-claim would produce. `target_region_schedule.claimed_at` was `NULL`
+    for every row afterward — no stuck claims from the extra process.
+  - **Verified divergent per-region results are stored and retrieved as genuinely independent
+    data, not merged**, via the real running API (not a direct DB read): created a fresh test
+    target, let both regions check it organically (both agreed, as expected — both containers
+    hit the same real internet from the same host), then inserted one deliberately divergent
+    newer check (`local` reachable, `eu-west` not) to isolate the storage/retrieval guarantee
+    from real network variance. `GET /targets/status`, called as the target's real
+    authenticated owner, returned both regions' `latest_checks` entries independently and
+    correctly — `eu-west.is_up=false` alongside `local.is_up=true` in the same response, with
+    no aggregate field anywhere collapsing them.
+  - All test artifacts (the extra `worker-local2` container, the divergence-test user/target/
+    checks) cleaned up afterward; confirmed via query that only the expected 23×2 real
+    schedule rows remain, all unclaimed.
+  - 38 backend + 35 worker tests still pass (no test code changed this prompt — this was a
+    live-infrastructure and documentation prompt, per its own scope).
+- Not touched in this prompt (explicitly out of scope, confirmed via API/logs/scripts only,
+  never the dashboard UI, per the prompt): any frontend code.
+
+**Phase 2 is complete.** Row-claiming, region config, per-region scheduling schema,
+region-scoped scheduling queries, region-aware API/SSE payloads, a running second-region
+worker instance, and the coordination ADR are all in place, individually and end-to-end
+verified. **Next: Phase 3 — UI refresh + analytics** (Tailwind/shadcn, all new pages, summary
+strip, latency chart, heatmap, incident timeline, SLA %, landing page + demo account, forgot
+password) per CLAUDE.md's phase plan. The dashboard's current TypeScript types
+(`frontend/app/dashboard/page.tsx`) still expect the old single `latest_check` shape and will
+need updating to `latest_checks: Record<string, LatestCheck>` as part of that work — flagged
+in 2.6 and again here, not silently left stale.
 
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

@@ -59,7 +59,9 @@ docker compose up -d
 
 The `worker` service is built from `./worker`, uses the same `DATABASE_URL` as the API (with hostname `db` in Compose), and depends on `db` being healthy. No separate port; it only talks to Postgres and the internet (for HTTP checks).
 
-To run only DB + worker (no API):
+`docker compose up` also starts `worker-eu-west` — a second worker instance, identical except for `REGION=eu-west` (the main `worker` service runs `REGION=local`), demonstrating the multi-region coordination design (see `docs/adr/001-multi-region-coordination.md`): both check the same targets against the same database independently, each claiming and scheduling only its own region's rows.
+
+To run only DB + worker (no API, single region):
 
 ```bash
 docker compose up -d db worker

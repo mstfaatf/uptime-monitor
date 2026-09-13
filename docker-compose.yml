@@ -52,6 +52,32 @@ services:
       HTTP_TIMEOUT_SECONDS: "10"
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
       REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      REGION: local
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Second region, same database — proves the multi-region coordination design (row claiming +
+  # region-scoped scheduling, see docs/adr/001-multi-region-coordination.md) against real
+  # concurrent traffic instead of just unit tests. Identical to `worker` in every way except
+  # REGION: two independent worker processes checking the same targets, each claiming and
+  # scheduling only its own region's target_region_schedule rows.
+  worker-eu-west:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/uptime
+      CHECK_INTERVAL_SECONDS: "300"
+      HTTP_TIMEOUT_SECONDS: "10"
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      REGION: eu-west
     dns:
       - 8.8.8.8
       - 8.8.4.4
