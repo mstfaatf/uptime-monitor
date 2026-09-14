@@ -47,15 +47,28 @@ Both forms were verified directly against the real Neon instance this project pr
 `ssl=require` succeeds via asyncpg (both SQLAlchemy's async engine and raw `asyncpg.connect()`),
 **fails via psycopg2/sync** (`invalid dsn: invalid connection option "ssl"`).
 
-**Open problem, not yet resolved (flagged for the prompt that wires up the Railway `api`
-deploy)**: `backend/Dockerfile`'s boot command is `alembic upgrade head && exec uvicorn ...` —
-both steps read the *same* `DATABASE_URL` env var, but each needs a different query-string shape
-(`sslmode=require` for the migration step, `ssl=require` for the app). A single production
-`DATABASE_URL` value cannot satisfy both today. This needs a code fix (e.g. `alembic/env.py`
-translating `ssl=` to `sslmode=` for its sync connection, or `database.py` adding
-`connect_args={"ssl": "require"}` instead of relying on the query string) before this backend can
-actually be deployed — not fixed in this pass, since Neon provisioning didn't touch application
-code by design.
+**Resolved via a second setting, `MIGRATION_DATABASE_URL`** — `backend/Dockerfile`'s boot
+command (`alembic upgrade head && exec uvicorn ...`) needs both query-string shapes at once,
+since each step uses a different driver. Rather than trying to force one URL to satisfy both
+(which isn't possible — the two drivers accept mutually exclusive query params), the two steps
+now read two different settings:
+
+- **`DATABASE_URL`** — read by the running app (`database.py`'s async engine, via `config.py`'s
+  `Settings`). In production this is the `ssl=require` (asyncpg-shaped) form.
+- **`MIGRATION_DATABASE_URL`** — read directly from the environment by `alembic/env.py` (not a
+  `Settings` field — it's only ever needed at migration time, never by the running app). In
+  production this is Neon's native `sslmode=require&channel_binding=require` (libpq-shaped)
+  form. If unset, `alembic/env.py` falls back to `DATABASE_URL` exactly as before — so local
+  dev and Docker Compose (where the two drivers' query-string difference never comes up, since
+  neither uses an SSL query param at all) need no change and keep working unmodified.
+
+This means the Dockerfile's boot command stays a single, unchanged command — no script
+duplication, no conditional logic in the Dockerfile itself; only `alembic/env.py` needed a
+two-line change (prefer `MIGRATION_DATABASE_URL`, fall back to `DATABASE_URL`). Verified against
+the real Neon instance: booting the actual image with `DATABASE_URL=...?ssl=require` and
+`MIGRATION_DATABASE_URL=...?sslmode=require&channel_binding=require` set together runs the
+migration successfully via psycopg2, then starts uvicorn successfully via asyncpg, in one
+container boot, exactly as Railway will run it.
 
 Postgres version: Neon currently runs PostgreSQL 18.6; local dev runs `postgres:16-alpine`. All
 9 migrations (`001`–`009`) applied cleanly against Neon with no errors. A full column/index/
@@ -99,14 +112,17 @@ a functional one.
    | Variable | Description | Default |
    |----------|-------------|---------|
    | `JWT_SECRET` | Secret for signing session cookies | **required — no default; the app fails to start without it** |
-   | `ENVIRONMENT` | `development` or `production` | `development`. `production` forces `COOKIE_SECURE=True` regardless of the setting below. |
-   | `DATABASE_URL` | PostgreSQL URL (async: `postgresql+asyncpg://...`) | `postgresql+asyncpg://postgres:postgres@localhost:5432/uptime` |
+   | `ENVIRONMENT` | `development` or `production` | `development`. `production` forces `COOKIE_SECURE=True` and `COOKIE_SAMESITE="none"` regardless of the settings below. |
+   | `DATABASE_URL` | PostgreSQL URL used by the running app (async: `postgresql+asyncpg://...`) | `postgresql+asyncpg://postgres:postgres@localhost:5432/uptime` |
+   | `MIGRATION_DATABASE_URL` | PostgreSQL URL used only by Alembic's migration step at boot (sync). See "DATABASE_URL (production — Neon)" above. | unset — falls back to `DATABASE_URL` |
    | `JWT_EXPIRE_MINUTES` | Session expiry in minutes | `10080` (7 days) |
    | `COOKIE_NAME` | Session cookie name | `session` |
    | `COOKIE_HTTP_ONLY` | HTTP-only cookie flag | `true` |
    | `COOKIE_SECURE` | Secure (HTTPS only) | `false` (see `ENVIRONMENT` above) |
-   | `COOKIE_SAMESITE` | SameSite policy | `lax` |
+   | `COOKIE_SAMESITE` | SameSite policy | `lax` (see `ENVIRONMENT` above — must be `"none"` in production, since the frontend and backend are different origins there) |
    | `COOKIE_MAX_AGE` | Cookie max age in seconds | `604800` (7 days) |
+   | `CORS_ORIGINS` | Comma-separated list of allowed CORS origins. Never a wildcard — `allow_credentials=True` requires an exact allowlist. | `http://localhost:3000` |
+   | `FRONTEND_URL` | Base URL used to build links in outgoing email (detail page, settings, password reset) | `http://localhost:3000` |
    | `RESEND_API_KEY` | Resend API key for transactional email (downtime/cert-expiry alerts, password reset) | unset — email sending no-ops (logged, not sent) rather than failing |
    | `RESEND_FROM_EMAIL` | Sender identity for outgoing mail | `Uptime Monitor <onboarding@resend.dev>` (Resend's sandbox address; works without a verified domain) |
 
@@ -174,6 +190,31 @@ docker compose up --build
 - Create a new revision: `alembic revision --autogenerate -m "description"`
 - Upgrade: `alembic upgrade head`
 - Downgrade one step: `alembic downgrade -1`
+
+## Deploying to Railway
+
+The existing `Dockerfile` works as-is — Railway auto-detects it when the service's root
+directory is set to `backend/`. Its `CMD` binds uvicorn to `${PORT:-8000}`, so it respects
+Railway's injected `PORT` automatically; nothing else to configure for networking.
+
+Env vars to set on the Railway `api` service's dashboard (see the table above for what each
+does):
+
+| Variable | Value |
+|----------|-------|
+| `ENVIRONMENT` | `production` |
+| `DATABASE_URL` | Neon's connection string, `ssl=require` form — see "DATABASE_URL (production — Neon)" above |
+| `MIGRATION_DATABASE_URL` | Neon's connection string, `sslmode=require&channel_binding=require` form (Neon's dashboard default) |
+| `JWT_SECRET` | freshly generated — `python -c "import secrets; print(secrets.token_urlsafe(32))"`, never reused from local dev |
+| `RESEND_API_KEY` | the real Resend API key |
+| `RESEND_FROM_EMAIL` | `Uptime Monitor <onboarding@resend.dev>` (sandbox address — no custom domain verified yet) |
+| `CORS_ORIGINS` | `http://localhost:3000` for now (still verifying cross-origin behavior locally); update to the real Vercel domain once the frontend is deployed |
+| `FRONTEND_URL` | same as `CORS_ORIGINS` for now — update together |
+
+Not set (safe defaults apply): `JWT_ALGORITHM`, `JWT_EXPIRE_MINUTES`, `COOKIE_NAME`,
+`COOKIE_HTTP_ONLY`, `COOKIE_MAX_AGE`, `DOWNTIME_ALERT_COOLDOWN_SECONDS`, `CERT_EXPIRY_WARN_DAYS`,
+`CERT_EXPIRY_REMINDER_COOLDOWN_DAYS`. `COOKIE_SECURE`/`COOKIE_SAMESITE` are not set directly —
+`ENVIRONMENT=production` forces both correctly regardless.
 
 ## Tests
 

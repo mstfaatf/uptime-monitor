@@ -21,8 +21,19 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Sync URL for Alembic: app uses postgresql+asyncpg, migrations use postgresql (psycopg2)
-database_url = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/uptime")
+# Sync URL for Alembic: app uses postgresql+asyncpg, migrations use postgresql (psycopg2).
+#
+# MIGRATION_DATABASE_URL takes priority over DATABASE_URL when set. This matters in production
+# (Neon): DATABASE_URL there is asyncpg-shaped (`?ssl=require`, for the running app's async
+# engine) and psycopg2 doesn't understand that query param (`invalid dsn: invalid connection
+# option "ssl"`). MIGRATION_DATABASE_URL instead holds Neon's native libpq-shaped string
+# (`?sslmode=require&channel_binding=require`), which psycopg2 understands natively and
+# asyncpg does not — the two drivers need incompatible query strings, so one URL can't serve
+# both. Locally, MIGRATION_DATABASE_URL is never set, so this falls back to the previous
+# DATABASE_URL-derived behavior unchanged.
+database_url = os.environ.get("MIGRATION_DATABASE_URL") or os.environ.get(
+    "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/uptime"
+)
 if database_url.startswith("postgresql+asyncpg"):
     database_url = database_url.replace("postgresql+asyncpg", "postgresql", 1)
 config.set_main_option("sqlalchemy.url", database_url)

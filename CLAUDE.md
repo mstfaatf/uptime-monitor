@@ -2660,5 +2660,95 @@ resolve the newly-flagged `ssl=require`-vs-`sslmode=require` dual-DATABASE_URL c
 `COOKIE_SAMESITE`/`CORS_ORIGINS` production-awareness changes, before the `api` service can be
 deployed and verified against Neon.
 
+Phase 5, prompt 5.3 (backend Railway-deploy readiness: DATABASE_URL fix, CORS/cookie
+production-awareness) is complete. **Not yet deployed to Railway itself, per this prompt's
+explicit scope** — this makes the backend deployable; the actual Railway deploy is a
+following prompt.
+- **DATABASE_URL conflict resolved with a second setting, `MIGRATION_DATABASE_URL`** — the
+  approach the prompt itself suggested, confirmed as the right one rather than trying to force
+  one URL to satisfy both drivers (not possible — asyncpg and psycopg2 accept mutually
+  exclusive SSL query params). `backend/alembic/env.py` now reads `MIGRATION_DATABASE_URL`
+  first, falling back to `DATABASE_URL` (stripped of `+asyncpg`) exactly as before when unset
+  — so local dev/Docker Compose needed zero changes and keeps working unmodified. Deliberately
+  **not** added to `config.py`'s `Settings` — `env.py` already read `DATABASE_URL` directly
+  from `os.environ` rather than through the `Settings` singleton, so `MIGRATION_DATABASE_URL`
+  follows the same existing pattern rather than introducing a new one.
+- `backend/Dockerfile`'s boot command (`alembic upgrade head && exec uvicorn ...`) stays a
+  **single, unchanged command** — confirmed by actually booting the real image against the
+  real Neon database from 5.2 with `DATABASE_URL=...?ssl=require` and
+  `MIGRATION_DATABASE_URL=...?sslmode=require&channel_binding=require` set together: the
+  migration step ran via psycopg2 (reading `MIGRATION_DATABASE_URL`), then uvicorn started via
+  asyncpg (reading `DATABASE_URL`), both in the one container boot Railway will actually run.
+  Also registered and logged in a real throwaway user against that Neon-backed container to
+  confirm the whole write path works end to end (not just `/health`), then deleted it via the
+  real `DELETE /auth/me` cascade — confirmed via direct query that Neon is empty again
+  afterward.
+- **`COOKIE_SAMESITE` production-aware**, same mechanism as the existing `COOKIE_SECURE`
+  override: `ENVIRONMENT=production` now forces `COOKIE_SAMESITE="none"` (not just permits it)
+  in the same `model_validator`, renamed to `_enforce_secure_cookie_settings_in_production` to
+  reflect the broader scope. `SameSite=None` requires `Secure`, which the same validator's
+  existing `COOKIE_SECURE` override already guarantees runs first. Verified against the real
+  Neon-backed container above: a real login's `Set-Cookie` header read exactly `HttpOnly;
+  Max-Age=604800; Path=/; SameSite=none; Secure`.
+- **New `CORS_ORIGINS` setting** (`config.py`): a comma-separated string (not a JSON-array
+  field) specifically so it's easy to enter as a plain value in Railway's/Vercel's dashboard
+  UI, parsed via a new `cors_origins_list` property. `main.py`'s `CORSMiddleware` now reads
+  `settings.cors_origins_list` instead of the old hardcoded `["http://localhost:3000"]`.
+  `allow_credentials=True` untouched — confirmed via a live preflight test against the
+  rebuilt container that a non-allowlisted origin (`https://evil.example`) gets a real 400
+  with no `Access-Control-Allow-Origin` header, i.e. never a wildcard fallback.
+  Default value kept as `http://localhost:3000` (a sensible dev default, per the prompt's
+  either/or) rather than "no default" — unlike `JWT_SECRET`, a wrong/missing `CORS_ORIGINS`
+  fails loudly (blocked cross-origin requests) rather than silently, so the extra friction of
+  a hard-required field isn't justified here.
+- **`backend/Dockerfile`**: `--port 8000` hardcoded on uvicorn's CMD is now `--port
+  ${PORT:-8000}` — Railway injects `PORT` and expects the app to bind to it; falls back to
+  `8000` when unset, so local Docker Compose (which never sets `PORT`) is unaffected. Verified
+  both paths: local `docker compose up api` still serves on 8000 as before; the Neon-backed
+  boot test above (no `PORT` set, `-p 8010:8000` host mapping) also correctly fell back to
+  8000 internally.
+- **`GET /health` already existed** (`main.py`, since Phase 0) — confirmed, not re-added.
+  Returns `{"status": "ok"}`, suitable for Railway's health check as-is.
+- **Exact Railway `api` env var list**, documented in a new "Deploying to Railway" section in
+  `backend/README.md`: `ENVIRONMENT=production`, `DATABASE_URL` (Neon, `ssl=require` form),
+  `MIGRATION_DATABASE_URL` (Neon, `sslmode=require&channel_binding=require` form —
+  Neon's dashboard default, unmodified), `JWT_SECRET` (freshly generated, never reused from
+  local `.env`), `RESEND_API_KEY` (the real key), `RESEND_FROM_EMAIL=Uptime Monitor
+  <onboarding@resend.dev>` (sandbox address, per the no-custom-domain decision),
+  `CORS_ORIGINS=http://localhost:3000` and `FRONTEND_URL=http://localhost:3000` (both
+  deliberately still local for now, per the prompt — updated together once the real Vercel
+  domain exists in 5.5/5.6). Everything else (`JWT_ALGORITHM`, `JWT_EXPIRE_MINUTES`,
+  `COOKIE_NAME`/`COOKIE_HTTP_ONLY`/`COOKIE_MAX_AGE`, the alerting-cooldown constants) left
+  unset — safe defaults apply, and `COOKIE_SECURE`/`COOKIE_SAMESITE` are deliberately **not**
+  set directly since `ENVIRONMENT=production` forces both correctly regardless.
+- Tests: 7 new (`test_config.py` gained 4 — production `COOKIE_SAMESITE` override, dev
+  default, `cors_origins_list` default and comma-parsing; new `test_cors.py` gained 3 —
+  allowed-origin preflight succeeds, disallowed-origin preflight rejected with no CORS header,
+  a disallowed-origin simple request still succeeds server-side but carries no CORS header).
+  118 backend tests total (was 111), all passing against a rebuilt `api` image.
+- **Verified end-to-end**: full local `docker compose` stack rebuilt and confirmed healthy
+  (`/health` 200, real CORS preflight from `localhost:3000` allowed and from
+  `https://evil.example` rejected); the Neon-backed single-container boot test above proved
+  the actual Dockerfile CMD, both settings, and the full cookie contract together against real
+  production-shape infrastructure, not just unit tests. Also found and restarted `worker`/
+  `worker-eu-west`, which had exited ~17 hours before this session (a pre-existing condition
+  from an earlier Docker Desktop restart, unrelated to this prompt's changes) — left the full
+  local stack (`api`, `db`, `worker`, `worker-eu-west`) healthy before finishing.
+- `.env.example` and `backend/README.md` updated with `MIGRATION_DATABASE_URL`,
+  `CORS_ORIGINS`, and `FRONTEND_URL` (the last of which existed in `config.py` since Phase 4
+  but was never documented in `.env.example` until now).
+- No real credential or connection string committed anywhere — confirmed via a diff-scoped
+  grep for the Neon host/password fragments after finishing, zero matches.
+- Not touched in this prompt, per its explicit scope: any actual Railway deployment (no
+  service created, nothing pushed to Railway), Vercel, `worker/` code (the worker has no
+  equivalent DATABASE_URL conflict, confirmed in 5.2 — it only ever uses the asyncpg path).
+
+**Next: Phase 5, prompt 5.4 — deploy to Railway for real.** Push this commit, create the
+Railway project/service for `api` pointed at `backend/`, set the env vars listed in
+`backend/README.md`'s "Deploying to Railway" section, and verify the deployed service is
+reachable over HTTPS at its Railway domain with a real request (`/health`, then a real
+register/login round-trip) before moving on to the worker services and the cross-origin
+verification step from the 5.1 report.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

@@ -41,3 +41,41 @@ def test_environment_development_leaves_cookie_secure_false_by_default(monkeypat
     monkeypatch.delenv("COOKIE_SECURE", raising=False)
     settings = Settings(_env_file=None)
     assert settings.COOKIE_SECURE is False
+
+
+def test_environment_production_forces_cookie_samesite_none(monkeypatch):
+    # Frontend (Vercel) and backend (Railway) are different origins in production — SameSite
+    # must be "none" (never "lax") or the browser silently drops the cookie cross-site.
+    monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("COOKIE_SAMESITE", "lax")  # deliberately wrong — must be overridden
+    settings = Settings(_env_file=None)
+    assert settings.COOKIE_SAMESITE == "none"
+
+
+def test_environment_development_leaves_cookie_samesite_lax_by_default(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("COOKIE_SAMESITE", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.COOKIE_SAMESITE == "lax"
+
+
+def test_cors_origins_list_defaults_to_local_frontend(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.delenv("CORS_ORIGINS", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.cors_origins_list == ["http://localhost:3000"]
+
+
+def test_cors_origins_list_parses_comma_separated_values(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv(
+        "CORS_ORIGINS", "https://app.vercel.app, https://custom-domain.com ,https://another.app"
+    )
+    settings = Settings(_env_file=None)
+    assert settings.cors_origins_list == [
+        "https://app.vercel.app",
+        "https://custom-domain.com",
+        "https://another.app",
+    ]

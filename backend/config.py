@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     COOKIE_SAMESITE: str = "lax"
     COOKIE_MAX_AGE: int = 60 * 60 * 24 * 7  # 7 days in seconds
 
+    # CORS: comma-separated list of allowed origins (never "*" — allow_credentials=True below
+    # means a wildcard is both rejected by browsers and a real security hole if it weren't).
+    # Defaults to the local frontend dev server; set to the real Vercel domain(s) in production.
+    CORS_ORIGINS: str = "http://localhost:3000"
+
     # Resend (transactional email — downtime/cert-expiry alerts, password reset). Unlike
     # JWT_SECRET, this has no fail-fast requirement: a missing key means email-sending degrades
     # safely to a log-and-skip no-op (see mail/client.py), not a security hole, so local dev
@@ -59,13 +64,27 @@ class Settings(BaseSettings):
     CERT_EXPIRY_REMINDER_COOLDOWN_DAYS: int = 3
 
     @model_validator(mode="after")
-    def _enforce_cookie_secure_in_production(self) -> "Settings":
-        """ENVIRONMENT=production always gets a secure cookie, even if COOKIE_SECURE
-        was left unset or mistakenly set to false — this is a non-negotiable rule
-        (see CLAUDE.md), not just a default."""
+    def _enforce_secure_cookie_settings_in_production(self) -> "Settings":
+        """ENVIRONMENT=production always gets a secure, cross-site-capable cookie, even if
+        COOKIE_SECURE/COOKIE_SAMESITE were left unset or mistakenly set otherwise — this is a
+        non-negotiable rule (see CLAUDE.md), not just a default.
+
+        COOKIE_SAMESITE="none" is required (not just permitted) in production because the
+        frontend (Vercel) and backend (Railway) are on different origins — a "lax" cookie is
+        silently dropped on cross-site requests, which would break login without any visible
+        error. Browsers reject SameSite=None unless Secure is also set, which COOKIE_SECURE's
+        own override above already guarantees runs first in this same validator.
+        """
         if self.ENVIRONMENT == "production":
             self.COOKIE_SECURE = True
+            self.COOKIE_SAMESITE = "none"
         return self
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """CORS_ORIGINS parsed into a list for CORSMiddleware's allow_origins — comma-separated
+        so it's a plain string in Railway's/any dashboard's env var UI, not JSON-in-a-string."""
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
     @property
     def asyncpg_database_url(self) -> str:
