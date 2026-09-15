@@ -2996,5 +2996,40 @@ build-time concern. The cross-origin cookie/CORS contract (5.5) and both worker 
 5.6) are already proven working against the real deployed backend, so the Vercel deploy
 itself should be the last real unknown before a wrap-up/regression verification prompt.
 
+**Vercel deployment done** — the user deployed the frontend directly (not a numbered prompt in
+this session; the build/env configuration steps themselves weren't performed or observed here,
+so they're not documented — only the CORS finding below was diagnosed and fixed in this
+session). Production URL: **`https://uptime-monitor-atf-labs.vercel.app`** (Vercel project
+`atf-labs`), already present in Railway's `CORS_ORIGINS` for the `api` service.
+- **Real issue found and resolved, no code change needed**: every `OPTIONS` preflight from the
+  browser was getting a real `400 "Disallowed CORS origin"`. Root cause: Vercel gives every
+  individual deployment its own unique hash-suffixed URL
+  (`uptime-monitor-<hash>-atf-labs.vercel.app`, e.g.
+  `uptime-monitor-856u19z8y-atf-labs.vercel.app`) *in addition to* the stable production alias
+  (`uptime-monitor-atf-labs.vercel.app`) — these are genuinely different `Origin` values to a
+  CORS check, and only the stable alias is in `CORS_ORIGINS`. The user had been browsing a
+  deployment-specific hash URL, not the production alias.
+  - Confirmed `config.py`'s `cors_origins_list` parsing itself was never the bug (correctly
+    splits/strips/drops-empties); confirmed via direct `curl -X OPTIONS` probes against the
+    live backend that the exact production-alias origin already returned `200`, while the
+    hash-suffixed URL the user was actually on returned `400` — isolating the mismatch to
+    "which URL is being browsed," not any backend logic.
+  - **Resolved by browsing the stable production URL instead of the deployment-specific one** —
+    zero backend/code changes. Flagged, not implemented: a broader fix (`allow_origin_regex`
+    matching any `uptime-monitor-*-atf-labs.vercel.app`) would let every preview deployment
+    talk to this same backend too, at the cost of a looser CORS allowlist — not pursued since
+    the user only needs the production URL working today.
+  - **Worth remembering for later prompts**: always test/share the stable
+    `uptime-monitor-atf-labs.vercel.app` URL, not whatever hash-suffixed URL Vercel's own
+    dashboard/CLI shows immediately after a deploy — that per-deployment URL will never match
+    `CORS_ORIGINS` as currently configured, by design, and that's expected, not a bug to chase
+    each time it comes up again.
+
+**Next: Phase 5 wrap-up/regression verification** (mirroring the pattern every prior phase has
+closed with) — full regression pass against the now-fully-deployed stack (Vercel + both
+Railway worker regions + Neon), confirming Phase 0-4 invariants (ownership, rate limiting,
+`JWT_SECRET` fail-fast, SSRF, alerting, export) all still hold end-to-end through the real
+production URL, not just the pieces verified individually across 5.2-5.6.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
