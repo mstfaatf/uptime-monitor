@@ -2890,5 +2890,64 @@ connect-first-then-trigger-a-check technique from 5.4) before continuing to Phas
 remaining steps — second worker region, cross-origin verification via local frontend against
 the deployed backend, then the actual Vercel deploy.
 
+`LISTEN_DATABASE_URL` was set on Railway and redeployed; re-ran the 5.4 SSE technique
+(connect first, confirm `: connected`, then create a real target, confirm it's checked, then
+confirm the push arrives) against the live service — **the fix works in production**: a real
+`check_update` event arrived carrying the full expected payload
+(`region: "us-east"`, real timing/cert data). One transient, non-reproducible blip during
+cleanup (a `DELETE`'s effect appeared not to have landed on an immediate follow-up read, self-
+resolved on retry, confirmed stable across three subsequent checks and a successful
+re-registration of the freed email) — treated as test-tooling noise, not a backend issue,
+since it never recurred and every other read was immediately consistent.
+
+**Phase 5, prompt 5.5 (cross-origin cookie/CORS verification: local frontend → deployed
+backend) is complete. The cross-origin contract is confirmed working — nothing needed
+fixing.** This was flagged in the 5.1 report as the riskiest untested part of the whole
+deploy phase; it now holds up under a real browser end to end.
+- Created `frontend/.env.local` (gitignored, confirmed via both the root and `frontend/`
+  `.gitignore`) with `NEXT_PUBLIC_API_URL` pointed at the live Railway backend; ran `next dev`
+  locally so `localhost:3000` (HTTP) talked to the real deployed HTTPS backend — a genuine
+  cross-origin scenario, no Vercel involved.
+- **Verified with Playwright driving a real Chromium browser** (not curl — this specifically
+  needed real browser cookie-jar/CORS enforcement, which curl doesn't replicate): registered a
+  throwaway account, confirmed redirect to `/dashboard`, added a real target, confirmed the
+  "● live" SSE indicator, confirmed the summary strip's up-count went `0 → 1` **in place with
+  no reload** (real proof the 5.4.1 SSE fix works through an actual browser's `EventSource`,
+  not just curl's `-N`), reloaded the page and confirmed it stayed on `/dashboard` rather than
+  bouncing to `/login` (the real test of cross-origin session persistence, not just that login
+  itself returns 200).
+- **Cookie confirmed correctly stored via `context.cookies()`** (Playwright's own read of the
+  browser's real cookie jar, not a header inspection): `domain:
+  uptime-monitor-production-cff9.up.railway.app, httpOnly: true, secure: true, sameSite:
+  "None"` — exactly the contract 5.3/5.4 set out to build and 5.3-verify/5.4 already confirmed
+  via raw `Set-Cookie` headers; this is the first time it's confirmed as actually *accepted and
+  stored* by a real browser, not just sent correctly by the server.
+  `allow_credentials`/`CORS_ORIGINS` (already including `http://localhost:3000` since 5.3)
+  needed no changes.
+- Four `401` console messages appeared during the flow — investigated, not a bug: both
+  `SiteHeader` and `RegisterPage` independently call `useAuthStatus()` on `/register`'s mount
+  (an anonymous visitor correctly gets `401` from `/auth/me`, treated as "not logged in," not
+  an error), and `next.config.js`'s `reactStrictMode: true` double-invokes effects once in dev
+  — 2 callers × 2 dev-mode invocations = 4. Confirmed by reading `use-auth-status.ts` and
+  `next.config.js` directly, not guessed.
+- **One unrelated, pre-existing cosmetic observation, not fixed (outside this prompt's
+  scope)**: a live-update screenshot caught the newly-added row's own reveal-animation label
+  still reading "Pending" for an instant while the summary strip above it had already
+  correctly counted the same update as "1 up" with real `35 ms`/`us-east` data — a minor
+  animation-timing quirk in the row's reveal sequence (from Phase 3.5), not a data or
+  cross-origin bug; the underlying state was already correct.
+- Test account deleted afterward via a real in-browser `fetch(..., {credentials: 'include'})`
+  call to `DELETE /auth/me` (204, confirmed via the same technique prior prompts used).
+  `frontend/.env.local` deleted afterward too, restoring the frontend to its default local
+  config (`NEXT_PUBLIC_API_URL` unset → falls back to `localhost:8000`) so a future local dev
+  session isn't silently pointed at production; recreate it the same way if this needs
+  re-testing later. No tracked files changed this prompt (`.env.local` is gitignored).
+- Not touched in this prompt, per its explicit scope: Vercel, the worker, the second region.
+
+**Next: Phase 5's remaining steps — second worker region (`eu-west` or similar, mirroring
+5.4's single-region deploy), then the actual Vercel deploy** (frontend build settings,
+`NEXT_PUBLIC_API_URL` pointed at the real Railway backend in Vercel's dashboard, confirmed
+via this prompt that the cross-origin contract already works) per the 5.1 build order.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
