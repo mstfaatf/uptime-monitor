@@ -2750,5 +2750,92 @@ reachable over HTTPS at its Railway domain with a real request (`/health`, then 
 register/login round-trip) before moving on to the worker services and the cross-origin
 verification step from the 5.1 report.
 
+Unplanned verification pass ("5.3-verify" — the `api` service's actual Railway deploy) is
+complete. No code changed in this pass; one real bug found and fixed directly in Railway's
+dashboard (not code).
+- **Real bug found**: `/health` and every other endpoint returned a Railway-edge 502
+  (`x-railway-fallback: true`) despite the deployment showing "Active" — root cause was the
+  public domain's **target port** still pointing at `8000` while the app, correctly per this
+  session's `${PORT:-8000}` fix, was bound to Railway's assigned `8080` (visible in the deploy
+  log: `Uvicorn running on http://0.0.0.0:8080`). This was a stale Railway networking setting
+  from before the port fix landed, not an application bug. Fixed by updating the domain's
+  target port in Settings → Networking; `/health` returned `200` immediately after.
+- **Every checklist item then verified against the real deployed service**: `/health` 200;
+  register/login/`/auth/me` roundtrip real, `Set-Cookie` read exactly `HttpOnly; Max-Age=604800;
+  Path=/; SameSite=none; Secure`; CORS preflight from `http://localhost:3000` allowed
+  (`access-control-allow-origin` echoed back), from `https://evil.example` rejected with `400`
+  and no CORS header; `JWT_SECRET` fail-fast re-proven **in production for the first time** —
+  removing it via the dashboard and redeploying produced a genuine `CRASHED` deployment,
+  crash-looping on the same `pydantic_core.ValidationError` this project has hit at every prior
+  local wrap-up, and restoring it recovered cleanly (confirmed the pre-crash session cookie
+  still validated afterward, meaning the original secret value was restored, not a fresh one).
+  Verification account deleted afterward (`204`, confirmed via subsequent `401`s).
+- Real Neon-provisioning finding, unrelated to the port bug: the Neon password was rotated and
+  Railway's `DATABASE_URL`/`MIGRATION_DATABASE_URL` updated to match, independent of this
+  session's own actions — noted here since any future prompt re-deriving these values needs
+  the *current* Railway variable values, not anything cached from 5.2/5.3's own verification
+  runs (which used the pre-rotation password and are now stale).
+
+Phase 5, prompt 5.4 (single worker instance deployed to Railway, region `us-east`) is
+complete, **with one real bug found in the backend's SSE push path** — not fixed in this
+prompt (backend code change, beyond this prompt's worker-deployment scope), flagged clearly
+for the very next prompt. No code changed in this session; verification only.
+- **Corrected a wrong assumption in the prompt itself before proceeding**: `CHECK_CONCURRENCY`
+  (`15`), `CLAIM_TTL_SECONDS` (`120`), and `SCHEDULER_TICK_SECONDS` (`5`) are bare module-level
+  constants in `worker/main.py`, never read from `worker/config.py`'s `Settings` or any env
+  var — there was nothing to set for them in Railway. Only `DATABASE_URL` and `REGION` are
+  real settings for this service; `CHECK_INTERVAL_SECONDS`/`HTTP_TIMEOUT_SECONDS`/
+  `HTTP_VERIFY_SSL` were correctly left unset (safe defaults). Also confirmed the worker has
+  no Alembic directory at all — no migration-vs-runtime URL split is needed here, unlike the
+  backend; a single `DATABASE_URL` (`ssl=require` form) is sufficient.
+- **Worker service created and verified fully working**: `REGION=us-east`, same rotated Neon
+  `DATABASE_URL` as the `api` service, no public domain generated (confirmed staying
+  "Unexposed"). Startup log confirmed correct: `Worker starting (region=us-east,
+  interval=300s, tick=5s, timeout=10s, concurrency=15)`.
+- **Verified end-to-end against the real deployed `api` service**: registered a throwaway
+  account (hit one **transient `500 Internal Server Error` on the very first request** after
+  a period of the `api` service being idle — retried successfully immediately after, and the
+  original email also succeeded on a second attempt with no partial/duplicate state left
+  behind; consistent with Neon's serverless compute cold-starting after inactivity, not a
+  code bug — flagged as a real production characteristic to be aware of, not fixed here).
+  Created 3 real targets (`example.com`, `.org`, `.net`); all three were claimed and checked
+  by the `us-east` worker within 5-7 seconds of creation (`ensure_schedule_rows`'s lazy
+  per-region backfill + `claim_due_targets`'s `FOR UPDATE SKIP LOCKED` claim cycle, both from
+  Phase 2, confirmed working against Neon for the first time). Real timing/cert data
+  populated correctly (`dns_ms`/`tcp_ms`/`tls_ms`/`ttfb_ms`, real Cloudflare-issued certs,
+  correct `tls_cert_days_remaining`), `region: "us-east"` tagged correctly throughout,
+  `consecutive_failures: 0` confirming the schedule row updates correctly on success. No
+  connection drops or pool exhaustion observed against Neon's pooled endpoint under this
+  session's sustained polling.
+- **Real bug found while verifying the SSE requirement**: connected to `GET /targets/stream`
+  *before* creating a target (ruling out a race — confirmed `: connected` was received first),
+  then created a target and confirmed via `GET /targets/status` that it was genuinely checked
+  moments later — yet the still-open SSE connection received only `: connected` and keep-alive
+  comments, never the `check_update` event. **Root cause**: `backend/realtime.py`'s
+  `run_listener()` opens its one long-lived `LISTEN checks_inserted` connection via
+  `settings.asyncpg_database_url` — the same `DATABASE_URL` used for ordinary app traffic,
+  which on Railway is Neon's **pooled** (`-pooler`) endpoint. Neon's pooler runs in
+  transaction-pooling mode by default, and Postgres `LISTEN`/`NOTIFY` does not work reliably
+  over a transaction-pooled connection (a documented Neon limitation, not a guess) — `LISTEN`
+  registers against one specific physical backend session, but a pooled connection's
+  underlying backend can be swapped between queries, so a NOTIFY sent while a different
+  physical connection is attached is never delivered to that session. This never surfaced
+  locally because Docker Compose's Postgres has no pooling at all. **Not fixed in this
+  prompt** — recommended fix: a separate setting (e.g. `LISTEN_DATABASE_URL`) pointing at
+  Neon's direct (non-pooled) connection string, used only by `run_listener()`, leaving
+  ordinary app traffic on the pooled `DATABASE_URL` unchanged. This is a real regression in a
+  shipped Phase 1 feature (real-time dashboard push) and should be fixed before the frontend
+  is deployed, since the dashboard's live-update/toast behavior depends on it entirely.
+- All verification accounts/targets/checks deleted afterward via the real `DELETE /auth/me`
+  cascade; confirmed via subsequent `401`s on login that both accounts are gone.
+- Not touched in this prompt, per its explicit scope: the frontend, the second worker region,
+  any code fix for the LISTEN/NOTIFY finding above.
+
+**Next: fix the Neon pooled-connection LISTEN/NOTIFY bug found in 5.4** (add a direct,
+non-pooled connection string setting for `backend/realtime.py`'s `run_listener()`) before
+continuing to Phase 5's remaining steps — second worker region (`eu-west` or similar),
+cross-origin verification via local frontend against the deployed backend, then the actual
+Vercel deploy.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
