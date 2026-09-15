@@ -2949,5 +2949,52 @@ deploy phase; it now holds up under a real browser end to end.
 `NEXT_PUBLIC_API_URL` pointed at the real Railway backend in Vercel's dashboard, confirmed
 via this prompt that the cross-origin contract already works) per the 5.1 build order.
 
+Phase 5, prompt 5.6 (second worker region, `eu-west`) is complete. **Both real Railway
+regions from the 5.1 report are now running in production simultaneously**, and multi-region
+coordination is proven against genuinely independent cloud infrastructure for the first
+time — not two local Docker Compose instances labeled differently, and not one instance at a
+time as in 5.4.
+- Second worker service deployed (same `worker/` Dockerfile/build as `us-east`, only
+  `REGION=eu-west` differs, same rotated Neon `DATABASE_URL`, no `LISTEN_DATABASE_URL` —
+  confirmed that setting is backend/`api`-only, since the worker never runs `LISTEN`, only
+  `NOTIFY`, which has no session-affinity requirement and works fine over Neon's pooled
+  connection regardless of region). Startup log confirmed clean:
+  `Worker starting (region=eu-west, interval=300s, tick=5s, timeout=10s, concurrency=15)`,
+  no crash, no connection errors. No public domain — unexposed, same as `us-east`.
+- **Verified end-to-end against the real deployed `api` service and both real worker
+  regions**: registered a throwaway account, connected to `GET /targets/stream` first
+  (confirmed `: connected`), then created one real target. Two independent `check_update`
+  events arrived ~1.2s apart — first `region: "us-east"` (payload's `latest_checks` showing
+  only `us-east` at that instant), then `region: "eu-west"` (payload's `latest_checks` now
+  showing **both** `eu-west` and `us-east` together, neither overwriting the other) — this is
+  live proof of the Phase 2 design's "always push the target's complete per-region map, never
+  a partial delta" invariant holding under real infrastructure, and proof the two regions'
+  data coexists rather than being collapsed or overwritten. `GET /targets/status` confirmed
+  the same final state independently.
+- **Confirmed no double-checking within either region** using the CSV export endpoint
+  (`GET /targets/{id}/export?region=...`) to directly inspect each region's raw check-row
+  history rather than trusting only the "latest check" view: **`Total checks,1`** for both
+  `us-east` and `eu-west` — exactly one row each, proving neither region's single worker
+  instance checked the target more than once for this test window. (Proving the stronger
+  Phase 2 guarantee — that two same-region workers can't double-claim — isn't reachable with
+  one instance per region in this deployment; that mechanism was already proven mechanically
+  in Phase 2's local testing and doesn't change per-region, only per-worker-instance.)
+  Real, independent per-check data confirmed too: distinct `checked_at` (39.203s vs 40.399s),
+  distinct `latency_ms` (35 vs 37) and DNS/TCP/TLS/TTFB breakdowns — genuinely separate network
+  measurements to the same real target, not shared/derived data.
+- Test account (and its cascaded target/checks) deleted afterward via the real
+  `DELETE /auth/me` flow; confirmed via a stable `401` on repeated login attempts (one
+  transient-looking terminal output artifact on the very first post-delete check, same
+  category as 5.4.1's — resolved immediately on a clean retry, not a backend issue).
+- Not touched in this prompt, per its explicit scope: Vercel, any frontend code, `LISTEN_DATABASE_URL`/`api`
+  service configuration (already correct from 5.4.1).
+
+**Phase 5 is now down to one remaining step per the 5.1 build order: the actual Vercel
+deploy** — frontend build settings, `NEXT_PUBLIC_API_URL` pointed at the real Railway backend
+in Vercel's dashboard, `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` per the 5.1 report's flagged
+build-time concern. The cross-origin cookie/CORS contract (5.5) and both worker regions (5.4,
+5.6) are already proven working against the real deployed backend, so the Vercel deploy
+itself should be the last real unknown before a wrap-up/regression verification prompt.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
