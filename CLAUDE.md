@@ -3240,13 +3240,10 @@ Phase 0-4 invariant checked held with no regressions.
 - All test accounts/targets created during this pass (two ownership-test users, three
   rate-limit-test users and their cascaded targets) deleted and reconfirmed gone via fresh
   `401`s — kept fully separate from, and not resolving, the still-open Neon question below.
-- **Genuinely open item, explicitly not resolved by this prompt's own instruction to mark
-  Phase 5 complete**: the 5.8 finding of 1 leftover user/1 target/26 checks in production Neon
-  that doesn't match any known verification pass from this phase is still unanswered — the
-  user was asked directly whether it's their own real usage or needs cleanup and hadn't
-  replied by the time this prompt closed Phase 5 out. Flagged here explicitly so it isn't lost:
-  **whoever picks up Phase 6 should get an answer and, if it's stale test data, delete it
-  before treating Neon as clean.**
+- **Neon-data open item, now resolved**: the 5.8 finding of 1 user/1 target/26 checks in
+  production Neon that didn't match any known verification pass — the user confirmed after
+  this prompt closed that it's their own real account/target, not leftover test data. Left
+  untouched, as it should be; nothing to clean up. Phase 5 has no remaining open items.
 - Full deferred-to-Phase-6 list (nothing silently dropped): CSV export formatting, PDF export,
   the Next.js 15/16 major upgrade (14.2.35 already patches the fixable-without-breaking-changes
   subset), any UI refresh/new feature work, a full security audit beyond this phase's baseline
