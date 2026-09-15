@@ -3199,5 +3199,63 @@ completely non-functional on the live deployment.
 **Next: resolve the open Neon-data question above, then do Phase 5's wrap-up/regression pass**
 (or confirm it's sufficiently covered already) before deciding whether to proceed to Phase 6.
 
+**Phase 5, prompt 5.9 (wrap-up + full regression verification) is complete. Phase 5 is marked
+complete — moving to Phase 6 next.** One real production bug (rate limiting, found in 5.8)
+was fixed, pushed, and re-verified live in this pass; every other Phase 5 piece and every
+Phase 0-4 invariant checked held with no regressions.
+- **Local**: rebuilt both images fresh from the committed state — **160 tests total (124
+  backend + 36 worker)**, all passing, up from 147 (111 + 36) at the end of Phase 4. Worker
+  count unchanged (Phase 5 never touched worker code) — every net-new backend test maps to a
+  real Phase 5 addition (CORS, config settings, the realtime listener regression test, the
+  forgot-password failure case, security headers). `tsc --noEmit` clean; `next build` not run
+  (port 3000 occupied by the user's own `next dev` both times this phase needed it) —
+  consistent with this project's established practice since prompt 3.7.
+- **Finished committing 5.8's still-pending work first** (it had been implemented and tested
+  but never committed/pushed) — see that entry above for the full rate-limiting bug writeup.
+  Pushed and waited for Railway's redeploy, then re-tested rate limiting live for the first
+  time: login, register, and target-creation all now fire at exactly their configured limits
+  (`5-then-429`, `3-then-429`, `10-then-429`) — confirmed **broken** immediately pre-push
+  (8+ consecutive logins, zero `429`s) and **fixed** immediately post-push, the clearest
+  possible before/after proof.
+- **Ownership enforcement re-confirmed with a fresh two-user test** against production: user
+  B's `/targets`/`/targets/status` never showed user A's target; `GET`/`DELETE` on A's target
+  both `404` for B.
+- **`JWT_SECRET` fail-fast deliberately not re-run** — 5.3-verify did the actual live
+  strip/crash/restore test against this same Railway service very recently in this phase, and
+  `git log -p backend/config.py` confirms the required-no-default field definition hasn't
+  changed since. Stated reasoning explicitly rather than silently skipping or needlessly
+  repeating a destructive test with nothing new to find.
+- **SSRF, per-user SSE filtering, and per-region independence** all re-confirmed fresh against
+  production in this pass (private IP/localhost/metadata-IP all `400` at creation; two
+  concurrent real SSE connections showed strict per-user isolation; one target's SSE payload
+  showed `eu-west` and `us-east` coexisting with genuinely distinct timing/latency data, never
+  merged).
+- **The three 5.7 bugs re-confirmed**: Vercel Deployment Protection still off (live `200`, no
+  SSO redirect). `RESEND_FROM_EMAIL`/`FRONTEND_URL` verified by code/history review rather than
+  another real email send — `git log -p` shows neither field's definition or Railway value
+  changed since 5.7 — deliberately avoided sending a third real email to the account owner's
+  inbox for a fact already provable without one.
+- **CSV export reconfirmed working and ownership-enforced** (`200` for the owner, `404` cross-
+  user) — output formatting itself untouched, per the explicit Phase 6 deferral.
+- All test accounts/targets created during this pass (two ownership-test users, three
+  rate-limit-test users and their cascaded targets) deleted and reconfirmed gone via fresh
+  `401`s — kept fully separate from, and not resolving, the still-open Neon question below.
+- **Genuinely open item, explicitly not resolved by this prompt's own instruction to mark
+  Phase 5 complete**: the 5.8 finding of 1 leftover user/1 target/26 checks in production Neon
+  that doesn't match any known verification pass from this phase is still unanswered — the
+  user was asked directly whether it's their own real usage or needs cleanup and hadn't
+  replied by the time this prompt closed Phase 5 out. Flagged here explicitly so it isn't lost:
+  **whoever picks up Phase 6 should get an answer and, if it's stale test data, delete it
+  before treating Neon as clean.**
+- Full deferred-to-Phase-6 list (nothing silently dropped): CSV export formatting, PDF export,
+  the Next.js 15/16 major upgrade (14.2.35 already patches the fixable-without-breaking-changes
+  subset), any UI refresh/new feature work, a full security audit beyond this phase's baseline
+  hardening pass, and the README rewrite/ADRs/`LOAD_TESTING.md` against the live instance.
+
+**Phase 5 complete. Next: Phase 6 — presentation** (README rewrite, ADRs, `LOAD_TESTING.md`
+against the live deployed instance) per CLAUDE.md's phase plan. **Planning for Phase 6 will
+happen in a separate conversation before prompts are drafted** — do not draft Phase 6 prompts
+or begin its work from this status note alone.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
