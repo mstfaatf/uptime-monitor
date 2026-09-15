@@ -79,3 +79,40 @@ def test_cors_origins_list_parses_comma_separated_values(monkeypatch):
         "https://custom-domain.com",
         "https://another.app",
     ]
+
+
+def test_listen_asyncpg_url_falls_back_to_database_url_when_unset(monkeypatch):
+    # Local dev / Docker Compose: no pooler, so LISTEN_DATABASE_URL is never set and the
+    # listener must keep using DATABASE_URL exactly as before this setting existed.
+    monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@db:5432/uptime")
+    monkeypatch.delenv("LISTEN_DATABASE_URL", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.listen_asyncpg_url == "postgresql://postgres:postgres@db:5432/uptime"
+
+
+def test_listen_asyncpg_url_prefers_listen_database_url_when_set(monkeypatch):
+    # Production: DATABASE_URL is Neon's pooled endpoint (fine for ordinary queries, but
+    # doesn't reliably deliver NOTIFYs to a LISTEN session); LISTEN_DATABASE_URL points at
+    # Neon's direct endpoint instead, and must win.
+    monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://user:pass@ep-example-pooler.us-east-2.aws.neon.tech/db?ssl=require",
+    )
+    monkeypatch.setenv(
+        "LISTEN_DATABASE_URL",
+        "postgresql+asyncpg://user:pass@ep-example.us-east-2.aws.neon.tech/db?ssl=require",
+    )
+    settings = Settings(_env_file=None)
+    assert (
+        settings.listen_asyncpg_url
+        == "postgresql://user:pass@ep-example.us-east-2.aws.neon.tech/db?ssl=require"
+    )
+
+
+def test_listen_asyncpg_url_strips_asyncpg_dialect_suffix(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("LISTEN_DATABASE_URL", "postgresql+asyncpg://a:b@host/db?ssl=require")
+    settings = Settings(_env_file=None)
+    assert settings.listen_asyncpg_url == "postgresql://a:b@host/db?ssl=require"

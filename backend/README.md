@@ -78,6 +78,38 @@ materializes column-level `NOT NULL` constraints as explicit `pg_constraint` row
 17+ catalog change), which PG16 doesn't do; this is a metadata/introspection difference only, not
 a functional one.
 
+## LISTEN_DATABASE_URL (production — Neon's pooler breaks LISTEN/NOTIFY)
+
+`realtime.py` holds one long-lived Postgres `LISTEN checks_inserted` connection open for the
+life of the process, used to push real-time check updates to connected SSE clients. **Neon's
+pooled connection string (the same `-pooler` hostname `DATABASE_URL` uses) does not reliably
+deliver NOTIFYs to a LISTEN session** — found live in production (prompt 5.4): a worker check
+landed correctly and a client was genuinely connected to `GET /targets/stream` the whole time,
+but the `check_update` push never arrived, only keep-alives.
+
+Root cause: Neon's pooler runs in transaction-pooling mode by default. `LISTEN` registers
+interest against one specific physical backend session, but a pooled connection's underlying
+physical backend can be swapped between queries — so a `NOTIFY` sent while a *different*
+physical backend happens to be attached to that pooled session is simply never delivered to it.
+The `LISTEN` call itself never errors (so this fails silently, not loudly), and the connection
+never drops or needs reconnecting — it just quietly never receives anything. This never surfaced
+locally because Docker Compose's Postgres has no pooling at all; any connection works fine for
+`LISTEN` there.
+
+**Fix**: a separate setting, **`LISTEN_DATABASE_URL`**, holding Neon's **direct** (non-pooled)
+connection string — same credentials, but the compute endpoint's hostname *without* the
+`-pooler` segment (Neon's dashboard's "Connection Details" panel has a toggle for pooled vs.
+direct; grab the direct one specifically for this). Used only by `realtime.py`'s
+`listen_asyncpg_url` property, which `run_listener()` connects with instead of the pooled
+`asyncpg_database_url`. If unset, falls back to `DATABASE_URL` — so local dev/Docker Compose
+(no pooler, so the distinction is moot) needs no change, same fallback pattern as
+`MIGRATION_DATABASE_URL`. Ordinary app traffic (`database.py`'s async engine, used by every
+other endpoint) keeps using the pooled `DATABASE_URL` unchanged — pooling is fine and desirable
+there; only the one `LISTEN` session needs to bypass it.
+
+The worker's `NOTIFY` calls need no change at all — sending a `NOTIFY` has no session-affinity
+requirement and works fine over a pooled connection; only the receiving `LISTEN` side does.
+
 ## Setup
 
 1. **Create a virtual environment** (recommended):
@@ -115,6 +147,7 @@ a functional one.
    | `ENVIRONMENT` | `development` or `production` | `development`. `production` forces `COOKIE_SECURE=True` and `COOKIE_SAMESITE="none"` regardless of the settings below. |
    | `DATABASE_URL` | PostgreSQL URL used by the running app (async: `postgresql+asyncpg://...`) | `postgresql+asyncpg://postgres:postgres@localhost:5432/uptime` |
    | `MIGRATION_DATABASE_URL` | PostgreSQL URL used only by Alembic's migration step at boot (sync). See "DATABASE_URL (production — Neon)" above. | unset — falls back to `DATABASE_URL` |
+   | `LISTEN_DATABASE_URL` | Direct (non-pooled) PostgreSQL URL used only by `realtime.py`'s LISTEN connection. See "LISTEN_DATABASE_URL (production — Neon's pooler breaks LISTEN/NOTIFY)" above. | unset — falls back to `DATABASE_URL` |
    | `JWT_EXPIRE_MINUTES` | Session expiry in minutes | `10080` (7 days) |
    | `COOKIE_NAME` | Session cookie name | `session` |
    | `COOKIE_HTTP_ONLY` | HTTP-only cookie flag | `true` |
@@ -205,6 +238,7 @@ does):
 | `ENVIRONMENT` | `production` |
 | `DATABASE_URL` | Neon's connection string, `ssl=require` form — see "DATABASE_URL (production — Neon)" above |
 | `MIGRATION_DATABASE_URL` | Neon's connection string, `sslmode=require&channel_binding=require` form (Neon's dashboard default) |
+| `LISTEN_DATABASE_URL` | Neon's **direct** (non-pooled) connection string, `ssl=require` form — same credentials as `DATABASE_URL` but the hostname without `-pooler`. See "LISTEN_DATABASE_URL (production — Neon's pooler breaks LISTEN/NOTIFY)" above. |
 | `JWT_SECRET` | freshly generated — `python -c "import secrets; print(secrets.token_urlsafe(32))"`, never reused from local dev |
 | `RESEND_API_KEY` | the real Resend API key |
 | `RESEND_FROM_EMAIL` | `Uptime Monitor <onboarding@resend.dev>` (sandbox address — no custom domain verified yet) |

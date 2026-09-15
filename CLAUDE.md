@@ -2837,5 +2837,58 @@ continuing to Phase 5's remaining steps — second worker region (`eu-west` or s
 cross-origin verification via local frontend against the deployed backend, then the actual
 Vercel deploy.
 
+Phase 5, prompt 5.4.1 (SSE LISTEN/NOTIFY fix for Neon's pooled connection) is complete. Fixes
+the bug found during 5.4's live verification — backend-only, `api`-service-only change.
+- **New setting `LISTEN_DATABASE_URL`** (`backend/config.py`, `str | None = None`) — a
+  direct (non-pooled) Neon connection string, used only by a new `listen_asyncpg_url`
+  property. Falls back to `DATABASE_URL` when unset, same pattern as `MIGRATION_DATABASE_URL`
+  from 5.3 — so local dev/Docker Compose (a single unpooled Postgres, where this distinction
+  never mattered) needs zero changes. `asyncpg_database_url`'s dialect-stripping logic was
+  factored into a shared module-level `_strip_asyncpg_dialect_suffix()` helper (mirroring the
+  same-named helper already in `worker/config.py`) so both properties share it rather than
+  duplicating the two-line strip.
+- **`backend/realtime.py`'s `run_listener()`** now connects with `settings.listen_asyncpg_url`
+  instead of `settings.asyncpg_database_url` — the one-line fix. `run_listener`'s docstring
+  updated to explain why, pointing at `config.py`'s fuller explanation.
+- **Confirmed the worker needs zero changes**: its `NOTIFY` calls (`SELECT pg_notify(...)`
+  inside the same transaction as `insert_check`/`reschedule_target`) have no session-affinity
+  requirement — sending a NOTIFY works fine over a pooled connection regardless of which
+  physical backend handles it; only the *receiving* `LISTEN` side needs a stable, dedicated
+  session, which is exactly what broke. No `worker/` files touched.
+- 4 new tests: `test_config.py` gained 3 (`listen_asyncpg_url` falls back to `DATABASE_URL`
+  when unset, prefers `LISTEN_DATABASE_URL` when set, strips the `+asyncpg` suffix correctly);
+  `test_realtime.py` gained 1 — a regression test mocking `asyncpg.connect` to assert
+  `run_listener()` actually connects with the direct URL, not the pooled one, closing the gap
+  `test_realtime.py`'s own docstring had flagged since Phase 1 ("run_listener isn't unit
+  tested... covered by manual verification instead" — now partially is, for exactly the part
+  that broke). 122 backend tests total (was 118), all passing against a rebuilt `api` image.
+- **Verified locally end-to-end**: rebuilt `api`, recreated the running dev container,
+  confirmed `/health` still 200 and the boot log unchanged. Registered a throwaway account,
+  opened a real SSE connection, created a target while it was live, and confirmed **two real
+  `check_update` events arrived** (one per local worker region, `eu-west` and `local`) —
+  proving the `LISTEN_DATABASE_URL`-unset fallback to `DATABASE_URL` genuinely still works
+  against local Postgres exactly as before this change. Verification account (and its cascaded
+  target) deleted afterward via the real `DELETE /auth/me` flow.
+- **Production verification against the real deployed Railway `api` service and Neon is not
+  yet done** — this requires the code to actually be deployed first (push this commit, let
+  Railway redeploy, then set `LISTEN_DATABASE_URL` in the Railway dashboard to Neon's direct
+  connection string and redeploy again), which is outside this prompt's "commit, don't push"
+  scope. Documented in `backend/README.md`'s new "LISTEN_DATABASE_URL (production — Neon's
+  pooler breaks LISTEN/NOTIFY)" section exactly how to get Neon's direct connection string
+  (the dashboard's Connection Details panel has a pooled/direct toggle — same host, no
+  `-pooler` segment) and what value to set. Once deployed, the follow-up verification is the
+  same technique 5.4 used: connect to `GET /targets/stream` first (confirm `: connected`),
+  then create/trigger a real check, and confirm the `check_update` event actually arrives this
+  time — not just that the check itself lands (which already worked in 5.4; only the push was
+  broken).
+- Not touched in this prompt, per its explicit scope: the worker, the frontend, the second
+  worker region.
+
+**Next: push this commit, redeploy the `api` service on Railway, set `LISTEN_DATABASE_URL` to
+Neon's direct (non-pooled) connection string, and re-verify the SSE push live** (the same
+connect-first-then-trigger-a-check technique from 5.4) before continuing to Phase 5's
+remaining steps — second worker region, cross-origin verification via local frontend against
+the deployed backend, then the actual Vercel deploy.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

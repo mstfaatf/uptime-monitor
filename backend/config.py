@@ -4,6 +4,14 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _strip_asyncpg_dialect_suffix(url: str) -> str:
+    """Convert SQLAlchemy-style postgresql+asyncpg:// to plain postgresql:// for raw
+    asyncpg.connect() calls, which don't understand the "+asyncpg" dialect suffix."""
+    if url.startswith("postgresql+asyncpg"):
+        return url.replace("postgresql+asyncpg", "postgresql", 1)
+    return url
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -12,6 +20,17 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/uptime"
+
+    # Direct (non-pooled) connection string, used only by realtime.py's single long-lived
+    # LISTEN connection. Neon's pooled DATABASE_URL runs in transaction-pooling mode, which
+    # doesn't reliably support LISTEN/NOTIFY — a pooled connection's underlying physical
+    # backend can be swapped between queries, so a NOTIFY sent while a different backend is
+    # attached to that session is silently never delivered (found in production in prompt
+    # 5.4: checks landed correctly, but a live-connected SSE client never received the push).
+    # Falls back to DATABASE_URL when unset, so local dev/Docker Compose (a single, unpooled
+    # Postgres, where this distinction doesn't matter) needs no change — same fallback
+    # pattern as MIGRATION_DATABASE_URL.
+    LISTEN_DATABASE_URL: str | None = None
 
     # JWT / session (used for signing cookie payload).
     # No default: the app must fail to start if this isn't set via env var or .env file.
@@ -88,12 +107,18 @@ class Settings(BaseSettings):
 
     @property
     def asyncpg_database_url(self) -> str:
-        """Plain postgresql:// DSN for a raw asyncpg connection (used for LISTEN/NOTIFY in
-        realtime.py) — SQLAlchemy's async engine uses DATABASE_URL as-is (with the +asyncpg
-        dialect suffix it needs), but asyncpg.connect() doesn't understand that suffix."""
-        if self.DATABASE_URL.startswith("postgresql+asyncpg"):
-            return self.DATABASE_URL.replace("postgresql+asyncpg", "postgresql", 1)
-        return self.DATABASE_URL
+        """Plain postgresql:// DSN for a raw asyncpg connection — SQLAlchemy's async engine
+        uses DATABASE_URL as-is (with the +asyncpg dialect suffix it needs), but
+        asyncpg.connect() doesn't understand that suffix."""
+        return _strip_asyncpg_dialect_suffix(self.DATABASE_URL)
+
+    @property
+    def listen_asyncpg_url(self) -> str:
+        """Direct (non-pooled) DSN for realtime.py's one long-lived LISTEN connection —
+        LISTEN_DATABASE_URL if set, else DATABASE_URL (matching local dev, where there's no
+        pooler and the distinction is moot). See LISTEN_DATABASE_URL's own comment above for
+        why this must bypass Neon's pooled connection specifically."""
+        return _strip_asyncpg_dialect_suffix(self.LISTEN_DATABASE_URL or self.DATABASE_URL)
 
 
 settings = Settings()

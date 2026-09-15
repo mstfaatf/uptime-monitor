@@ -280,11 +280,16 @@ async def run_listener() -> None:
     this loop has no other way to learn about new checks, so it must never give up permanently,
     only wait and retry. Intended to run as a single background task started at app startup
     (see main.py's lifespan) and cancelled at shutdown.
+
+    Uses settings.listen_asyncpg_url, not the pooled settings.asyncpg_database_url — a pooled
+    connection (Neon's default DATABASE_URL in production) doesn't reliably deliver NOTIFYs to
+    a LISTEN session, since the pool can swap the physical backend between queries. See
+    config.py's LISTEN_DATABASE_URL for the full explanation.
     """
     while True:
         conn: asyncpg.Connection | None = None
         try:
-            conn = await asyncpg.connect(settings.asyncpg_database_url)
+            conn = await asyncpg.connect(settings.listen_asyncpg_url)
 
             def _on_notify(connection, pid, channel, payload) -> None:
                 # asyncpg calls this synchronously from its own read loop — hand off to a task
