@@ -1,6 +1,7 @@
 """Auth endpoints: register, login, logout, me, password reset."""
 
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -15,6 +16,8 @@ from database import get_db
 from mail import password_reset_email, send_email
 from models import PasswordResetToken, User
 from rate_limit import limiter
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -205,7 +208,15 @@ async def forgot_password(
         await db.flush()
         reset_url = f"{settings.FRONTEND_URL}/reset-password?token={raw_token}"
         subject, body_text = password_reset_email(reset_url=reset_url, expires_in_minutes=RESET_TOKEN_EXPIRY_MINUTES)
-        await send_email(user.email, subject, body_text)
+        sent = await send_email(user.email, subject, body_text)
+        if not sent:
+            # Same "log it, don't crash the request, don't pretend it sent" pattern as
+            # realtime.py's alert evaluators. The token itself is still created either way —
+            # token issuance and email delivery are deliberately separate concerns (see the
+            # docstring above) — this only adds visibility for when the send itself fails.
+            # The response below stays the same generic message regardless, for
+            # anti-enumeration; a failed send must never be observable to the caller.
+            logger.warning("Password reset email failed to send for user_id=%s", user.id)
     return {"detail": "If that email is registered, a password reset link has been sent."}
 
 

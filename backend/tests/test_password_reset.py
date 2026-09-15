@@ -6,6 +6,7 @@ test_alerting.py/test_mail.py: a genuine RESEND_API_KEY is configured in this pr
 .env, so without mocking this suite would attempt real network calls to Resend.
 """
 
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -51,6 +52,32 @@ async def test_forgot_password_for_existing_account_sends_email_and_creates_toke
     mock_send.assert_awaited_once()
     assert mock_send.call_args[0][0] == "forgot1@example.com"
     assert await _get_token_hash_for("forgot1@example.com") is not None
+
+
+async def test_forgot_password_still_creates_a_usable_token_when_the_send_fails(client, caplog):
+    """A failed send must not be silently swallowed (a real gap found in prompt 5.7 — the
+    return value wasn't checked at all) but also must not change the response shape
+    (anti-enumeration) or block token creation, which is a separate concern from delivery."""
+    await client.post("/auth/register", json={"email": "forgot-send-fails@example.com", "password": "old-pw"})
+    await client.post("/auth/logout")
+
+    # Alembic's env.py calls logging.config.fileConfig(alembic.ini) during this session's one-
+    # time migration setup (conftest.py's _test_database fixture) — fileConfig's default
+    # disable_existing_loggers=True silently disables any logger already created by that point
+    # (routers.auth's, since conftest.py imports main/routers before running migrations), a
+    # test-process-only artifact with no production effect (there, Alembic runs as a fully
+    # separate process that exits before uvicorn's process ever starts). Re-enable it here so
+    # caplog can actually observe what the endpoint logs.
+    logging.getLogger("routers.auth").disabled = False
+    caplog.set_level(logging.WARNING, logger="routers.auth")
+    with patch("routers.auth.send_email", new=AsyncMock(return_value=False)) as mock_send:
+        resp = await client.post("/auth/forgot-password", json={"email": "forgot-send-fails@example.com"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"detail": "If that email is registered, a password reset link has been sent."}
+    mock_send.assert_awaited_once()
+    assert await _get_token_hash_for("forgot-send-fails@example.com") is not None
+    assert "failed to send" in caplog.text.lower()
 
 
 async def test_forgot_password_for_unknown_email_returns_identical_generic_response(client):

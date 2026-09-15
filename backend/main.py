@@ -53,6 +53,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Minimal, standard hardening headers on every response. This API only ever serves JSON
+    (the frontend is a separate app on Vercel), so there's no HTML/script surface here for a
+    full CSP to matter — just the baseline headers relevant to any HTTP API:
+    - X-Content-Type-Options: stops a browser from MIME-sniffing a JSON response as something
+      else (e.g. HTML) and executing it.
+    - X-Frame-Options: DENY — this API should never be framed by anything.
+    - Referrer-Policy: don't leak the full request URL (which can carry auth-adjacent query
+      params) to a cross-origin destination via the Referer header.
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
+
 app.include_router(auth.router)
 app.include_router(targets.router)
 

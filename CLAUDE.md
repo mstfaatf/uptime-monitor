@@ -3114,5 +3114,90 @@ regression checks, proceed straight to Phase 6** (README rewrite, ADRs, `LOAD_TE
 against the live deployed instance) per CLAUDE.md's phase plan — worth explicitly deciding
 which, rather than assuming, before the next prompt begins.
 
+Phase 5, prompt 5.8 (production hardening, dependency updates, small fixes) is complete.
+**One real, previously-undiscovered production bug found and fixed**: rate limiting was
+completely non-functional on the live deployment.
+- **Fixed the 5.7 forgot-password gap**: `routers/auth.py`'s `forgot_password` now checks
+  `send_email`'s return value and logs a warning on failure (new `logger =
+  logging.getLogger(__name__)`), same "log it, don't crash, don't pretend it sent" pattern as
+  `realtime.py`'s alert evaluators. Token creation is still unconditional — delivery and
+  issuance stay separate concerns, per 4.7's original design. New regression test
+  (`test_forgot_password_still_creates_a_usable_token_when_the_send_fails`) — hit a real,
+  environment-specific pytest quirk while writing it: `conftest.py` imports `routers.auth`
+  (creating its logger) before running migrations in-process, and Alembic's `env.py` calls
+  `logging.config.fileConfig`, whose `disable_existing_loggers=True` default silently disables
+  any logger already created by that point — a test-process-only artifact (production runs
+  Alembic as a fully separate process that exits before uvicorn starts) fixed by explicitly
+  re-enabling the logger in the test.
+- **`CORS_ORIGINS` confirmed exact-match, no stray entries**: verified twice — behaviorally
+  (the two expected origins return `200`, a previously-seen preview-hash URL, an unrelated
+  origin, and a literal `*` all correctly return `400`) and then directly via the user pasting
+  Railway's raw value: `http://localhost:3000,https://uptime-monitor-atf-labs.vercel.app` —
+  exactly the two intended values.
+- **Full git-history secret grep, genuinely clean**: pickaxe/regex searches across `--all`
+  history for the Neon password/host fragments, `neondb_owner`, a Resend-key shape (`re_...`),
+  any JWT-shaped three-segment token, and any `DATABASE_URL`/`JWT_SECRET`/`API_KEY` assignment
+  with a real-looking (non-placeholder) value — all clean. The one `.env` file ever tracked
+  (Phase 0, before the gitignore fix) was confirmed to be git's canonical **empty**-blob hash —
+  0 bytes, never held a real value. The only literal `JWT_SECRET` ever committed was the
+  placeholder string `change-me-in-production`, already remediated in Phase 0.
+- **Real bug found and fixed: rate limiting was not functioning in production at all** —
+  confirmed by sending 8+ consecutive failed `/auth/login` attempts against the live Railway
+  service with no spoofed headers and never once getting a `429` (configured limit: 5/minute).
+  Root-caused precisely: uvicorn's `ProxyHeadersMiddleware` defaults to trusting
+  `X-Forwarded-For` only from a directly-connecting peer at `127.0.0.1`; on Railway the direct
+  peer is Railway's own edge (never `127.0.0.1`), so the header was silently never trusted and
+  `request.client.host` (slowapi's rate-limit key) reflected Railway's own internal connection
+  info instead of a stable real client IP — read uvicorn's own middleware source to confirm
+  this precisely rather than guessing. Fixed via `--proxy-headers --forwarded-allow-ips='*'` on
+  the uvicorn invocation in both `backend/Dockerfile`'s CMD (`'*'` is safe here specifically
+  because Railway is the only path to this container — no direct-internet route exists that
+  could exploit a trusted-everyone policy). **Verified locally** (Docker Compose, simulating a
+  trusted-proxy scenario the same way): two different spoofed `X-Forwarded-For` values each
+  independently got their own `5-then-429` budget, proving distinct real-IP keying now works.
+  **Not yet verified against the live Railway deployment** — requires this commit to be pushed
+  and redeployed first, same pattern as 5.4.1's fix.
+- **Basic security headers added** (`main.py`, a new `add_security_headers` HTTP middleware):
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy:
+  strict-origin-when-cross-origin` — deliberately minimal, no full CSP, since this API only
+  ever serves JSON (the frontend is a separate app on Vercel with its own header story).
+  Confirmed live on the local stack's `/health` response.
+- **`npm audit` (frontend)**: bumped `next` `14.2.0` → `14.2.35` (confirmed the latest 14.2.x
+  patch release) — a clean, same-minor-line patch that fixes roughly a dozen of the flagged
+  CVEs. The remaining ~23 advisories share one trait: their earliest fix is Next 16.3.5, a real
+  major-version jump (breaking changes, React 19 requirement) — **flagged as a Phase 6+
+  follow-up, not attempted here**. `tsc --noEmit` clean after the bump; `next build` not run
+  since the user's own `next dev` was occupying port 3000/`.next` at the time (established
+  project rule).
+- **`pip-audit` (backend + worker)**: both Dockerfiles now upgrade `pip` itself before
+  installing requirements (`python:3.12-slim`'s bundled pip had several path-traversal/tarfile
+  CVEs, all fixed by bumping to the latest release) — confirmed clean after rebuilding both
+  images. The one remaining finding, `ecdsa` (backend only, pulled in transitively by
+  `python-jose` as an unused pure-Python fallback backend) has **no available fix** — the
+  maintainers consider its timing side-channel out of scope — but this app only ever signs
+  JWTs with `HS256` (HMAC), never touching the vulnerable EC-specific code path; documented as
+  an accepted, inert finding rather than silently ignored.
+- **Vercel Deployment Protection re-confirmed still off**: the production URL returns a real
+  `200` directly (no `vercel.com/sso-api` redirect, no `_vercel_sso_nonce` cookie) — the 5.7
+  fix held.
+- **124 backend + 36 worker tests, all passing** (was 122 + 36 after 5.4.1) — the 2 new tests
+  are the forgot-password failure case and the security-headers check.
+- **Open question raised, not yet resolved**: a direct Neon row-count query (run by the user,
+  not assumed) showed **1 user, 1 target, 26 checks** remaining in production — a real,
+  non-empty result that doesn't match any of this phase's own verification passes (every
+  account created across 5.2-5.8 was explicitly deleted and confirmed via a subsequent `401`,
+  and none of those targets lived long enough to accumulate 26 checks — that count implies
+  something checked continuously by both regions for roughly two hours). Asked the user
+  directly whether this is their own real usage (registered/added a target themselves while
+  testing the site) or genuine leftover data needing cleanup — **awaiting their answer**, not
+  assumed either way. Flagged here so it isn't silently lost; whoever picks this up next should
+  resolve it before treating Neon as clean.
+- Not touched in this prompt, per its explicit scope: any UI/feature work, the Next 15/16
+  major upgrade, the worker (no equivalent proxy-header issue exists there — it makes outbound
+  HTTP requests, never receives inbound ones).
+
+**Next: resolve the open Neon-data question above, then do Phase 5's wrap-up/regression pass**
+(or confirm it's sufficiently covered already) before deciding whether to proceed to Phase 6.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
