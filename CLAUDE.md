@@ -3031,5 +3031,88 @@ Railway worker regions + Neon), confirming Phase 0-4 invariants (ownership, rate
 `JWT_SECRET` fail-fast, SSRF, alerting, export) all still hold end-to-end through the real
 production URL, not just the pieces verified individually across 5.2-5.6.
 
+Phase 5, prompt 5.7 (full production walkthrough + Resend sender confirmation) is complete.
+**The full production stack — Vercel + Railway (both worker regions) + Neon, SSE, and email —
+is now verified working end to end through a real browser and real email delivery, with two
+real, previously-undiscovered bugs found and fixed along the way.** No application code
+changed; every fix this prompt was a Railway dashboard configuration value.
+- **Real bug #1, found immediately, blocking everything**: the production Vercel URL was
+  returning a `302` to `vercel.com/sso-api` for every anonymous request — **Vercel Deployment
+  Protection was set to "All Deployments,"** gating the production custom-domain-less URL
+  itself, not just previews. Confirmed via both a real Playwright browser and a raw `curl`
+  (ruling out a browser-specific quirk) before reporting it. User fixed it by turning off
+  "Require Log In" entirely in Vercel's Project Settings → Deployment Protection — no
+  redeploy needed, confirmed via a fresh incognito load and a follow-up `curl` both returning
+  `200` directly, no auth redirect. **This would have silently blocked every real visitor,
+  including anyone reviewing this as a portfolio project** — a genuinely high-value catch for
+  a walkthrough prompt to have surfaced.
+- **Full browser walkthrough against the real production URL, via Playwright (not curl —
+  needed real cookie-jar/CORS enforcement)**: registered a throwaway account, confirmed
+  redirect to `/dashboard`; confirmed the session cookie on the Railway API origin (`secure:
+  true, httpOnly: true, sameSite: "None"`); added a real target and — screenshotted as visual
+  proof — watched **both `us-east` and `eu-west` region badges appear on the row live, with no
+  reload**, the summary strip's up-count correctly reaching `2`, and cross-checked the exact
+  rendered values against a direct `GET /targets/status` call from within the same browser
+  context (byte-for-byte match: same `checked_at`/`latency_ms`/timing per region). Reloaded —
+  session persisted (still `/dashboard`, not bounced to `/login`). Logged out — landed on
+  `/login`; a subsequent direct visit to `/dashboard` correctly redirected back to `/login`,
+  and `GET /auth/me` independently confirmed `401` — the session is genuinely cleared
+  server-side, not just hidden client-side. Eight `401` console messages appeared across the
+  whole run, all attributable to the same by-design "probe auth, treat 401 as not-logged-in"
+  pattern from 5.5 occurring at the two genuinely-anonymous points in the script (initial
+  `/register` load, and the post-logout `/dashboard` visit) — this is a production build
+  (no React StrictMode double-invoke, unlike 5.5's dev-server run), so the count here reflects
+  real component/fetch structure, not a dev-only artifact; still not a bug, confirmed by
+  reading the actual call sites.
+- **Real bug #2 and #3, found via an actual received email, not just config inspection**:
+  triggered a real password-reset email against the account owner's own real address (explicit
+  go-ahead obtained first, matching the 4.6.1/4.9 precedent, since Resend's sandbox sender can
+  only deliver to the Resend account's own verified address). The first email showed **two
+  real misconfigurations at once**: the sender rendered as the bare `onboarding@resend.dev`
+  with no display name (meaning `RESEND_FROM_EMAIL` on Railway had been explicitly set to the
+  unlabeled address, overriding `config.py`'s own correct default), and the reset link pointed
+  at `http://localhost:3000/reset-password?...` in production — meaning `FRONTEND_URL` had
+  never been updated from its default when Vercel went live, exactly the risk the 5.1 report
+  flagged ("`CORS_ORIGINS`/`FRONTEND_URL` — update together" — only `CORS_ORIGINS` actually
+  was). **This was a live, unqualified production bug**: any real user requesting a password
+  reset right now would have received a completely unusable link. Fixed by setting
+  `RESEND_FROM_EMAIL=Uptime Monitor <onboarding@resend.dev>` and
+  `FRONTEND_URL=https://uptime-monitor-atf-labs.vercel.app` on the Railway `api` service.
+  A second, fresh reset email (initially not found — landed in spam, a known/expected
+  characteristic of Resend's shared, unverified sandbox sender, not a bug, and already flagged
+  as deferred in the 5.1 report pending a verified custom domain) confirmed both fixes: sender
+  correctly read `Uptime Monitor <onboarding@resend.dev>`, and the link correctly pointed at
+  `https://uptime-monitor-atf-labs.vercel.app/reset-password?token=...`.
+- **Real gap noticed while diagnosing the email bug, flagged not fixed (outside this prompt's
+  scope)**: `POST /auth/forgot-password` calls `await send_email(...)` without checking or
+  logging its return value — unlike `realtime.py`'s alerting evaluators, which explicitly
+  check `sent = await send_email(...)` and skip bookkeeping on failure (a lesson from 4.6.1's
+  "real bug #2"). A failed reset-email send today would be invisible from the API response
+  (which always returns the same generic 200 by design, for anti-enumeration) and wouldn't
+  even show up as a log line pointing at *why* — only a broader Resend-client-level log, if
+  any. Worth applying the same "check and log the return value" treatment here in a future
+  pass, though the generic-200 anti-enumeration response itself should stay unchanged either
+  way.
+- Cleanup: both the throwaway `@example.com` browser-walkthrough account and the real
+  `m.attifff@gmail.com` production account (plus an accidental extra registration under the
+  same real email, created by my own "confirm the address is genuinely free" check and deleted
+  immediately after) were deleted via the real `DELETE /auth/me` flow; confirmed via
+  subsequent `401`s on login. No test data remains under any account touched this prompt.
+- Not touched in this prompt, per its explicit scope: any application code (every fix was a
+  Railway dashboard value), the worker, any new frontend work.
+
+**Phase 5 is functionally complete and genuinely production-verified**: Neon (5.2), the
+backend on Railway with correct CORS/cookie/DATABASE_URL handling (5.3, 5.3-verify), the SSE
+LISTEN/NOTIFY fix (5.4.1), both real worker regions (5.4, 5.6), the cross-origin cookie
+contract (5.5), the Vercel frontend (this prompt, after fixing Deployment Protection), and
+correct email sender/link configuration (this prompt) are all proven working together against
+real infrastructure, not individually. **Next: Phase 5's own wrap-up/regression pass**
+(confirming Phase 0-4 invariants — ownership, rate limiting, `JWT_SECRET` fail-fast, SSRF,
+alerting, export — still hold through the real production URL end-to-end) **or, if that's
+judged sufficiently covered by this prompt's walkthrough plus 5.3-verify/5.4/5.6's own
+regression checks, proceed straight to Phase 6** (README rewrite, ADRs, `LOAD_TESTING.md`
+against the live deployed instance) per CLAUDE.md's phase plan — worth explicitly deciding
+which, rather than assuming, before the next prompt begins.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
