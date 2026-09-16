@@ -1,6 +1,6 @@
 # Uptime Monitor — Worker
 
-Background service that periodically checks all targets concurrently (HTTP HEAD/GET via `httpx.AsyncClient`), measures latency, and writes results to the `checks` table. SSRF protection blocks localhost and private IP ranges.
+Background service that periodically checks all targets concurrently (HTTP HEAD/GET via `httpx.AsyncClient`, or a target's configured method/headers/basic-auth/keyword-match — see `checker.py`), measures latency, and writes results to the `checks` table. SSRF protection blocks localhost and private IP ranges.
 
 ## Requirements
 
@@ -9,17 +9,18 @@ Background service that periodically checks all targets concurrently (HTTP HEAD/
 
 ## Environment variables
 
-None of these are required — all have safe defaults, unlike the backend's `JWT_SECRET`.
-In Docker Compose, the `worker` service also loads the repo-root `.env` (`env_file:`) for
-consistency with the `api` service, but nothing here currently reads a value from it.
+One of these is required (`CREDENTIAL_ENCRYPTION_KEY`, added Phase 6 prompt 6.2) — every other
+one has a safe default, unlike the backend's `JWT_SECRET`. In Docker Compose, the `worker`
+service also loads the repo-root `.env` (`env_file:`) for consistency with the `api` service.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `CREDENTIAL_ENCRYPTION_KEY` | Fernet key decrypting a target's basic-auth password (encrypted by the backend — see `crypto.py`). Must be the exact same value as the backend's `CREDENTIAL_ENCRYPTION_KEY`, and the same value across both worker regions. | **required — no default; the worker fails to start without it. Must be a valid Fernet key** (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`) |
 | `DATABASE_URL` | PostgreSQL URL (same pattern as backend; connects via `asyncpg` directly, raw queries, no ORM) | `postgresql+asyncpg://postgres:postgres@localhost:5432/uptime` |
 | `CHECK_INTERVAL_SECONDS` | Seconds between full check cycles | `300` (5 min) |
 | `HTTP_TIMEOUT_SECONDS` | Timeout per HTTP request | `10` |
 | `HTTP_VERIFY_SSL` | Verify TLS certificates for checked URLs (`true`/`false`) | `true`. Set to `false` only for local/dev if CA verification fails (insecure). |
-| `REGION` | Identifies which region this worker instance is checking from. Tagged onto log lines now; will be tagged onto `checks` rows once the multi-region schema migration lands. Set a distinct value per instance (e.g. `us-east`, `eu-west`) once more than one worker runs. | `local` |
+| `REGION` | Identifies which region this worker instance is checking from. Tagged onto log lines and `checks` rows. Set a distinct value per instance (e.g. `us-east`, `eu-west`) once more than one worker runs. | `local` |
 
 ## DATABASE_URL (production — Neon)
 
@@ -99,7 +100,10 @@ pip install -r requirements-dev.txt   # pytest — not in the Docker image
 pytest
 ```
 
-No database or network needed — `worker/tests/` unit-tests `ssrf.py`'s blocklist and
-`checker.py`'s redirect-following logic directly, with all HTTP mocked. Kept separate from
-`backend/tests/` deliberately: the worker is a separately deployed service with its own
-dependencies, so its tests don't need backend/'s FastAPI/Postgres test setup at all.
+No database or network needed — `worker/tests/` unit-tests `ssrf.py`'s blocklist,
+`checker.py`'s redirect-following and request-customization/keyword-match logic (with all HTTP
+mocked), and `crypto.py`'s decryption against a session-wide test `CREDENTIAL_ENCRYPTION_KEY`
+(set in `tests/conftest.py`, required before any test module can import `config`/`crypto`/
+`main`). Kept separate from `backend/tests/` deliberately: the worker is a separately deployed
+service with its own dependencies, so its tests don't need backend/'s FastAPI/Postgres test
+setup at all.

@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
+    # Symmetric key encrypting third-party credentials stored on behalf of the user — today,
+    # a target's basic-auth password (see security/crypto.py). No default, same fail-fast
+    # treatment as JWT_SECRET: unlike RESEND_API_KEY (safe to leave unset — email just
+    # no-ops), a missing key here would mean either silently storing plaintext or crashing
+    # confusingly the first time a credential is encrypted, neither acceptable. Must be set to
+    # the exact same value on the worker (both regions) — the worker decrypts what this
+    # service encrypts. Generate with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    CREDENTIAL_ENCRYPTION_KEY: str
+
     # Cookie settings
     COOKIE_NAME: str = "session"
     COOKIE_HTTP_ONLY: bool = True

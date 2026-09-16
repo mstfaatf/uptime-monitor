@@ -18,9 +18,17 @@ from database import get_db
 from export import build_csv
 from models import Check, Target, TargetRegionSchedule, User
 from rate_limit import limiter
+from security.crypto import encrypt_secret
 from security.ssrf import is_url_blocked
 
 router = APIRouter(prefix="/targets", tags=["targets"])
+
+# Request customization (Phase 6, prompt 6.2). request_method=None preserves the worker's
+# original HEAD-then-GET-on-failure default (see worker/checker.py) — only these three
+# explicit choices are supported; an explicit method disables that fallback entirely, so it's
+# deliberately kept small rather than opening up arbitrary HTTP verbs.
+ALLOWED_REQUEST_METHODS = {"GET", "POST", "HEAD"}
+ALLOWED_KEYWORD_MATCH_MODES = {"contains", "not_contains"}
 
 # How often the SSE stream sends a comment line if there's nothing new to report — keeps
 # intermediate proxies/load balancers from timing out an idle connection, and gives the
@@ -51,6 +59,35 @@ def normalize_url(url: str) -> str:
 class TargetCreate(BaseModel):
     url: HttpUrl
     name: str | None = None
+    # Request customization — all optional, all None/default means "behave exactly as before
+    # this feature existed." See ALLOWED_REQUEST_METHODS/ALLOWED_KEYWORD_MATCH_MODES and
+    # _validate_request_customization below for what's actually accepted.
+    request_method: str | None = None
+    request_headers: dict[str, str] | None = None
+    basic_auth_username: str | None = None
+    basic_auth_password: str | None = None
+    keyword_match: str | None = None
+    keyword_match_mode: str = "contains"
+
+
+class TargetUpdate(BaseModel):
+    """PATCH /targets/{id} body. Every field is optional and, per pydantic's exclude_unset
+    (see update_target below), only fields actually present in the request JSON are changed —
+    an omitted field is left alone, and an explicit `null` clears it. basic_auth_password is
+    the one deliberate exception to "null clears it": see update_target's basic-auth handling.
+
+    Deliberately does NOT include `url` — editing a target's URL isn't supported by this
+    endpoint (or anywhere else yet); this endpoint exists specifically for the
+    request-customization fields below plus `name`.
+    """
+
+    name: str | None = None
+    request_method: str | None = None
+    request_headers: dict[str, str] | None = None
+    basic_auth_username: str | None = None
+    basic_auth_password: str | None = None
+    keyword_match: str | None = None
+    keyword_match_mode: str | None = None
 
 
 class TargetResponse(BaseModel):
@@ -58,9 +95,73 @@ class TargetResponse(BaseModel):
     url: str
     name: str | None
     created_at: str
+    request_method: str | None
+    request_headers: dict[str, str] | None
+    basic_auth_username: str | None
+    keyword_match: str | None
+    keyword_match_mode: str
 
     class Config:
         from_attributes = True
+
+
+def _target_to_response(target: Target) -> TargetResponse:
+    """Build a TargetResponse from an ORM Target — shared by create/list/update so the field
+    list can't silently drift between the three call sites. basic_auth_password_encrypted is
+    deliberately never included here or anywhere else: the decrypted password is never
+    returned by any endpoint, and neither is the encrypted form (there's no legitimate reason
+    for a client to see it — an edit form shows only the username, per the "blank means
+    unchanged" convention in update_target)."""
+    return TargetResponse(
+        id=target.id,
+        url=target.url,
+        name=target.name,
+        created_at=target.created_at.isoformat(),
+        request_method=target.request_method,
+        request_headers=target.request_headers,
+        basic_auth_username=target.basic_auth_username,
+        keyword_match=target.keyword_match,
+        keyword_match_mode=target.keyword_match_mode,
+    )
+
+
+def _validate_request_customization(
+    request_method: str | None,
+    keyword_match: str | None,
+    keyword_match_mode: str,
+    basic_auth_username: str | None,
+    basic_auth_password_set: bool,
+) -> None:
+    """Shared validation for create and update, run against the *resulting* whole state (not
+    just whatever fields a PATCH happened to touch) — so a PATCH that only changes one field
+    still gets validated against the target's full, merged state. Raises HTTPException(400) on
+    any violation; callers must call this before flushing, not after."""
+    if request_method is not None and request_method not in ALLOWED_REQUEST_METHODS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"request_method must be one of {sorted(ALLOWED_REQUEST_METHODS)} or omitted",
+        )
+    if keyword_match_mode not in ALLOWED_KEYWORD_MATCH_MODES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"keyword_match_mode must be one of {sorted(ALLOWED_KEYWORD_MATCH_MODES)}",
+        )
+    if request_method == "HEAD" and keyword_match:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="keyword_match requires a request_method that returns a response body "
+            "(GET or POST, or omitted) — HEAD has no body to match against",
+        )
+    if basic_auth_username and not basic_auth_password_set:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="basic_auth_username requires a basic_auth_password",
+        )
+    if basic_auth_password_set and not basic_auth_username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="basic_auth_password requires a basic_auth_username",
+        )
 
 
 class LatestCheckResponse(BaseModel):
@@ -293,10 +394,7 @@ async def list_targets(
         select(Target).where(Target.user_id == current_user.id).order_by(Target.created_at.desc())
     )
     targets = result.scalars().all()
-    return [
-        TargetResponse(id=t.id, url=t.url, name=t.name, created_at=t.created_at.isoformat())
-        for t in targets
-    ]
+    return [_target_to_response(t) for t in targets]
 
 
 @router.post("", response_model=TargetResponse, status_code=status.HTTP_201_CREATED)
@@ -321,6 +419,14 @@ async def create_target(
             detail=f"This URL cannot be monitored: {reason}",
         )
 
+    _validate_request_customization(
+        request_method=body.request_method,
+        keyword_match=body.keyword_match,
+        keyword_match_mode=body.keyword_match_mode,
+        basic_auth_username=body.basic_auth_username,
+        basic_auth_password_set=bool(body.basic_auth_password),
+    )
+
     result = await db.execute(
         select(Target).where(
             Target.user_id == current_user.id,
@@ -337,11 +443,96 @@ async def create_target(
         url=raw,
         normalized_url=normalized,
         name=(body.name.strip() or None) if body.name else None,
+        request_method=body.request_method,
+        request_headers=body.request_headers or None,
+        basic_auth_username=(body.basic_auth_username or None),
+        basic_auth_password_encrypted=(
+            encrypt_secret(body.basic_auth_password) if body.basic_auth_password else None
+        ),
+        keyword_match=(body.keyword_match or None),
+        keyword_match_mode=body.keyword_match_mode,
     )
     db.add(target)
     await db.flush()
     await db.refresh(target)
-    return TargetResponse(id=target.id, url=target.url, name=target.name, created_at=target.created_at.isoformat())
+    return _target_to_response(target)
+
+
+@router.patch("/{target_id}", response_model=TargetResponse)
+async def update_target(
+    target_id: int,
+    body: TargetUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a target's name and/or request-customization fields (method/headers/basic-auth/
+    keyword-match). Does NOT support changing the URL, pause state, or check interval — url
+    editing isn't supported anywhere yet, and pause/interval are separate Phase 6 features not
+    built in this prompt. An edit takes effect on the target's next naturally-scheduled check;
+    this endpoint doesn't reach into target_region_schedule to force an immediate recheck (that
+    reset is reserved for pause/resume, a deliberate, narrow exception — not extended here).
+
+    404 (not 403) for a target that doesn't exist or isn't owned by the caller, same pattern as
+    every other target-scoped endpoint.
+
+    Only fields actually present in the request JSON are changed (pydantic's exclude_unset,
+    not a bare `is not None` check) — an omitted field is left alone, and most fields can be
+    explicitly cleared back to null this way (e.g. `"keyword_match": null` turns content
+    matching off). basic_auth_password is the deliberate exception: per the edit-form UX (the
+    username is shown back, the password never is), sending it blank or omitting it always
+    means "leave the existing password unchanged" — see the basic-auth handling below for how
+    to actually remove basic auth entirely vs. just rotate the password vs. rename the
+    username.
+    """
+    result = await db.execute(select(Target).where(Target.id == target_id, Target.user_id == current_user.id))
+    target = result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+
+    provided = body.model_dump(exclude_unset=True)
+
+    if "name" in provided:
+        target.name = (body.name.strip() or None) if body.name else None
+    if "request_method" in provided:
+        target.request_method = body.request_method
+    if "request_headers" in provided:
+        target.request_headers = body.request_headers
+    if "keyword_match" in provided:
+        target.keyword_match = body.keyword_match or None
+    if "keyword_match_mode" in provided and body.keyword_match_mode is not None:
+        target.keyword_match_mode = body.keyword_match_mode
+
+    if "basic_auth_username" in provided:
+        new_username = body.basic_auth_username or None
+        if new_username is None:
+            # Clearing the username removes basic auth entirely — a lone password with no
+            # username to pair it with is meaningless, and _validate_request_customization
+            # below would reject it anyway.
+            target.basic_auth_username = None
+            target.basic_auth_password_encrypted = None
+        else:
+            target.basic_auth_username = new_username
+            if body.basic_auth_password:
+                target.basic_auth_password_encrypted = encrypt_secret(body.basic_auth_password)
+            # else: username changed/reaffirmed, password left exactly as stored — "blank
+            # means unchanged."
+    elif body.basic_auth_password:
+        # Username untouched this request — only meaningful if basic auth is already
+        # configured (a bare password rotation with no username in play, existing or new, is
+        # rejected below).
+        target.basic_auth_password_encrypted = encrypt_secret(body.basic_auth_password)
+
+    _validate_request_customization(
+        request_method=target.request_method,
+        keyword_match=target.keyword_match,
+        keyword_match_mode=target.keyword_match_mode,
+        basic_auth_username=target.basic_auth_username,
+        basic_auth_password_set=target.basic_auth_password_encrypted is not None,
+    )
+
+    await db.flush()
+    await db.refresh(target)
+    return _target_to_response(target)
 
 
 @router.get("/{target_id}", response_model=TargetStatusResponse)

@@ -22,6 +22,7 @@ row at all, since each only ever queries its own region's rows.
 """
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,7 @@ import httpx
 from backoff import compute_backoff_seconds
 from config import settings
 from checker import check_url
+from crypto import decrypt_secret
 from ssrf import is_url_blocked
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -70,6 +72,15 @@ NOTIFY_CHANNEL = "checks_inserted"
 # self-heal well within the normal CHECK_INTERVAL_SECONDS (300s) cadence rather than staying
 # stuck until a manual fix.
 CLAIM_TTL_SECONDS = 120
+
+
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Teach every pooled connection how to (de)serialize jsonb columns as plain Python
+    dicts. asyncpg doesn't do this automatically outside SQLAlchemy's engine — this is the
+    first jsonb column (targets.request_headers, Phase 6 prompt 6.2) this raw-asyncpg codepath
+    has ever needed to read. Registered via asyncpg.create_pool's `init` hook (see main()), so
+    it applies to every connection the pool ever hands out, not just one."""
+    await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog", format="text")
 
 
 async def ensure_schedule_rows(conn: asyncpg.Connection, region: str) -> None:
@@ -116,13 +127,20 @@ async def claim_due_targets(conn: asyncpg.Connection, region: str) -> list[dict]
     A schedule row is "due" if its next_check_at says so AND it isn't currently claimed by a
     still-live claim: claimed_at is either NULL (never claimed / already cleared after a prior
     check) or older than CLAIM_TTL_SECONDS (stale — treat as abandoned).
+
+    Also selects each target's request-customization fields (Phase 6, prompt 6.2:
+    request_method/request_headers/basic_auth_*/keyword_match*) so check_one has everything it
+    needs for this check without a second query — these are per-target, not per-region, so
+    they come straight off `targets`, not the schedule table.
     """
     await ensure_schedule_rows(conn, region)
 
     async with conn.transaction():
         rows = await conn.fetch(
             """
-            SELECT t.id, t.url, trs.consecutive_failures
+            SELECT t.id, t.url, trs.consecutive_failures,
+                   t.request_method, t.request_headers, t.basic_auth_username,
+                   t.basic_auth_password_encrypted, t.keyword_match, t.keyword_match_mode
             FROM target_region_schedule trs
             JOIN targets t ON t.id = trs.target_id
             WHERE trs.region = $1
@@ -231,9 +249,36 @@ async def check_one(
     url: str,
     consecutive_failures_before: int,
     region: str,
+    request_method: str | None,
+    request_headers: dict | None,
+    basic_auth_username: str | None,
+    basic_auth_password_encrypted: str | None,
+    keyword_match: str | None,
+    keyword_match_mode: str,
 ) -> None:
-    """Check a single target, bounded by the semaphore, record its result, and reschedule it."""
+    """Check a single target, bounded by the semaphore, record its result, and reschedule it.
+    request_method/request_headers/basic_auth_*/keyword_match* are this target's optional
+    request-customization fields (Phase 6, prompt 6.2), read off `targets` by
+    claim_due_targets — None/default means "no customization," behaving exactly as before this
+    feature existed."""
     async with semaphore:
+        auth: httpx.BasicAuth | None = None
+        if basic_auth_username and basic_auth_password_encrypted:
+            try:
+                auth = httpx.BasicAuth(basic_auth_username, decrypt_secret(basic_auth_password_encrypted))
+            except Exception:
+                # A decrypt failure (most likely: CREDENTIAL_ENCRYPTION_KEY has drifted between
+                # the backend and this worker) shouldn't crash the whole check cycle via the
+                # broad except below, which would misleadingly log this as "may have been
+                # deleted mid-check" — log it distinctly and proceed unauthenticated, which will
+                # most likely surface as a normal 401 from the target rather than a check that
+                # silently never runs.
+                logger.exception(
+                    "[region=%s] Failed to decrypt basic-auth credentials for target %s; "
+                    "checking without auth",
+                    region,
+                    target_id,
+                )
         try:
             # is_url_blocked() does a blocking socket.getaddrinfo() call — run it off the event
             # loop so it doesn't stall every other in-flight check under this same semaphore.
@@ -258,7 +303,16 @@ async def check_one(
                 }
                 logger.info("[region=%s] Target %s blocked (SSRF): %s", region, target_id, reason)
             else:
-                result = await check_url(client, url, dns_ms)
+                result = await check_url(
+                    client,
+                    url,
+                    dns_ms,
+                    method=request_method,
+                    headers=request_headers,
+                    auth=auth,
+                    keyword_match=keyword_match,
+                    keyword_match_mode=keyword_match_mode,
+                )
                 logger.info(
                     "[region=%s] Target %s: %s %s ms (dns=%s tcp=%s tls=%s ttfb=%s) is_up=%s %s",
                     region,
@@ -330,7 +384,21 @@ async def run_cycle(pool: asyncpg.Pool, client: httpx.AsyncClient) -> None:
     semaphore = asyncio.Semaphore(CHECK_CONCURRENCY)
     await asyncio.gather(
         *(
-            check_one(pool, client, semaphore, row["id"], row["url"], row["consecutive_failures"], region)
+            check_one(
+                pool,
+                client,
+                semaphore,
+                row["id"],
+                row["url"],
+                row["consecutive_failures"],
+                region,
+                request_method=row["request_method"],
+                request_headers=row["request_headers"],
+                basic_auth_username=row["basic_auth_username"],
+                basic_auth_password_encrypted=row["basic_auth_password_encrypted"],
+                keyword_match=row["keyword_match"],
+                keyword_match_mode=row["keyword_match_mode"],
+            )
             for row in targets
         )
     )
@@ -345,7 +413,7 @@ async def main() -> None:
         settings.HTTP_TIMEOUT_SECONDS,
         CHECK_CONCURRENCY,
     )
-    pool = await asyncpg.create_pool(settings.asyncpg_database_url)
+    pool = await asyncpg.create_pool(settings.asyncpg_database_url, init=_init_connection)
     try:
         # max_keepalive_connections=0: force a brand-new TCP+TLS connection for every single
         # request instead of reusing a pooled one. A reused connection would skip the

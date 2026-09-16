@@ -1,4 +1,6 @@
-"""Perform a single HTTP check: HEAD first, retry once with GET if HEAD fails or status >= 400.
+"""Perform a single HTTP check: HEAD first, retry once with GET if HEAD fails or status >= 400
+(the default — a target can instead configure an explicit method, custom headers, basic auth,
+and/or a keyword/content match; see check_url's docstring, Phase 6 prompt 6.2).
 
 Also captures, as a side effect of the same request(s) — no extra connections or lookups:
 - a DNS/TCP/TLS/TTFB timing breakdown (dns_ms piggybacks on the existing SSRF resolution call;
@@ -101,7 +103,12 @@ def _extract_cert(response: httpx.Response, url: str) -> tuple[datetime | None, 
 
 
 async def _follow_with_ssrf_check(
-    client: httpx.AsyncClient, method: str, url: str, initial_dns_ms: int | None
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    initial_dns_ms: int | None,
+    headers: dict[str, str] | None = None,
+    auth: httpx.Auth | tuple[str, str] | None = None,
 ) -> _HopResult:
     """
     Perform `method` against `url`, following redirects manually (follow_redirects=False) so
@@ -109,6 +116,11 @@ async def _follow_with_ssrf_check(
     follow_redirects=True would follow a redirect to a blocked address without ever re-checking
     it — a target can pass the SSRF check at creation/check time but 3xx-redirect to e.g.
     http://169.254.169.254/ or http://127.0.0.1/, bypassing the guard entirely.
+
+    headers/auth are a target's optional request customization (Phase 6, prompt 6.2) — passed
+    straight through to httpx on every hop, same as method. They have no bearing on the SSRF
+    check itself: every redirect hop's Location is still resolved and validated exactly as
+    before, regardless of what headers/auth are configured.
 
     Returns a _HopResult built only from the final hop's response — timing/cert data from
     intermediate redirect hops is discarded, since it describes a connection we didn't end up
@@ -123,6 +135,8 @@ async def _follow_with_ssrf_check(
             current_url,
             follow_redirects=False,
             extensions={"trace": _collect_trace(trace_events)},
+            headers=headers,
+            auth=auth,
         )
         if resp.status_code in _REDIRECT_STATUS_CODES and "Location" in resp.headers:
             next_url = urljoin(current_url, resp.headers["Location"])
@@ -141,9 +155,55 @@ async def _follow_with_ssrf_check(
     raise RedirectValidationError(f"Too many redirects (>{MAX_REDIRECTS})")
 
 
-async def check_url(client: httpx.AsyncClient, url: str, dns_ms: int | None) -> dict:
+def _check_keyword_match(body_text: str, keyword_match: str, keyword_match_mode: str) -> str | None:
+    """Return an error string if the configured keyword condition fails, else None (the match
+    condition holds). Distinctly prefixed ("Keyword match failed: ...") so this is never
+    confused with a connection failure when read off checks.error later — the same convention
+    this module already uses for SSRF/redirect blocks ("Redirect target blocked: ...",
+    "Resolved to blocked IP: ..." in ssrf.py)."""
+    found = keyword_match in body_text
+    if keyword_match_mode == "not_contains":
+        if found:
+            return f'Keyword match failed: unexpected "{keyword_match}" found in response body'
+        return None
+    if not found:
+        return f'Keyword match failed: expected "{keyword_match}" not found in response body'
+    return None
+
+
+async def check_url(
+    client: httpx.AsyncClient,
+    url: str,
+    dns_ms: int | None,
+    method: str | None = None,
+    headers: dict[str, str] | None = None,
+    auth: httpx.Auth | tuple[str, str] | None = None,
+    keyword_match: str | None = None,
+    keyword_match_mode: str = "contains",
+) -> dict:
     """
-    Attempt HEAD first; if HEAD fails or returns >= 400, retry once with GET.
+    method=None (the default): try HEAD first; if HEAD fails or returns >= 400, retry once
+    with GET — today's original behavior, unchanged, UNLESS keyword_match is also set (see
+    below), in which case method=None means "GET" instead — HEAD's empty body can never
+    satisfy a keyword condition regardless of its status code, so trying HEAD first there
+    would silently fail every keyword-matched check on the most common configuration (a target
+    with a keyword_match but no explicitly chosen method). An explicit method (GET/POST/HEAD,
+    a target's request-customization choice — see backend/routers/targets.py's
+    ALLOWED_REQUEST_METHODS) always disables the HEAD-then-GET fallback entirely and is used
+    exactly once: the user chose it deliberately (e.g. POST against a health endpoint that
+    doesn't support HEAD), so silently trying something else would be surprising, not helpful.
+
+    headers/auth are passed straight through to every request (see _follow_with_ssrf_check).
+
+    keyword_match/keyword_match_mode: after a response that would otherwise count as "up"
+    (a 2xx-3xx final status), optionally also require (mode="contains") or forbid
+    (mode="not_contains") a substring in the response body. A failed keyword condition flips
+    is_up to False with its own distinctly-prefixed error — see _check_keyword_match — instead
+    of being conflated with a connection failure. The API layer rejects an explicit
+    method="HEAD" combined with a keyword_match at creation/update time; the case above (method
+    left unset) is handled here instead, since "unset" isn't itself invalid — it just needs to
+    mean GET, not HEAD, once a keyword_match is in play.
+
     `dns_ms` is the timing of the caller's up-front is_url_blocked(url) check (see main.py) —
     passed in so it isn't measured twice, and used unless a redirect hop replaces it with its
     own (more specific) resolution timing.
@@ -167,17 +227,27 @@ async def check_url(client: httpx.AsyncClient, url: str, dns_ms: int | None) -> 
     }
     try:
         start = time.perf_counter()
-        try:
-            hop = await _follow_with_ssrf_check(client, "HEAD", url, dns_ms)
-            if hop.response.status_code >= 400:
-                hop = await _follow_with_ssrf_check(client, "GET", url, dns_ms)
-        except (httpx.HTTPError, OSError):
-            hop = await _follow_with_ssrf_check(client, "GET", url, dns_ms)
+        if method is not None or keyword_match:
+            hop = await _follow_with_ssrf_check(client, method or "GET", url, dns_ms, headers=headers, auth=auth)
+        else:
+            try:
+                hop = await _follow_with_ssrf_check(client, "HEAD", url, dns_ms, headers=headers, auth=auth)
+                if hop.response.status_code >= 400:
+                    hop = await _follow_with_ssrf_check(client, "GET", url, dns_ms, headers=headers, auth=auth)
+            except (httpx.HTTPError, OSError):
+                hop = await _follow_with_ssrf_check(client, "GET", url, dns_ms, headers=headers, auth=auth)
         elapsed_ms = int((time.perf_counter() - start) * 1000)
+        is_up = 200 <= hop.response.status_code < 400
+        error = None
+        if is_up and keyword_match:
+            error = _check_keyword_match(hop.response.text, keyword_match, keyword_match_mode)
+            if error is not None:
+                is_up = False
         result.update(
             status_code=hop.response.status_code,
             latency_ms=elapsed_ms,
-            is_up=200 <= hop.response.status_code < 400,
+            is_up=is_up,
+            error=error,
             dns_ms=hop.dns_ms,
             tcp_ms=hop.tcp_ms,
             tls_ms=hop.tls_ms,

@@ -144,6 +144,7 @@ requirement and works fine over a pooled connection; only the receiving `LISTEN`
    | Variable | Description | Default |
    |----------|-------------|---------|
    | `JWT_SECRET` | Secret for signing session cookies | **required — no default; the app fails to start without it** |
+   | `CREDENTIAL_ENCRYPTION_KEY` | Fernet key encrypting a target's basic-auth password at rest (see `security/crypto.py`). Must be the exact same value on the worker (both regions) — the worker decrypts what this service encrypts. | **required — no default; the app fails to start without it. Must be a valid Fernet key** (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`) |
    | `ENVIRONMENT` | `development` or `production` | `development`. `production` forces `COOKIE_SECURE=True` and `COOKIE_SAMESITE="none"` regardless of the settings below. |
    | `DATABASE_URL` | PostgreSQL URL used by the running app (async: `postgresql+asyncpg://...`) | `postgresql+asyncpg://postgres:postgres@localhost:5432/uptime` |
    | `MIGRATION_DATABASE_URL` | PostgreSQL URL used only by Alembic's migration step at boot (sync). See "DATABASE_URL (production — Neon)" above. | unset — falls back to `DATABASE_URL` |
@@ -163,10 +164,14 @@ requirement and works fine over a pooled connection; only the receiving `LISTEN`
 
    ```
    JWT_SECRET=your-secret-key
+   CREDENTIAL_ENCRYPTION_KEY=your-fernet-key
    DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/uptime
    ```
 
    Generate a `JWT_SECRET` with: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+
+   Generate a `CREDENTIAL_ENCRYPTION_KEY` with:
+   `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
 
 4. **Create the database** (if running Postgres locally):
 
@@ -240,6 +245,7 @@ does):
 | `MIGRATION_DATABASE_URL` | Neon's connection string, `sslmode=require&channel_binding=require` form (Neon's dashboard default) |
 | `LISTEN_DATABASE_URL` | Neon's **direct** (non-pooled) connection string, `ssl=require` form — same credentials as `DATABASE_URL` but the hostname without `-pooler`. See "LISTEN_DATABASE_URL (production — Neon's pooler breaks LISTEN/NOTIFY)" above. |
 | `JWT_SECRET` | freshly generated — `python -c "import secrets; print(secrets.token_urlsafe(32))"`, never reused from local dev |
+| `CREDENTIAL_ENCRYPTION_KEY` | freshly generated — `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` — and set to the **exact same value** on both worker Railway services (`worker`/`us-east`, `worker-eu-west`), not just this one; generate it and set all three **before** deploying this migration, the same coordination `JWT_SECRET` needed on its own first deploy |
 | `RESEND_API_KEY` | the real Resend API key |
 | `RESEND_FROM_EMAIL` | `Uptime Monitor <onboarding@resend.dev>` (sandbox address — no custom domain verified yet) |
 | `CORS_ORIGINS` | `http://localhost:3000` for now (still verifying cross-origin behavior locally); update to the real Vercel domain once the frontend is deployed |
@@ -271,12 +277,16 @@ accordingly before running `pytest`.
 Coverage: full auth flow (register/login/logout/me, duplicate email, wrong password), ownership
 enforcement across all target endpoints (the most important tests here — user A can never read,
 list, or delete user B's targets), URL normalization + duplicate-target 409s, SSRF blocking at
-creation time, the `JWT_SECRET` fail-fast behavior, rate limiting on login/register/target
-creation, and the `mail/` package's Resend wrapper + email templates (hermetic — no real
-Resend API calls; `RESEND_API_KEY` is unset in the test environment, exercising the real
-no-op path rather than a mock standing in for it). Worker-side SSRF and redirect-handling
-tests live in `worker/tests/` instead — see `worker/README.md` — since the worker is a
-separately deployed service with its own dependencies.
+creation time, target request-customization validation and the PATCH edit endpoint (method/
+keyword-match/basic-auth rules, blank-means-unchanged password semantics, and that the
+encrypted password is never returned in any response — see `test_target_customization.py`),
+the `JWT_SECRET`/`CREDENTIAL_ENCRYPTION_KEY` fail-fast behaviors, rate limiting on
+login/register/target creation, and the `mail/` package's Resend wrapper + email templates
+(hermetic — no real Resend API calls; `RESEND_API_KEY` is unset in the test environment,
+exercising the real no-op path rather than a mock standing in for it). Worker-side SSRF,
+redirect-handling, and request-customization/keyword-match tests live in `worker/tests/`
+instead — see `worker/README.md` — since the worker is a separately deployed service with its
+own dependencies.
 
 ## Endpoints
 

@@ -115,7 +115,19 @@ async def test_ensure_schedule_rows_new_rows_are_due_immediately():
 
 async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim():
     conn = _mock_conn()
-    conn.fetch.return_value = [{"id": 1, "url": "https://example.com", "consecutive_failures": 0}]
+    conn.fetch.return_value = [
+        {
+            "id": 1,
+            "url": "https://example.com",
+            "consecutive_failures": 0,
+            "request_method": None,
+            "request_headers": None,
+            "basic_auth_username": None,
+            "basic_auth_password_encrypted": None,
+            "keyword_match": None,
+            "keyword_match_mode": "contains",
+        }
+    ]
 
     rows = await main.claim_due_targets(conn, "us-east")
 
@@ -128,6 +140,14 @@ async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim
     # permanently stuck once claimed.
     assert "trs.claimed_at IS NULL OR trs.claimed_at < now() - make_interval(secs => $2)" in select_sql
     assert "FOR UPDATE OF trs SKIP LOCKED" in select_sql
+    # Request-customization fields (Phase 6, prompt 6.2) — must be selected off `targets`
+    # alongside id/url/consecutive_failures, or check_one has nothing to pass to check_url.
+    assert "t.request_method" in select_sql
+    assert "t.request_headers" in select_sql
+    assert "t.basic_auth_username" in select_sql
+    assert "t.basic_auth_password_encrypted" in select_sql
+    assert "t.keyword_match" in select_sql
+    assert "t.keyword_match_mode" in select_sql
     assert region_arg == "us-east"
     assert ttl_arg == main.CLAIM_TTL_SECONDS
 
@@ -138,7 +158,8 @@ async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim
     assert update_region == "us-east"
     assert ids_arg == [1]
 
-    assert rows == [{"id": 1, "url": "https://example.com", "consecutive_failures": 0}]
+    assert rows[0]["id"] == 1
+    assert rows[0]["url"] == "https://example.com"
 
 
 async def test_claim_due_targets_does_not_stamp_claim_when_nothing_is_due():

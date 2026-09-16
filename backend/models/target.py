@@ -3,7 +3,8 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -23,6 +24,19 @@ class Target(Base):
     normalized_url: Mapped[str] = mapped_column(String(2048), nullable=False, index=True)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # Request customization (Phase 6, prompt 6.2) — see
+    # backend/alembic/versions/010_add_target_request_customization.py. All nullable: NULL
+    # request_method preserves the worker's original HEAD-then-GET-on-failure default; every
+    # other field is simply "not configured" when null. basic_auth_password_encrypted is
+    # Fernet ciphertext (backend/security/crypto.py) — never the plaintext password, and never
+    # returned in any API response.
+    request_method: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    request_headers: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    basic_auth_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    basic_auth_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    keyword_match: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    keyword_match_mode: Mapped[str] = mapped_column(String(20), nullable=False, server_default="contains")
 
     # Worker scheduling state (next_check_at, consecutive_failures, claimed_at) used to live
     # directly on this table — see backend/alembic/versions/003_add_targets_scheduling_columns.py

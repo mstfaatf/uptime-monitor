@@ -15,6 +15,10 @@ import os
 # engine from settings.DATABASE_URL at import time.
 os.environ.setdefault("JWT_SECRET", "pytest-secret-do-not-use-in-production")
 os.environ.setdefault("ENVIRONMENT", "development")
+# Not a real secret — this suite never encrypts anything meaningful, it just needs *a*
+# validly-shaped Fernet key so security/crypto.py's module-level Fernet(...) construction
+# doesn't raise. Same fail-fast-at-import-time reasoning as JWT_SECRET above.
+os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", "rb6dazPc4DmaBkvWvYNyP6LnsEdNoJCNeUbyTxwvY7o=")
 
 
 def _test_database_url() -> str:

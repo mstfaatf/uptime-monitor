@@ -3305,5 +3305,96 @@ testing) moved out to a separate Phase 7. Full report delivered directly in the 
 groups-vs-tags shape, the retain-vs-rollup retention choice, and confirmation of (or a
 correction to) the proposed build order.
 
+Phase 6, prompt 6.2 (target request customization + keyword monitoring) is complete — step 1
+of the 6.1 build order. Pause/resume, check interval, tags, and every other Phase 6 feature
+remain untouched, per this prompt's explicit scope.
+- **Schema**: migration `010_add_target_request_customization.py` adds `request_method`
+  (nullable — `NULL` preserves the worker's original HEAD-then-GET-on-failure default),
+  `request_headers` (JSONB, nullable), `basic_auth_username`/`basic_auth_password_encrypted`
+  (nullable), `keyword_match` (nullable), `keyword_match_mode` (`NOT NULL DEFAULT 'contains'`)
+  to `targets`. `backend/models/target.py` updated to match.
+- **`CREDENTIAL_ENCRYPTION_KEY`** (required, no default, fail-fast — mirrors `JWT_SECRET`
+  exactly, per the 6.1 report's recommendation) added to both `backend/config.py` and
+  `worker/config.py`. New `backend/security/crypto.py` (`encrypt_secret`) and `worker/crypto.py`
+  (`decrypt_secret`) — Fernet, constructed at module import time so a malformed/missing key
+  fails the service at startup, not on first use. **This key is NOT yet set on any Railway
+  service** — I have no access to Railway's dashboard/CLI from this session, so I could not
+  perform or confirm that step myself. **Action required before this migration is deployed**:
+  generate one key (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
+  and set the identical value as `CREDENTIAL_ENCRYPTION_KEY` on all three Railway services
+  (`api`, `worker`/us-east, `worker-eu-west`) — deploying without this first will crash all
+  three on boot the same way a missing `JWT_SECRET` always has. Documented in both READMEs'
+  env-var tables and the "Deploying to Railway" section.
+- **Validation** (`backend/routers/targets.py`, shared by `POST /targets` and the new
+  `PATCH /targets/{id}`): `request_method` restricted to `GET`/`POST`/`HEAD`;
+  `keyword_match_mode` restricted to `contains`/`not_contains`; explicit `request_method="HEAD"`
+  + `keyword_match` set → 400; `basic_auth_username`/`basic_auth_password` must be given
+  together, never just one → 400.
+- **New `PATCH /targets/{id}`** — didn't exist before this prompt; scoped narrowly to name +
+  the new customization fields only (no `url` editing, no pause/interval — those stay separate
+  Phase 6 features). Uses pydantic's `exclude_unset` so an omitted field is left alone and an
+  explicit `null` clears it — except `basic_auth_password`, which is the deliberate
+  "blank/omitted always means unchanged" exception matching the edit-form UX (username shown
+  back, password never is); clearing `basic_auth_username` removes basic auth entirely.
+  404-not-403 on a target that doesn't exist or isn't owned by the caller, same as every other
+  target-scoped endpoint — added to both `test_ownership.py`'s cross-user and anonymous-access
+  tests. The decrypted (and encrypted) password is never included in `TargetResponse` at all,
+  by construction — there's no field for it to leak through.
+- **`worker/checker.py`**: `check_url`/`_follow_with_ssrf_check` gained `method`/`headers`/
+  `auth`/`keyword_match`/`keyword_match_mode` params, threaded straight into httpx's native
+  `headers=`/`auth=` kwargs on every hop. SSRF/redirect revalidation itself is untouched — every
+  hop's `Location` is still re-checked exactly as before, regardless of what's configured.
+  A failed keyword condition writes `is_up=False` with a distinctly-prefixed `checks.error`
+  string ("Keyword match failed: expected/unexpected ...") — no new column, matching the
+  existing SSRF/redirect error-message convention.
+- **Real bug found and fixed via live verification, not caught by the unit tests**: when a
+  target has `keyword_match` set but no explicit `request_method` (the expected common case),
+  the original HEAD-then-GET-on-failure default would try HEAD first — and since HEAD has no
+  response body, a keyword check against it would spuriously report "not found" even on a page
+  that genuinely contains the keyword, every single time. My own worker tests didn't catch this
+  because every keyword-match test passed an explicit `method="GET"`. Fixed in `check_url`:
+  `method=None` now means GET (not HEAD) whenever `keyword_match` is set. Confirmed against the
+  real bug live: a real target against `https://example.com/` with `keyword_match="Example
+  Domain"` and no explicit method first failed with the spurious HEAD-body error, then
+  succeeded (`is_up=true, error=null`) immediately after the fix and a worker rebuild/restart.
+  Added a regression test for exactly this case.
+- **`worker/main.py`**: new `_init_connection` hook registers a jsonb codec on every pooled
+  asyncpg connection (`request_headers` is the first jsonb column this raw-asyncpg codepath has
+  ever needed to read/write — asyncpg doesn't do this automatically outside SQLAlchemy).
+  `claim_due_targets`'s SELECT now also pulls the six new `targets` columns; `check_one` decrypts
+  `basic_auth_password_encrypted` (if both username and password are set) into an
+  `httpx.BasicAuth`, wrapped in its own try/except so a decrypt failure (most likely: the two
+  services' `CREDENTIAL_ENCRYPTION_KEY` values have drifted) is logged distinctly and the check
+  proceeds unauthenticated rather than being misreported as "target may have been deleted
+  mid-check" by the existing broad catch-all.
+- **Tests**: 24 new/updated across both suites — backend: `test_target_customization.py` (17:
+  create/PATCH validation, blank-means-unchanged, clear-via-null, 404 ownership, encrypted
+  password never returned), `test_crypto.py` (2), `test_config.py` (+2, the
+  `CREDENTIAL_ENCRYPTION_KEY` fail-fast pair), `test_ownership.py` (extended with PATCH cases).
+  Worker: `test_request_customization.py` (10: explicit method/headers/auth passed through,
+  both keyword-match modes pass/fail, keyword-match skipped when the status is already down,
+  the HEAD-vs-GET regression above), `test_crypto.py` (2, round-trip + wrong-key rejection).
+  145 backend tests (was 122 at the 5.9 close), 48 worker tests (was 36), all passing against
+  freshly rebuilt images.
+- **Verified end-to-end against the real running stack, not just tests**: rebuilt `api`/
+  `worker`, confirmed migration `009 → 010` applied cleanly; created real targets exercising
+  every new field against real public endpoints — custom `POST` + header against
+  `httpbin.org/post` (real 200, header genuinely sent), keyword-match against
+  `example.com` (caught the HEAD-body bug live, then confirmed fixed), and — the strongest
+  proof — basic auth against `httpbin.org/basic-auth/myuser/mypass`, an endpoint that returns
+  401 unless the exact credentials are presented: got a real `200 OK`, proving the full
+  encrypt-at-creation → store ciphertext → worker-decrypt → real HTTP Basic Auth pipeline
+  works end to end. Re-confirmed SSRF-at-creation still blocks a metadata-IP URL (400). All
+  verification targets/user deleted afterward via the real `DELETE /auth/me` cascade, confirmed
+  via a subsequent `401` on login. Stack left healthy (`db`/`api`/`worker` all `Up`).
+- Not touched in this prompt, per its explicit scope: any frontend UI for these fields (backend/
+  worker only, as asked), pause/resume, check interval, groups/tags, any other Phase 6 feature.
+
+**Next: continue Phase 6 per the 6.1 build order — step 2, pause/resume + configurable check
+interval** (bundle its migration with this prompt's `targets` migration's neighbor, per the 6.1
+report's reasoning — same table, avoid two back-to-back migrations touching it). Before that
+work is deployed, **`CREDENTIAL_ENCRYPTION_KEY` must be generated and set identically on all
+three Railway services** — flagged above, not yet done, genuinely blocking.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

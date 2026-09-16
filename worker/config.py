@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     # misconfigured worker can't silently report under the wrong (or no) region.
     REGION: str = "local"
 
+    # Must be set to the exact same value as the backend's CREDENTIAL_ENCRYPTION_KEY — this
+    # worker decrypts basic-auth credentials the backend encrypted at target-creation/edit
+    # time (see crypto.py). No default, same required/fail-fast treatment as the backend's
+    # copy of this setting (which itself mirrors JWT_SECRET's treatment) — a missing key here
+    # would otherwise surface as a confusing crash on the first check of any target with
+    # basic auth configured, rather than at startup.
+    CREDENTIAL_ENCRYPTION_KEY: str
+
     @property
     def asyncpg_database_url(self) -> str:
         return _strip_asyncpg_dialect_suffix(self.DATABASE_URL)

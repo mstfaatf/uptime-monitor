@@ -11,9 +11,17 @@ from pydantic import ValidationError
 
 from config import Settings
 
+# A validly-shaped (but not real) Fernet key, distinct from conftest.py's session-wide default
+# — every test below that builds Settings(_env_file=None) needs *some* value here (it's
+# required, no default, same as JWT_SECRET), and being explicit here (rather than relying on
+# conftest's os.environ.setdefault, which monkeypatch.setenv would just overwrite anyway) keeps
+# each test's required env fully visible in the test itself.
+_SOME_ENCRYPTION_KEY = "6sUdjd1byZiA0mTCyMEK7unBIqh98ewrmQYNtCmetPY="
+
 
 def test_missing_jwt_secret_raises(monkeypatch):
     monkeypatch.delenv("JWT_SECRET", raising=False)
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     with pytest.raises(ValidationError) as exc_info:
         # _env_file=None: don't fall back to a real .env file that might happen to set
         # JWT_SECRET on whichever machine runs this test.
@@ -23,12 +31,32 @@ def test_missing_jwt_secret_raises(monkeypatch):
 
 def test_jwt_secret_present_succeeds(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     settings = Settings(_env_file=None)
     assert settings.JWT_SECRET == "some-secret"
 
 
+def test_missing_credential_encryption_key_raises(monkeypatch):
+    # Same required, no-default, fail-fast treatment as JWT_SECRET — see config.py's comment
+    # on CREDENTIAL_ENCRYPTION_KEY for why (a missing key here would otherwise mean either
+    # silently storing plaintext basic-auth passwords or a confusing crash on first use).
+    monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.delenv("CREDENTIAL_ENCRYPTION_KEY", raising=False)
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None)
+    assert "CREDENTIAL_ENCRYPTION_KEY" in str(exc_info.value)
+
+
+def test_credential_encryption_key_present_succeeds(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
+    settings = Settings(_env_file=None)
+    assert settings.CREDENTIAL_ENCRYPTION_KEY == _SOME_ENCRYPTION_KEY
+
+
 def test_environment_production_forces_cookie_secure(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("COOKIE_SECURE", "false")  # deliberately wrong — must be overridden
     settings = Settings(_env_file=None)
@@ -37,6 +65,7 @@ def test_environment_production_forces_cookie_secure(monkeypatch):
 
 def test_environment_development_leaves_cookie_secure_false_by_default(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.delenv("COOKIE_SECURE", raising=False)
     settings = Settings(_env_file=None)
@@ -47,6 +76,7 @@ def test_environment_production_forces_cookie_samesite_none(monkeypatch):
     # Frontend (Vercel) and backend (Railway) are different origins in production — SameSite
     # must be "none" (never "lax") or the browser silently drops the cookie cross-site.
     monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("COOKIE_SAMESITE", "lax")  # deliberately wrong — must be overridden
     settings = Settings(_env_file=None)
@@ -55,6 +85,7 @@ def test_environment_production_forces_cookie_samesite_none(monkeypatch):
 
 def test_environment_development_leaves_cookie_samesite_lax_by_default(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.delenv("COOKIE_SAMESITE", raising=False)
     settings = Settings(_env_file=None)
@@ -63,6 +94,7 @@ def test_environment_development_leaves_cookie_samesite_lax_by_default(monkeypat
 
 def test_cors_origins_list_defaults_to_local_frontend(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     monkeypatch.delenv("CORS_ORIGINS", raising=False)
     settings = Settings(_env_file=None)
     assert settings.cors_origins_list == ["http://localhost:3000"]
@@ -70,6 +102,7 @@ def test_cors_origins_list_defaults_to_local_frontend(monkeypatch):
 
 def test_cors_origins_list_parses_comma_separated_values(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     monkeypatch.setenv(
         "CORS_ORIGINS", "https://app.vercel.app, https://custom-domain.com ,https://another.app"
     )
@@ -85,6 +118,7 @@ def test_listen_asyncpg_url_falls_back_to_database_url_when_unset(monkeypatch):
     # Local dev / Docker Compose: no pooler, so LISTEN_DATABASE_URL is never set and the
     # listener must keep using DATABASE_URL exactly as before this setting existed.
     monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@db:5432/uptime")
     monkeypatch.delenv("LISTEN_DATABASE_URL", raising=False)
     settings = Settings(_env_file=None)
@@ -96,6 +130,7 @@ def test_listen_asyncpg_url_prefers_listen_database_url_when_set(monkeypatch):
     # doesn't reliably deliver NOTIFYs to a LISTEN session); LISTEN_DATABASE_URL points at
     # Neon's direct endpoint instead, and must win.
     monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     monkeypatch.setenv(
         "DATABASE_URL",
         "postgresql+asyncpg://user:pass@ep-example-pooler.us-east-2.aws.neon.tech/db?ssl=require",
@@ -113,6 +148,7 @@ def test_listen_asyncpg_url_prefers_listen_database_url_when_set(monkeypatch):
 
 def test_listen_asyncpg_url_strips_asyncpg_dialect_suffix(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "some-secret")
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", _SOME_ENCRYPTION_KEY)
     monkeypatch.setenv("LISTEN_DATABASE_URL", "postgresql+asyncpg://a:b@host/db?ssl=require")
     settings = Settings(_env_file=None)
     assert settings.listen_asyncpg_url == "postgresql://a:b@host/db?ssl=require"
