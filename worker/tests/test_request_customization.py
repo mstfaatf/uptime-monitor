@@ -2,8 +2,9 @@
 keyword/content matching — all exercised against checker.check_url with a mocked
 httpx.AsyncClient, same style as test_checker_redirects.py. The SSRF/redirect-revalidation
 path itself is untouched by this feature (confirmed there, not re-tested here) — these tests
-only cover what's new: which method/headers/auth reach client.request, and how a keyword
-match/mismatch affects is_up/error.
+only cover what's new: which method/headers/auth reach client.request, how a keyword
+match/mismatch affects is_up/error, and that headers/auth are dropped on a cross-host redirect
+(a credential-leak fix — see _redirect_crosses_host in checker.py).
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -13,10 +14,10 @@ import httpx
 from checker import check_url
 
 
-def _fake_response(status_code, text=""):
+def _fake_response(status_code, text="", location=None):
     resp = MagicMock()
     resp.status_code = status_code
-    resp.headers = {}
+    resp.headers = {"Location": location} if location else {}
     resp.text = text
     resp.extensions = {}
     return resp
@@ -153,6 +154,73 @@ async def test_keyword_match_not_contains_mode_fails_when_present():
     assert result["is_up"] is False
     assert "Keyword match failed" in result["error"]
     assert "unexpected" in result["error"]
+
+
+async def test_same_host_redirect_keeps_headers_and_auth():
+    """A redirect that stays on the same host (e.g. http:// -> https://, or a different path)
+    is exactly the case httpx's own follow_redirects=True would also keep credentials for.
+    Uses real IP literals (matching test_checker_redirects.py's own convention), not domain
+    names — is_url_blocked() isn't mocked here and does a real socket.getaddrinfo() call on
+    each redirect hop's target, so a made-up hostname would fail DNS resolution and get
+    SSRF-blocked rather than actually exercising the redirect-following logic under test."""
+    client = _client()
+    auth = httpx.BasicAuth("admin", "hunter2")
+    headers = {"X-Api-Key": "abc123"}
+    client.request.side_effect = [
+        _fake_response(302, location="https://1.1.1.1/final"),
+        _fake_response(200),
+    ]
+
+    await check_url(client, "https://1.1.1.1/start", dns_ms=1, method="GET", headers=headers, auth=auth)
+
+    assert client.request.call_count == 2
+    assert client.request.call_args_list[1].kwargs["headers"] == headers
+    assert client.request.call_args_list[1].kwargs["auth"] is auth
+
+
+async def test_cross_host_redirect_drops_headers_and_auth():
+    """A real credential-leak vector: httpx's own follow_redirects=True strips Authorization
+    on a cross-origin redirect automatically, but this manual redirect loop (needed for
+    per-hop SSRF revalidation) bypasses that built-in protection entirely unless replicated
+    here — without this, a target's basic-auth password or a secret-bearing custom header
+    would be forwarded to whatever third-party host a 3xx response happens to name."""
+    client = _client()
+    auth = httpx.BasicAuth("admin", "hunter2")
+    headers = {"X-Api-Key": "abc123"}
+    client.request.side_effect = [
+        _fake_response(302, location="https://8.8.8.8/steal"),
+        _fake_response(200),
+    ]
+
+    await check_url(client, "https://1.1.1.1/start", dns_ms=1, method="GET", headers=headers, auth=auth)
+
+    assert client.request.call_count == 2
+    # First hop (the user's own configured target) still gets the real credentials.
+    assert client.request.call_args_list[0].kwargs["headers"] == headers
+    assert client.request.call_args_list[0].kwargs["auth"] is auth
+    # Second hop (a different host) must not receive them.
+    assert client.request.call_args_list[1].kwargs["headers"] is None
+    assert client.request.call_args_list[1].kwargs["auth"] is None
+
+
+async def test_cross_host_redirect_credentials_stay_dropped_even_if_redirected_back():
+    """Once dropped, credentials are not restored even if a later hop redirects back to the
+    original host — a deliberately conservative choice rather than re-deriving trust hop by
+    hop against a moving target."""
+    client = _client()
+    auth = httpx.BasicAuth("admin", "hunter2")
+    client.request.side_effect = [
+        _fake_response(302, location="https://8.8.8.8/bounce"),
+        _fake_response(302, location="https://1.1.1.1/back"),
+        _fake_response(200),
+    ]
+
+    await check_url(client, "https://1.1.1.1/start", dns_ms=1, method="GET", auth=auth)
+
+    assert client.request.call_count == 3
+    assert client.request.call_args_list[0].kwargs["auth"] is auth
+    assert client.request.call_args_list[1].kwargs["auth"] is None
+    assert client.request.call_args_list[2].kwargs["auth"] is None  # still dropped
 
 
 async def test_keyword_match_is_not_checked_when_the_response_is_already_down():

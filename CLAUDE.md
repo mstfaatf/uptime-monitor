@@ -3390,6 +3390,39 @@ remain untouched, per this prompt's explicit scope.
 - Not touched in this prompt, per its explicit scope: any frontend UI for these fields (backend/
   worker only, as asked), pause/resume, check interval, groups/tags, any other Phase 6 feature.
 
+**Follow-up fix (same day): a real credential-leak-on-cross-host-redirect vulnerability was
+caught by an automated post-commit security review** and fixed immediately, before any further
+work. `_follow_with_ssrf_check` passes a target's `headers`/`auth` on every redirect hop it
+follows manually (needed for the existing per-hop SSRF revalidation) — but manually following
+redirects bypasses httpx's own built-in protection, which strips `Authorization` on a
+cross-origin `follow_redirects=True` redirect automatically. Without a fix, a target's
+basic-auth password or a secret-bearing custom header (e.g. an API key) would have been
+forwarded to whatever third-party host a 3xx response happened to name, not just the host the
+user actually configured credentials for.
+- Fixed with a new `_redirect_crosses_host()` helper (hostname-only comparison, case/
+  trailing-dot normalized) — `headers`/`auth` are dropped for the remainder of the redirect
+  chain the moment a hop crosses to a different host, and deliberately never restored even if
+  a later hop redirects back to the original host (conservative by design, not re-derived
+  hop-by-hop against a moving target).
+- 3 new regression tests in `worker/tests/test_request_customization.py` (same-host redirect
+  keeps credentials, cross-host redirect drops them, credentials stay dropped after a
+  bounce-back) — using real IP literals (`1.1.1.1`/`8.8.8.8`), not domain names, matching
+  `test_checker_redirects.py`'s existing convention: `is_url_blocked()` isn't mocked in these
+  tests and does a real DNS lookup on every redirect hop, so a made-up hostname fails
+  resolution and gets SSRF-blocked instead of actually exercising the code under test — hit
+  this exact issue once while writing the tests, fixed by switching to IP literals. 51 worker
+  tests total (was 48), 145 backend tests unaffected (this fix is worker-only).
+- **Verified against real, live infrastructure, not just mocked tests**: created a real target
+  at `https://httpbin.org/redirect-to?url=...httpbingo.org/headers` (a genuine cross-host 302)
+  with a custom `X-Secret-Test` header and a `keyword_match` for that header's value —
+  `httpbingo.org/headers` echoes back whatever headers it actually received, so a keyword match
+  succeeding would have proven a real leak. Real result: `is_up=false, error="Keyword match
+  failed: expected \"should-not-leak\" not found"` — proof the header was genuinely not
+  forwarded to the second host. Verification target/account deleted afterward, confirmed via a
+  subsequent `401` on login.
+- Not committed as a separate prompt number — a direct fix to this same prompt's own work,
+  found before moving on, not a new feature.
+
 **Next: continue Phase 6 per the 6.1 build order — step 2, pause/resume + configurable check
 interval** (bundle its migration with this prompt's `targets` migration's neighbor, per the 6.1
 report's reasoning — same table, avoid two back-to-back migrations touching it). Before that

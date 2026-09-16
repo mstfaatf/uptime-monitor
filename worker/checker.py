@@ -17,7 +17,7 @@ import ssl
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -102,6 +102,15 @@ def _extract_cert(response: httpx.Response, url: str) -> tuple[datetime | None, 
         return None, None
 
 
+def _redirect_crosses_host(current_url: str, next_url: str) -> bool:
+    """True if next_url's hostname differs from current_url's (case/trailing-dot normalized).
+    Used to decide whether a target's basic-auth/custom-header credentials should be dropped
+    before following a redirect — see _follow_with_ssrf_check."""
+    host_a = (urlparse(current_url).hostname or "").lower().rstrip(".")
+    host_b = (urlparse(next_url).hostname or "").lower().rstrip(".")
+    return host_a != host_b
+
+
 async def _follow_with_ssrf_check(
     client: httpx.AsyncClient,
     method: str,
@@ -118,9 +127,17 @@ async def _follow_with_ssrf_check(
     http://169.254.169.254/ or http://127.0.0.1/, bypassing the guard entirely.
 
     headers/auth are a target's optional request customization (Phase 6, prompt 6.2) — passed
-    straight through to httpx on every hop, same as method. They have no bearing on the SSRF
-    check itself: every redirect hop's Location is still resolved and validated exactly as
-    before, regardless of what headers/auth are configured.
+    to httpx on every hop, same as method, UNTIL a redirect crosses to a different host, at
+    which point both are dropped for the remainder of the chain (see _redirect_crosses_host)
+    and never restored even if a later hop redirects back to the original host. This replicates
+    what httpx's own follow_redirects=True does automatically (it strips Authorization — and,
+    by the same reasoning, this app treats a target's custom headers the same way, since a
+    header can just as easily carry a secret, e.g. an API key) — protection this function's
+    manual redirect loop would otherwise bypass entirely, since it never goes through httpx's
+    own redirect machinery. Without this, a target's basic-auth password or a custom
+    Authorization/API-key header configured for the user's own service would be sent to
+    whatever host a 3xx response happens to point at, including a third party the user never
+    intended to hand credentials to.
 
     Returns a _HopResult built only from the final hop's response — timing/cert data from
     intermediate redirect hops is discarded, since it describes a connection we didn't end up
@@ -147,6 +164,9 @@ async def _follow_with_ssrf_check(
             current_dns_ms = int((time.perf_counter() - dns_start) * 1000)
             if blocked:
                 raise RedirectValidationError(f"Redirect target blocked: {reason}")
+            if _redirect_crosses_host(current_url, next_url):
+                headers = None
+                auth = None
             current_url = next_url
             continue
         tcp_ms, tls_ms, ttfb_ms = _extract_timings(trace_events)
