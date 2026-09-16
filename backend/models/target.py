@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,6 +37,15 @@ class Target(Base):
     basic_auth_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     keyword_match: Mapped[str | None] = mapped_column(String(500), nullable=True)
     keyword_match_mode: Mapped[str] = mapped_column(String(20), nullable=False, server_default="contains")
+
+    # Pause/resume + configurable interval (Phase 6, prompt 6.3) — see
+    # backend/alembic/versions/011_add_targets_pause_and_interval.py. paused=true excludes this
+    # target from the worker's claim query entirely (see worker/main.py's claim_due_targets),
+    # regardless of region. check_interval_seconds=NULL means "use the worker's global
+    # CHECK_INTERVAL_SECONDS default" (see reschedule_target's success branch) — preserves
+    # today's behavior for every target that hasn't set a custom interval.
+    paused: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    check_interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Worker scheduling state (next_check_at, consecutive_failures, claimed_at) used to live
     # directly on this table — see backend/alembic/versions/003_add_targets_scheduling_columns.py

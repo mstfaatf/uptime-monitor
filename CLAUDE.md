@@ -3429,5 +3429,72 @@ report's reasoning — same table, avoid two back-to-back migrations touching it
 work is deployed, **`CREDENTIAL_ENCRYPTION_KEY` must be generated and set identically on all
 three Railway services** — flagged above, not yet done, genuinely blocking.
 
+Phase 6, prompt 6.3 (pause/resume + configurable check interval) is complete — step 2 of the
+6.1 build order. Migration `010` had already shipped (prompt 6.2, pushed), so this is a new
+migration rather than a bundled one, per the prompt's own either/or. Tags/groups, analytics, and
+every other Phase 6 feature remain untouched, per this prompt's explicit scope. The
+`CREDENTIAL_ENCRYPTION_KEY` Railway blocker from 6.2 is still open — not this prompt's job to
+resolve, flagged again below.
+- **Schema**: migration `011_add_targets_pause_and_interval.py` adds `paused`
+  (`NOT NULL DEFAULT false`) and `check_interval_seconds` (nullable — `NULL` means "use the
+  worker's global `CHECK_INTERVAL_SECONDS`") to `targets`. `backend/models/target.py` updated
+  to match.
+- **`POST /targets/{id}/pause` and `POST /targets/{id}/resume`** (`backend/routers/targets.py`)
+  — both idempotent, both 404-not-403 on a target that doesn't exist or isn't owned by the
+  caller, same pattern as every other target-scoped endpoint; added to `test_ownership.py`'s
+  cross-user and anonymous-access tests alongside the dedicated new test file. `/resume`
+  directly writes `next_check_at = now()` to every region's `target_region_schedule` row for
+  the target — **the deliberate, narrow exception to that table's worker-only-write
+  convention** the prompt asked for, commented at its one call site and cross-referenced back
+  in `TargetRegionSchedule`'s own docstring so it's visible from either file.
+- **`check_interval_seconds` is settable via `POST /targets` and the existing
+  `PATCH /targets/{id}`** (not a new endpoint) — the prompt didn't specify how a user actually
+  sets the interval, and routing it through the general create/edit surface already built in
+  6.2 was the natural, lowest-scope-creep choice over inventing a third way to configure a
+  target. Added `MIN_CHECK_INTERVAL_SECONDS = 30` (matches `backoff.py`'s own base delay — the
+  fastest cadence anything in this system already retries at) as a floor-only validation, no
+  ceiling; reused across create and update via a new small `_validate_check_interval_seconds`
+  helper, kept separate from `_validate_request_customization` since it's a different concern
+  (scheduling, not the request itself). `TargetResponse`/`_target_to_response` extended with
+  `paused`/`check_interval_seconds`, same pattern 6.2 used for its own new fields. Pause state
+  is deliberately **not** settable via create/PATCH — only through the dedicated endpoints, so
+  it can never be flipped as a silent side effect of an unrelated field edit.
+- **`worker/main.py`**: `claim_due_targets`'s WHERE gained `AND NOT t.paused` (a paused target
+  is excluded from being selected at all, not filtered out after the fact) and its SELECT gained
+  `t.check_interval_seconds`. `reschedule_target` gained a `check_interval_seconds` parameter,
+  used only on the **success** branch (`check_interval_seconds or settings.CHECK_INTERVAL_SECONDS`)
+  — a deliberate design call not spelled out in the prompt: a **failing** target still backs off
+  on the standard curve regardless of any custom interval, since a fast custom cadence is meant
+  for a healthy target, not license to hammer one that's currently down. `check_one`/`run_cycle`
+  thread the new field straight through.
+- **Tests**: 3 new worker tests (`test_scheduling.py`: custom interval respected on success,
+  falls back to the global default when unset, ignored in favor of the backoff curve on
+  failure) plus extended SQL-substring assertions on `claim_due_targets`'s query
+  (`AND NOT t.paused`, `t.check_interval_seconds`) — 54 worker tests total (was 51). New
+  `backend/tests/test_pause_resume.py` (11 tests: pause/resume state changes, idempotency,
+  ownership, auth-required, interval validation) plus 4 new assertions in
+  `test_ownership.py` — 156 backend tests total (was 145).
+- **Verified end-to-end against the real running stack, not just tests**: rebuilt `api`/
+  `worker`, confirmed migration `010 → 011` applied cleanly. Created a real target, let it get
+  a genuine first check, paused it, forced it due via direct SQL, and confirmed across two
+  scheduler ticks (12s) that it was never picked up — the worker log shows zero lines for that
+  target id in that window, and `checked_at` stayed byte-identical. Resumed it and confirmed a
+  fresh real check landed within ~8s (`checked_at` advanced, `consecutive_failures`
+  incremented) — proof `/resume` genuinely forces immediate pickup rather than waiting out the
+  backoff-computed `next_check_at` that would otherwise have been ~30-40s further out. Created
+  a second real target with `check_interval_seconds=30` against a genuinely healthy URL and
+  confirmed via a direct query that `target_region_schedule.next_check_at` landed ~19s out
+  (i.e. ~30s after the check) rather than anywhere near the 300s global default. Re-confirmed
+  SSRF-at-creation and the HEAD+keyword_match rejection from 6.2 still hold. All verification
+  data deleted afterward via the real `DELETE /auth/me` cascade, confirmed via a subsequent
+  `401` on login. Stack left healthy (`db`/`api`/`worker` all `Up`).
+- Not touched in this prompt, per its explicit scope: tags/groups, analytics, webhooks, API
+  keys, retention, any other Phase 6 feature area from the 6.1 report.
+
+**Next: continue Phase 6 per the 6.1 build order — step 3, groups** (independent, low-risk —
+per the 6.1 report, worth confirming the single-group-vs-multi-tag shape first, still an open
+question). `CREDENTIAL_ENCRYPTION_KEY` remains **not yet set on any Railway service** — still
+blocking any deploy of everything shipped since prompt 6.2, not just this prompt's own work.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

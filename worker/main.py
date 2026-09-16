@@ -6,8 +6,11 @@ backend/alembic/versions/006_add_region_and_target_schedule.py. This worker inst
 ever reads/writes rows for its own settings.REGION: each checking region tracks its own
 due-time and backoff/claim state for a target independently, since reachability/backoff in one
 region says nothing about another. A successful check reschedules the target at the normal
-cadence (CHECK_INTERVAL_SECONDS); a failed check backs off (see backoff.py) so a
-persistently-down target isn't retried on the same tight schedule as a healthy one.
+cadence — CHECK_INTERVAL_SECONDS globally, or a target's own check_interval_seconds when it has
+one configured (Phase 6, prompt 6.3); a failed check backs off (see backoff.py) regardless of
+that custom interval, so a persistently-down target isn't retried on its own tight schedule any
+more than a healthy one would be. A paused target (targets.paused) is excluded from
+claim_due_targets' WHERE clause entirely — it's never selected, never checked, until resumed.
 
 Row-claiming: a bare SELECT of due rows would let two concurrent worker instances *in the same
 region* both select and check the same due target, racing on the reschedule write.
@@ -129,9 +132,11 @@ async def claim_due_targets(conn: asyncpg.Connection, region: str) -> list[dict]
     check) or older than CLAIM_TTL_SECONDS (stale — treat as abandoned).
 
     Also selects each target's request-customization fields (Phase 6, prompt 6.2:
-    request_method/request_headers/basic_auth_*/keyword_match*) so check_one has everything it
-    needs for this check without a second query — these are per-target, not per-region, so
-    they come straight off `targets`, not the schedule table.
+    request_method/request_headers/basic_auth_*/keyword_match*) and its pause/interval fields
+    (Phase 6, prompt 6.3: check_interval_seconds — paused targets are excluded by the WHERE
+    clause below, not selected at all) so check_one has everything it needs for this check
+    without a second query — these are per-target, not per-region, so they come straight off
+    `targets`, not the schedule table.
     """
     await ensure_schedule_rows(conn, region)
 
@@ -140,10 +145,12 @@ async def claim_due_targets(conn: asyncpg.Connection, region: str) -> list[dict]
             """
             SELECT t.id, t.url, trs.consecutive_failures,
                    t.request_method, t.request_headers, t.basic_auth_username,
-                   t.basic_auth_password_encrypted, t.keyword_match, t.keyword_match_mode
+                   t.basic_auth_password_encrypted, t.keyword_match, t.keyword_match_mode,
+                   t.check_interval_seconds
             FROM target_region_schedule trs
             JOIN targets t ON t.id = trs.target_id
             WHERE trs.region = $1
+              AND NOT t.paused
               AND trs.next_check_at <= now()
               AND (trs.claimed_at IS NULL OR trs.claimed_at < now() - make_interval(secs => $2))
             FOR UPDATE OF trs SKIP LOCKED
@@ -210,16 +217,21 @@ async def reschedule_target(
     region: str,
     is_up: bool,
     consecutive_failures_before: int,
+    check_interval_seconds: int | None = None,
 ) -> None:
     """
     Update this (target_id, region)'s scheduling state after a check. Success resets the
-    failure streak and returns to the normal CHECK_INTERVAL_SECONDS cadence; failure increments
-    the streak and schedules the next attempt using exponential backoff with jitter. Either
-    way, this clears claimed_at — the claim's job (keeping another worker instance in this same
-    region from grabbing this target while it was being checked) is done once this write lands.
+    failure streak and returns to the normal cadence — the target's own check_interval_seconds
+    (Phase 6, prompt 6.3) if it has one configured, else the worker's global
+    CHECK_INTERVAL_SECONDS default; failure increments the streak and schedules the next
+    attempt using exponential backoff with jitter regardless of check_interval_seconds (a
+    failing target should back off, not retry on its custom fast cadence). Either way, this
+    clears claimed_at — the claim's job (keeping another worker instance in this same region
+    from grabbing this target while it was being checked) is done once this write lands.
     """
     if is_up:
-        next_check_at = datetime.now(timezone.utc) + timedelta(seconds=settings.CHECK_INTERVAL_SECONDS)
+        interval = check_interval_seconds or settings.CHECK_INTERVAL_SECONDS
+        next_check_at = datetime.now(timezone.utc) + timedelta(seconds=interval)
         await conn.execute(
             "UPDATE target_region_schedule SET consecutive_failures = 0, next_check_at = $3, claimed_at = NULL "
             "WHERE target_id = $1 AND region = $2",
@@ -255,12 +267,15 @@ async def check_one(
     basic_auth_password_encrypted: str | None,
     keyword_match: str | None,
     keyword_match_mode: str,
+    check_interval_seconds: int | None,
 ) -> None:
     """Check a single target, bounded by the semaphore, record its result, and reschedule it.
     request_method/request_headers/basic_auth_*/keyword_match* are this target's optional
     request-customization fields (Phase 6, prompt 6.2), read off `targets` by
     claim_due_targets — None/default means "no customization," behaving exactly as before this
-    feature existed."""
+    feature existed. check_interval_seconds (Phase 6, prompt 6.3) is threaded through to
+    reschedule_target's success branch unchanged; paused targets never reach this function at
+    all (claim_due_targets excludes them)."""
     async with semaphore:
         auth: httpx.BasicAuth | None = None
         if basic_auth_username and basic_auth_password_encrypted:
@@ -347,7 +362,9 @@ async def check_one(
                     tls_cert_issuer=result["tls_cert_issuer"],
                     region=region,
                 )
-                await reschedule_target(conn, target_id, region, result["is_up"], consecutive_failures_before)
+                await reschedule_target(
+                    conn, target_id, region, result["is_up"], consecutive_failures_before, check_interval_seconds
+                )
                 # NOTIFY inside the same transaction: Postgres only actually delivers a
                 # notification once its transaction commits, so if the insert/reschedule above
                 # gets rolled back (e.g. the FK-violation case caught below), no notification
@@ -398,6 +415,7 @@ async def run_cycle(pool: asyncpg.Pool, client: httpx.AsyncClient) -> None:
                 basic_auth_password_encrypted=row["basic_auth_password_encrypted"],
                 keyword_match=row["keyword_match"],
                 keyword_match_mode=row["keyword_match_mode"],
+                check_interval_seconds=row["check_interval_seconds"],
             )
             for row in targets
         )

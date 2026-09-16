@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -29,6 +29,13 @@ router = APIRouter(prefix="/targets", tags=["targets"])
 # deliberately kept small rather than opening up arbitrary HTTP verbs.
 ALLOWED_REQUEST_METHODS = {"GET", "POST", "HEAD"}
 ALLOWED_KEYWORD_MATCH_MODES = {"contains", "not_contains"}
+
+# Pause/resume + configurable check interval (Phase 6, prompt 6.3). A floor, not a ceiling —
+# there's no reason to cap how infrequently a target is checked, but an interval too low would
+# let a target hammer a site it doesn't control (or this worker's own DB pool) far faster than
+# the global default ever would. 30s matches worker/backoff.py's own base delay — the fastest
+# cadence anything in this system already retries at.
+MIN_CHECK_INTERVAL_SECONDS = 30
 
 # How often the SSE stream sends a comment line if there's nothing new to report — keeps
 # intermediate proxies/load balancers from timing out an idle connection, and gives the
@@ -68,6 +75,10 @@ class TargetCreate(BaseModel):
     basic_auth_password: str | None = None
     keyword_match: str | None = None
     keyword_match_mode: str = "contains"
+    # None means "use the worker's global CHECK_INTERVAL_SECONDS default." Pause state is
+    # deliberately NOT settable here — a target is always created active; pausing is its own
+    # state transition via POST /targets/{id}/pause, not a create-time flag.
+    check_interval_seconds: int | None = None
 
 
 class TargetUpdate(BaseModel):
@@ -78,7 +89,9 @@ class TargetUpdate(BaseModel):
 
     Deliberately does NOT include `url` — editing a target's URL isn't supported by this
     endpoint (or anywhere else yet); this endpoint exists specifically for the
-    request-customization fields below plus `name`.
+    request-customization fields below plus `name`. Also does NOT include `paused` — pause
+    state changes only through POST /targets/{id}/pause and /resume, never as a silent side
+    effect of an unrelated field edit.
     """
 
     name: str | None = None
@@ -88,6 +101,7 @@ class TargetUpdate(BaseModel):
     basic_auth_password: str | None = None
     keyword_match: str | None = None
     keyword_match_mode: str | None = None
+    check_interval_seconds: int | None = None
 
 
 class TargetResponse(BaseModel):
@@ -100,14 +114,16 @@ class TargetResponse(BaseModel):
     basic_auth_username: str | None
     keyword_match: str | None
     keyword_match_mode: str
+    paused: bool
+    check_interval_seconds: int | None
 
     class Config:
         from_attributes = True
 
 
 def _target_to_response(target: Target) -> TargetResponse:
-    """Build a TargetResponse from an ORM Target — shared by create/list/update so the field
-    list can't silently drift between the three call sites. basic_auth_password_encrypted is
+    """Build a TargetResponse from an ORM Target — shared by create/list/update/pause/resume so
+    the field list can't silently drift between call sites. basic_auth_password_encrypted is
     deliberately never included here or anywhere else: the decrypted password is never
     returned by any endpoint, and neither is the encrypted form (there's no legitimate reason
     for a client to see it — an edit form shows only the username, per the "blank means
@@ -122,7 +138,19 @@ def _target_to_response(target: Target) -> TargetResponse:
         basic_auth_username=target.basic_auth_username,
         keyword_match=target.keyword_match,
         keyword_match_mode=target.keyword_match_mode,
+        paused=target.paused,
+        check_interval_seconds=target.check_interval_seconds,
     )
+
+
+def _validate_check_interval_seconds(check_interval_seconds: int | None) -> None:
+    """Shared validation for create and update — a floor only (see MIN_CHECK_INTERVAL_SECONDS),
+    no ceiling. Raises HTTPException(400) on violation."""
+    if check_interval_seconds is not None and check_interval_seconds < MIN_CHECK_INTERVAL_SECONDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"check_interval_seconds must be at least {MIN_CHECK_INTERVAL_SECONDS} or omitted",
+        )
 
 
 def _validate_request_customization(
@@ -426,6 +454,7 @@ async def create_target(
         basic_auth_username=body.basic_auth_username,
         basic_auth_password_set=bool(body.basic_auth_password),
     )
+    _validate_check_interval_seconds(body.check_interval_seconds)
 
     result = await db.execute(
         select(Target).where(
@@ -451,6 +480,7 @@ async def create_target(
         ),
         keyword_match=(body.keyword_match or None),
         keyword_match_mode=body.keyword_match_mode,
+        check_interval_seconds=body.check_interval_seconds,
     )
     db.add(target)
     await db.flush()
@@ -465,12 +495,14 @@ async def update_target(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a target's name and/or request-customization fields (method/headers/basic-auth/
-    keyword-match). Does NOT support changing the URL, pause state, or check interval — url
-    editing isn't supported anywhere yet, and pause/interval are separate Phase 6 features not
-    built in this prompt. An edit takes effect on the target's next naturally-scheduled check;
-    this endpoint doesn't reach into target_region_schedule to force an immediate recheck (that
-    reset is reserved for pause/resume, a deliberate, narrow exception — not extended here).
+    """Update a target's name, request-customization fields (method/headers/basic-auth/
+    keyword-match), and/or check_interval_seconds. Does NOT support changing the URL or pause
+    state — url editing isn't supported anywhere yet, and pause/resume are their own dedicated
+    endpoints below (a state transition, not a field edit — see their docstrings for why).
+    An edit here takes effect on the target's next naturally-scheduled check; this endpoint
+    doesn't reach into target_region_schedule to force an immediate recheck (that reset is
+    reserved for /resume, a deliberate, narrow exception to target_region_schedule's
+    worker-only-write convention — not extended here).
 
     404 (not 403) for a target that doesn't exist or isn't owned by the caller, same pattern as
     every other target-scoped endpoint.
@@ -501,6 +533,8 @@ async def update_target(
         target.keyword_match = body.keyword_match or None
     if "keyword_match_mode" in provided and body.keyword_match_mode is not None:
         target.keyword_match_mode = body.keyword_match_mode
+    if "check_interval_seconds" in provided:
+        target.check_interval_seconds = body.check_interval_seconds
 
     if "basic_auth_username" in provided:
         new_username = body.basic_auth_username or None
@@ -529,7 +563,62 @@ async def update_target(
         basic_auth_username=target.basic_auth_username,
         basic_auth_password_set=target.basic_auth_password_encrypted is not None,
     )
+    _validate_check_interval_seconds(target.check_interval_seconds)
 
+    await db.flush()
+    await db.refresh(target)
+    return _target_to_response(target)
+
+
+@router.post("/{target_id}/pause", response_model=TargetResponse)
+async def pause_target(
+    target_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pause a target: the worker's claim query excludes a paused target entirely (see
+    worker/main.py's claim_due_targets — `AND NOT t.paused` in its WHERE clause), across every
+    region, until it's resumed. Idempotent — pausing an already-paused target just re-confirms
+    the state, no error. 404 (not 403) for a target that doesn't exist or isn't owned by the
+    caller, same pattern as every other target-scoped endpoint."""
+    result = await db.execute(select(Target).where(Target.id == target_id, Target.user_id == current_user.id))
+    target = result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+    target.paused = True
+    await db.flush()
+    await db.refresh(target)
+    return _target_to_response(target)
+
+
+@router.post("/{target_id}/resume", response_model=TargetResponse)
+async def resume_target(
+    target_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Resume a paused target — and make it feel immediate: rather than leaving it to whatever
+    next_check_at was last written (which could be minutes away, or arbitrarily stale after a
+    long pause), this directly forces every region's schedule row for this target due right
+    now. Idempotent — safe to call on a target that isn't currently paused (still resets
+    next_check_at, forcing a prompt recheck; harmless).
+
+    Deliberate, narrow exception to target_region_schedule's worker-only-write convention (see
+    models/target_region_schedule.py's docstring: "written and read exclusively by the
+    worker"): this is the one place the API writes to it directly, specifically so a resume
+    doesn't have to wait out a stale schedule. Every other read/write of that table stays
+    worker-owned. 404 (not 403) for a target that doesn't exist or isn't owned by the caller,
+    same pattern as every other target-scoped endpoint.
+    """
+    result = await db.execute(select(Target).where(Target.id == target_id, Target.user_id == current_user.id))
+    target = result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+    target.paused = False
+    await db.execute(
+        text("UPDATE target_region_schedule SET next_check_at = now() WHERE target_id = :target_id"),
+        {"target_id": target_id},
+    )
     await db.flush()
     await db.refresh(target)
     return _target_to_response(target)

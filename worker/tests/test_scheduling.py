@@ -126,6 +126,7 @@ async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim
             "basic_auth_password_encrypted": None,
             "keyword_match": None,
             "keyword_match_mode": "contains",
+            "check_interval_seconds": None,
         }
     ]
 
@@ -148,6 +149,11 @@ async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim
     assert "t.basic_auth_password_encrypted" in select_sql
     assert "t.keyword_match" in select_sql
     assert "t.keyword_match_mode" in select_sql
+    # Pause/interval fields (Phase 6, prompt 6.3): a paused target must never even be selected
+    # (not just skipped after the fact), and check_interval_seconds must be selected so
+    # reschedule_target's success branch can use it.
+    assert "AND NOT t.paused" in select_sql
+    assert "t.check_interval_seconds" in select_sql
     assert region_arg == "us-east"
     assert ttl_arg == main.CLAIM_TTL_SECONDS
 
@@ -190,6 +196,46 @@ async def test_reschedule_target_on_success_resets_failures_and_uses_normal_inte
     assert abs((next_check_at - expected).total_seconds()) < 2
 
 
+async def test_reschedule_target_on_success_uses_custom_interval_when_set():
+    """A target's own check_interval_seconds (Phase 6, prompt 6.3) must override the global
+    CHECK_INTERVAL_SECONDS default on a successful check's reschedule."""
+    conn = _mock_conn()
+    before = datetime.now(timezone.utc)
+
+    await main.reschedule_target(
+        conn,
+        target_id=1,
+        region="us-east",
+        is_up=True,
+        consecutive_failures_before=0,
+        check_interval_seconds=60,
+    )
+
+    _, _, _, next_check_at = conn.execute.call_args.args
+    expected = before + timedelta(seconds=60)
+    assert abs((next_check_at - expected).total_seconds()) < 2
+    # And definitely NOT the global default (300s) — would be way outside this tolerance.
+    assert abs((next_check_at - (before + timedelta(seconds=main.settings.CHECK_INTERVAL_SECONDS))).total_seconds()) > 100
+
+
+async def test_reschedule_target_on_success_falls_back_to_global_default_when_interval_unset():
+    conn = _mock_conn()
+    before = datetime.now(timezone.utc)
+
+    await main.reschedule_target(
+        conn,
+        target_id=1,
+        region="us-east",
+        is_up=True,
+        consecutive_failures_before=0,
+        check_interval_seconds=None,
+    )
+
+    _, _, _, next_check_at = conn.execute.call_args.args
+    expected = before + timedelta(seconds=main.settings.CHECK_INTERVAL_SECONDS)
+    assert abs((next_check_at - expected).total_seconds()) < 2
+
+
 async def test_reschedule_target_on_failure_increments_and_backs_off():
     conn = _mock_conn()
     before = datetime.now(timezone.utc)
@@ -207,3 +253,25 @@ async def test_reschedule_target_on_failure_increments_and_backs_off():
     # failure #3 -> unjittered 120s (30 * 2^2), +/-20% jitter => roughly [96, 144]; padded
     # slightly for test execution time.
     assert 90 <= delay <= 150
+
+
+async def test_reschedule_target_on_failure_ignores_custom_interval_and_still_backs_off():
+    """A failing target backs off on the standard curve regardless of check_interval_seconds —
+    a custom fast cadence is for a healthy target, not license to hammer a target that's
+    currently down."""
+    conn = _mock_conn()
+    before = datetime.now(timezone.utc)
+
+    await main.reschedule_target(
+        conn,
+        target_id=1,
+        region="us-east",
+        is_up=False,
+        consecutive_failures_before=2,
+        check_interval_seconds=30,  # deliberately shorter than the failure backoff would be
+    )
+
+    _, _, _, new_failures, next_check_at = conn.execute.call_args.args
+    assert new_failures == 3
+    delay = (next_check_at - before).total_seconds()
+    assert 90 <= delay <= 150  # same backoff curve as the no-custom-interval failure test above

@@ -8,7 +8,11 @@ about another.
 
 Written and read exclusively by the worker via raw asyncpg SQL (see worker/main.py) — this
 model exists so the table is represented in Base.metadata for Alembic autogenerate parity, not
-because the FastAPI backend queries it today.
+because the FastAPI backend queries it today. **One deliberate exception** (Phase 6, prompt
+6.3): `POST /targets/{id}/resume` (backend/routers/targets.py) writes `next_check_at = now()`
+directly to this table, across every region, so resuming a paused target doesn't have to wait
+out a stale/future next_check_at — narrow and explicitly noted at its one call site, not a
+general loosening of the worker-only-write rule above.
 """
 
 from datetime import datetime
