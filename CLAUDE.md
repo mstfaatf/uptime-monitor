@@ -3249,10 +3249,61 @@ Phase 0-4 invariant checked held with no regressions.
   subset), any UI refresh/new feature work, a full security audit beyond this phase's baseline
   hardening pass, and the README rewrite/ADRs/`LOAD_TESTING.md` against the live instance.
 
-**Phase 5 complete. Next: Phase 6 — presentation** (README rewrite, ADRs, `LOAD_TESTING.md`
-against the live deployed instance) per CLAUDE.md's phase plan. **Planning for Phase 6 will
-happen in a separate conversation before prompts are drafted** — do not draft Phase 6 prompts
-or begin its work from this status note alone.
+**Phase 5 complete.**
+
+Phase 6, prompt 6.1 (familiarization + design report) is complete. Read-only — no application
+code, no new files, per this prompt's scope. Phase 6 is now scoped as engineering work (fixes,
+13 feature additions, UI/UX improvements, infra/scaling), with presentation (README/ADRs/load
+testing) moved out to a separate Phase 7. Full report delivered directly in the conversation
+(not saved to a file); reread the conversation history if picking this up cold.
+- Reviewed `backend/routers/targets.py`, all `backend/models/`, `backend/security/ssrf.py`,
+  `backend/rate_limit.py`, `backend/config.py`, `backend/auth/`, `backend/realtime.py`,
+  `backend/mail/`, `backend/export.py`, `worker/checker.py`, `worker/main.py`,
+  `worker/config.py`, and migrations 001-009 before writing the report.
+- Proposed schema for all five new feature areas: `targets` gains request customization
+  columns (method/headers/basic-auth/keyword-match) plus `paused`/`check_interval_seconds`/
+  `group_id`; new `groups`, `webhooks`, `api_keys` tables. Flagged one real open question:
+  "groups/tags" as worded could mean single-membership groups (proposed, simpler) or
+  multi-tag labeling (a join table, additive later) — needs confirming before building.
+- Keyword/content monitoring: proposed hooking into `checker.py` after a status-code pass,
+  recording failures as a distinctly-prefixed `checks.error` string (no new column), and
+  rejecting HEAD+keyword_match at the API layer rather than silently overriding it in the
+  worker.
+- Basic auth credentials: recommended Fernet encryption at rest via a new required,
+  no-default `CREDENTIAL_ENCRYPTION_KEY` (mirrors `JWT_SECRET`'s fail-fast treatment, not
+  `RESEND_API_KEY`'s optional one) — flagged that this key must be generated and set on all
+  three Railway services *before* the migration ships, same lesson as Phase 0/5's
+  `JWT_SECRET` deploy coordination.
+- Webhooks: proposed a signed-JSON-payload/single-attempt-no-retry design (mirroring
+  `mail/client.py`'s existing philosophy), reusing `backend/security/ssrf.py` at both creation
+  and send-time (send-time check wrapped in `asyncio.to_thread`, no redirect-following).
+  **Flagged the one real hidden dependency for the whole phase**: today's
+  `_evaluate_downtime_alert`/`_evaluate_cert_expiry_alert` in `realtime.py` conflate "should
+  this condition alert at all" with "send via email" — webhooks need that split into
+  condition-eligibility vs. per-channel fan-out *before* webhook sending is added, or a
+  webhook would incorrectly inherit the email preference toggle.
+- API keys: proposed mirroring `password_reset_tokens`' exact hash-only-storage pattern,
+  two scopes (read/full, keys can never manage other keys), and a rate-limiting scheme keyed
+  by the API key itself rather than IP (existing `slowapi` limits stay IP-keyed and untouched).
+- Retention: proposed a worker-side second `asyncio` task on a ~24h timer (no new deployed
+  service), default 90-day window matching the existing heatmap's own window, and flagged an
+  undecided product question (plain delete vs. rollup-then-delete) rather than picking one
+  unilaterally. Proposed the CSV export note a pruned range rather than silently
+  under-representing history.
+- Pagination: proposed a cursor-based design (stable under the concurrent insert/delete that
+  retention introduces) but flagged that nothing in the current frontend actually needs it yet
+  — recommended confirming which of the 13 planned features drives the need before building it.
+- Build order: noted that no prior "agreed" Phase 6 build order was actually present in this
+  conversation or CLAUDE.md despite the prompt referencing one, and proposed an original
+  dependency-ordered sequence instead, explicitly asking for the real one if it exists
+  elsewhere. Flagged the alerting-restructuring-before-webhooks dependency as the one ordering
+  detail most likely to get missed.
+- No code changes, no new files, no migrations in this prompt — report only, pending review
+  before Phase 6 implementation begins.
+
+**Next: Phase 6 implementation, pending review of the above report** — in particular the
+groups-vs-tags shape, the retain-vs-rollup retention choice, and confirmation of (or a
+correction to) the proposed build order.
 
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
