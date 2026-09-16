@@ -3491,10 +3491,16 @@ resolve, flagged again below.
 - Not touched in this prompt, per its explicit scope: tags/groups, analytics, webhooks, API
   keys, retention, any other Phase 6 feature area from the 6.1 report.
 
+`CREDENTIAL_ENCRYPTION_KEY` has been generated and set on Railway by the user (confirmed
+directly, not verified by this session — no Railway access) — the deploy blocker flagged since
+6.2 is resolved. Not independently confirmed which of the three services (`api`,
+`worker`/us-east, `worker-eu-west`) got it or that all three values match exactly; worth a
+real end-to-end production check (same technique as 6.2's basic-auth live verification) once
+this branch is actually deployed, rather than assuming it's correct.
+
 **Next: continue Phase 6 per the 6.1 build order — step 3, groups** (independent, low-risk —
 per the 6.1 report, worth confirming the single-group-vs-multi-tag shape first, still an open
-question). `CREDENTIAL_ENCRYPTION_KEY` remains **not yet set on any Railway service** — still
-blocking any deploy of everything shipped since prompt 6.2, not just this prompt's own work.
+question).
 
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
