@@ -4012,5 +4012,96 @@ everything else confirmed passing.
   real `DELETE /auth/me` cascade, confirmed via direct SQL count. Stack left healthy
   (`db`/`api`/`worker`/`worker-eu-west` all `Up`).
 
+Prompt 6.11 (dashboard overview strip + loading skeletons) is complete. First frontend prompt
+after Phase 6's backend build-out. Uses only the existing Phase 3 design tokens/components — no
+new colors, typefaces, or motion primitives introduced.
+- **Overview strip additions** (`app/dashboard/page.tsx`): a new "uptime (live)" stat in the
+  existing summary strip, and a new persistent banner above it. **Aggregate uptime % — the
+  methodology is stated explicitly in code, per the prompt's ask**: the fraction of
+  (target, region) pairs that have reported at least one check and are currently `is_up`,
+  averaged flat across every pair (not per-target — a target with 2 regions contributes 2
+  pairs, weighted the same as any other pair). A pair with no check yet is excluded from both
+  the numerator and denominator. This is deliberately a **live snapshot**, not a time-windowed
+  SLA % — that already exists per-region on the detail page, computed from real historical
+  check history; the list page only ever fetches the latest-check payload, so a windowed figure
+  here would mean N extra `/analytics` calls per page load for a number that already exists one
+  click away. Colored via the same 99.9/99 breakpoints as the detail page's `slaColor`, and
+  labeled "uptime (live)" with a `title` tooltip spelling out the distinction, so the number
+  doesn't get mistaken for SLA% by a user comparing the two pages.
+- **Persistent banner**: renders only when `degradedOrDownCount > 0` (gone the instant nothing
+  is), text "N region(s) reporting degraded/down" (singular handled correctly, confirmed in the
+  mobile screenshot), severity escalates to `--signal-down` the moment anything is actually
+  down (not just degraded) rather than a flat single color — matching the two-tier severity
+  already used everywhere else on this page. Styled as a bordered box with a colored border/
+  text, the same treatment already established for `/settings`' "Danger zone" section, not a
+  new visual pattern. Both the strip and banner update live via the existing SSE mechanism with
+  zero new wiring — they're derived from `items` state on every render, same as the existing
+  counts.
+- **Loading skeletons** (`components/skeleton.tsx`, new): `Skeleton` (the base pulsing block)
+  plus shape-matched pieces — `SignalLightSkeleton` (SignalLight's own housing dimensions, not
+  the real component rendered in some placeholder state, since a loading skeleton and a real
+  "pending" app state are different things that shouldn't be conflated), `LatencyGaugeSkeleton`
+  (a circle matching the gauge's bounding box, not a traced arc outline), `LatencyChartSkeleton`/
+  `TimingWaterfallSkeleton`/`UptimeHeatmapSkeleton` (matching each real component's actual
+  fixed dimensions, read directly from their source). Dashboard list: the "Loading…" text
+  became a skeleton overview strip plus 3 skeleton rows shaped like real target rows (name,
+  action buttons, region badge + signal-light + latency + timestamp placeholders). Detail page:
+  became a full skeleton of the real layout (title, region cards, tabs, Latency section with
+  gauge+chart, Timing section, Uptime heatmap, plus lighter placeholders for the Incidents/TLS
+  divider sections) — kept the same "no site header while loading" structure the old bare
+  "Loading…" state already had, not a new structural decision.
+- **Real, screenshot-caught fix**: the skeleton blocks were first built filled with
+  `--bg-surface-raised`, which turned out to be nearly invisible against the `--bg-surface`
+  background most rows render on — confirmed via an actual screenshot, not assumed from the
+  hex values. Fixed by filling with `--border` instead (still a locked, existing token, no new
+  color) and raising the pulse's resting opacity floor from 0.55 to 0.7 — re-screenshotted to
+  confirm the skeleton now reads clearly as "loading" rather than blending into the background.
+- **Motion**: the pulse is an opacity animation (`.skeleton-pulse` in `globals.css`), not a
+  gradient shimmer — this app's only established motion primitive is opacity (SignalLight's dot
+  flip, LatencyGauge's needle sweep both work this way), so a shimmer would have introduced a
+  second, unrelated animation technique for no real benefit. Wrapped in the same
+  `prefers-reduced-motion: no-preference` gate every other animated rule uses. **Verified
+  empirically, not assumed**: under `emulateMedia({ reducedMotion: "reduce" })`, a live
+  `.skeleton-pulse` element's computed `animationName` is `"none"` and `animationDuration` is
+  `"0s"`; under normal motion, the same element shows `"skeleton-pulse"` at `"1.6s"` — read
+  directly via Playwright against the real running dev server, the same technique used in 3.3/
+  3.8 for the other two motion primitives.
+- **Verified against real seeded data on the real running stack**, not synthetic props:
+  registered a throwaway account, created 3 real targets, paused them, and seeded real check
+  rows (one healthy, one slow-but-up at 950ms, one down with `consecutive_failures=4` so it
+  classifies as "down" not "degraded" per the existing threshold) directly via SQL — workers
+  stopped for the duration, restarted after. Logged in through the real `/login` form (not an
+  injected cookie) via Playwright against the real dev server and real backend. Screenshotted:
+  the degraded/down state (banner reads "2 regions reporting degraded/down" in red, uptime
+  66.7% in red, correct per-state counts); the fully-healthy state after flipping the same rows
+  to healthy (no banner, 100.0% uptime in green); the dashboard loading skeleton (captured
+  mid-load by delaying the `/targets/status` response via Playwright route interception); the
+  detail-page loading skeleton (same delay technique on `GET /targets/{id}`); and a 400px-wide
+  mobile capture of the degraded state (confirmed the singular-region banner grammar and that
+  everything wraps/stacks cleanly at that width). `tsc --noEmit` clean throughout; `next build`
+  not run (a dev server was started specifically for this verification and stopped cleanly
+  afterward, so there was nothing to avoid corrupting, but skipping the production build in
+  favor of live-stack Playwright verification is this project's established practice regardless).
+- **Self-critique against the `frontend-design` skill's avoid-list**: clean. No new colors,
+  typefaces, gradients, shadows, or card patterns were introduced — every new element reuses
+  the existing bordered-box/token vocabulary. No all-caps eyebrow labels, no middle-dot-joined
+  meta text, no "WORD — fragment" em-dash labels, no numbered markers (nothing new here is a
+  sequence), no trailing arrows, no single-word headline accent. `font-mono` on the new uptime%
+  figure matches this codebase's own established (not generic-default) convention that
+  monospace marks a live-instrument reading, consistent with every other stat on this strip.
+  The banner's bordered-box-with-colored-border treatment is a reused pattern (settings'
+  Danger zone), not a new one. The skeleton pulse reuses the app's only existing motion
+  primitive (opacity) rather than introducing a shimmer/gradient sweep.
+- All verification data deleted afterward via the real `DELETE /auth/me` cascade, confirmed via
+  direct SQL count of zero remaining rows. Scratch Playwright scripts (screenshot capture,
+  reduced-motion check, mobile check) were written directly under `frontend/` so Playwright's
+  local `node_modules` would resolve, then deleted before finishing — never committed. Docker
+  stack and the dev server (started fresh for this prompt, not the user's own) both left/
+  confirmed healthy — the dev server was stopped cleanly once verification finished.
+- Not touched in this prompt, per its explicit scope: the quick-add modal, empty states, filter
+  bar (none of these exist yet as separate concerns beyond what was already there — the
+  existing "Add target" form and "No targets yet" empty state were both left exactly as they
+  were), any backend/worker code.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

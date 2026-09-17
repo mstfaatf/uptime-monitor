@@ -12,6 +12,14 @@ import { UptimeHeatmap } from "@/components/uptime-heatmap";
 import { IncidentTimeline } from "@/components/incident-timeline";
 import { RegionBadge } from "@/components/region-badge";
 import { Button } from "@/components/ui/button";
+import {
+  Skeleton,
+  SignalLightSkeleton,
+  LatencyGaugeSkeleton,
+  LatencyChartSkeleton,
+  TimingWaterfallSkeleton,
+  UptimeHeatmapSkeleton,
+} from "@/components/skeleton";
 import { deriveState, formatTimestamp } from "@/lib/status";
 import type { TargetDetail, CheckHistoryEntry } from "@/lib/types";
 
@@ -91,9 +99,84 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
   if (authFailed) return null;
 
   if (loading) {
+    // Shaped like the real page below (region cards, tabs, Latency/Timing/Uptime sections) so
+    // there's no layout jump once real data replaces it — same bordered-panel treatment as the
+    // actual sections use, just filled with placeholder blocks instead of real content. Kept to
+    // the header returning bare (no site header/nav) exactly like the pre-existing "Loading…"
+    // state did — not a structural change, just what fills the one <main> that already existed.
     return (
-      <main className="mx-auto max-w-5xl px-6 py-10">
-        <p style={{ color: "var(--text-secondary)" }}>Loading…</p>
+      <main className="mx-auto max-w-5xl px-6 py-10" aria-busy="true" aria-label="Loading target detail">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex flex-col gap-2">
+            <Skeleton className="h-8 w-64" />
+            <Skeleton className="h-4 w-40" />
+          </div>
+          <Skeleton className="h-10 w-32 rounded" />
+        </div>
+
+        <div className="mt-6 flex flex-wrap gap-4">
+          {Array.from({ length: 2 }).map((_, i) => (
+            <div
+              key={i}
+              className="flex flex-col items-start gap-2 rounded border p-4"
+              style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
+            >
+              <Skeleton className="h-5 w-14 rounded" />
+              <SignalLightSkeleton size="md" />
+              <Skeleton className="h-8 w-20" />
+              <Skeleton className="h-3 w-24" />
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-8 flex gap-2">
+          <Skeleton className="h-8 w-20 rounded" />
+          <Skeleton className="h-8 w-20 rounded" />
+        </div>
+
+        <section
+          className="mt-6 rounded border p-5"
+          style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
+        >
+          <Skeleton className="h-5 w-20" />
+          <div className="mt-4 flex flex-col items-stretch gap-6 md:flex-row md:items-start">
+            <LatencyGaugeSkeleton size="md" />
+            <div className="min-w-0 flex-1">
+              <LatencyChartSkeleton />
+            </div>
+          </div>
+        </section>
+
+        <section
+          className="mt-6 rounded border p-5"
+          style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
+        >
+          <Skeleton className="h-5 w-36" />
+          <Skeleton className="mt-2 h-3 w-40" />
+          <div className="mt-4">
+            <TimingWaterfallSkeleton />
+          </div>
+        </section>
+
+        <section
+          className="mt-6 rounded border p-5"
+          style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
+        >
+          <Skeleton className="h-5 w-16" />
+          <div className="mt-4">
+            <UptimeHeatmapSkeleton />
+          </div>
+        </section>
+
+        <section className="mt-10 border-t pt-6" style={{ borderColor: "var(--border)" }}>
+          <Skeleton className="h-5 w-20" />
+          <Skeleton className="mt-4 h-4 w-56" />
+        </section>
+
+        <section className="mt-8 border-t pt-6" style={{ borderColor: "var(--border)" }}>
+          <Skeleton className="h-5 w-32" />
+          <Skeleton className="mt-4 h-4 w-48" />
+        </section>
       </main>
     );
   }

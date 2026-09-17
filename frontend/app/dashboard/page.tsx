@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { API_BASE, apiFetch, apiJson } from "@/lib/api";
 import { SignalLight, SIGNAL_STATE_LABELS, type SignalState } from "@/components/signal-light";
 import { LatencyGauge } from "@/components/latency-gauge";
+import { Skeleton, SignalLightSkeleton, LatencyGaugeSkeleton } from "@/components/skeleton";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -110,6 +111,16 @@ function latencyColor(state: SignalState): string {
   if (state === "degraded") return "var(--signal-warning)";
   if (state === "pending") return "var(--signal-pending-text)";
   return "var(--text-primary)";
+}
+
+// Same 99.9/99 breakpoints as the detail page's own slaColor (app/dashboard/[id]/page.tsx) —
+// one consistent "what counts as healthy/degraded/bad uptime" convention across the app,
+// rather than two independently-chosen thresholds that could silently drift apart.
+function uptimeColor(pct: number | null): string {
+  if (pct == null) return "var(--signal-pending-text)";
+  if (pct >= 99.9) return "var(--signal-up)";
+  if (pct >= 99) return "var(--signal-warning)";
+  return "var(--signal-down)";
 }
 
 export default function DashboardPage() {
@@ -357,6 +368,7 @@ export default function DashboardPage() {
     Object.entries(item.latest_checks).map(([region, check]) => ({
       state: deriveState(check),
       latencyMs: check.latency_ms,
+      isUp: check.is_up,
     }))
   );
   const pendingTargetsWithNoRegions = items.filter((i) => Object.keys(i.latest_checks).length === 0).length;
@@ -364,6 +376,27 @@ export default function DashboardPage() {
   for (const e of regionEntries) counts[e.state]++;
   const latencies = regionEntries.map((e) => e.latencyMs).filter((v): v is number => v != null);
   const avgLatency = latencies.length > 0 ? latencies.reduce((a, b) => a + b, 0) / latencies.length : null;
+
+  // Aggregate uptime %: the fraction of (target, region) pairs that have reported at least one
+  // check and are currently is_up — averaged flat across every pair, not per-target (a target
+  // with 2 regions and a target with 1 region each contribute their own pairs equally, rather
+  // than being weighted as "one target" apiece). This is a deliberate choice given the Phase 2
+  // independent-per-region design: there's no single "is this target up" boolean anywhere else
+  // in the app, so an aggregate figure has to pick a base rate to average over, and per-pair is
+  // the one that matches how every other count on this strip is already computed (regionEntries
+  // itself). A pair with no check yet (pending) is excluded from both the numerator and
+  // denominator — it hasn't reported anything to average in either direction. This is
+  // deliberately a live snapshot ("what fraction of monitored surface is up right now"), not a
+  // time-windowed SLA % — that already exists per-region on the detail page
+  // (app/dashboard/[id]/page.tsx's computeSla), computed from real historical check history
+  // rather than one instant's latest_checks payload, which is all this list page ever fetches.
+  const reportedEntries = regionEntries; // every entry here already has a real check, see above
+  const upEntries = reportedEntries.filter((e) => e.isUp).length;
+  const aggregateUptimePercent =
+    reportedEntries.length > 0 ? (upEntries / reportedEntries.length) * 100 : null;
+
+  const degradedOrDownCount = regionEntries.filter((e) => e.state === "degraded" || e.state === "down").length;
+  const anyDown = regionEntries.some((e) => e.state === "down");
 
   return (
     <>
@@ -394,6 +427,58 @@ export default function DashboardPage() {
       <main className="mx-auto max-w-5xl px-6 py-10">
         <h1 className="text-2xl font-semibold">Dashboard</h1>
 
+        {/* Persistent banner: only rendered while at least one region is degraded/down, gone
+            the moment nothing is — this is a status alert, not a standing UI element. Severity
+            (border/text color, which SignalLight state is shown) escalates to --signal-down the
+            moment any region is actually down, not just degraded, matching the two-tier
+            severity already used everywhere else (summary-strip counts, row latency color). */}
+        {!loading && degradedOrDownCount > 0 && (
+          <div
+            role="status"
+            className="mt-6 flex items-center gap-3 rounded border px-4 py-3"
+            style={{
+              borderColor: anyDown ? "var(--signal-down)" : "var(--signal-warning)",
+              background: "var(--bg-surface)",
+            }}
+          >
+            <SignalLight state={anyDown ? "down" : "degraded"} size="sm" />
+            <span
+              className="text-sm font-medium"
+              style={{ color: anyDown ? "var(--signal-down)" : "var(--signal-warning)" }}
+            >
+              {degradedOrDownCount} {degradedOrDownCount === 1 ? "region" : "regions"} reporting
+              degraded/down
+            </span>
+          </div>
+        )}
+
+        {loading && (
+          <div
+            className="mt-6 flex flex-wrap items-center gap-8 rounded border p-4"
+            style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
+          >
+            <div className="flex flex-col gap-1.5">
+              <Skeleton className="h-7 w-10" />
+              <Skeleton className="h-3 w-14" />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Skeleton className="h-7 w-16" />
+              <Skeleton className="h-3 w-20" />
+            </div>
+            <div className="flex items-center gap-5">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <SignalLightSkeleton size="sm" />
+                  <Skeleton className="h-4 w-4" />
+                </div>
+              ))}
+            </div>
+            <div className="ml-auto">
+              <LatencyGaugeSkeleton size="sm" />
+            </div>
+          </div>
+        )}
+
         {!loading && items.length > 0 && (
           <div
             className="mt-6 flex flex-wrap items-center gap-8 rounded border p-4"
@@ -405,6 +490,18 @@ export default function DashboardPage() {
               </span>
               <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
                 targets
+              </span>
+            </div>
+            <div className="flex flex-col">
+              <span
+                className="font-mono text-2xl"
+                style={{ color: uptimeColor(aggregateUptimePercent) }}
+                title="Percentage of target-region pairs currently reporting up — a live snapshot across every monitored region, not a time-windowed SLA. See a target's detail page for windowed SLA % per region."
+              >
+                {aggregateUptimePercent != null ? `${aggregateUptimePercent.toFixed(1)}%` : "—"}
+              </span>
+              <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                uptime (live)
               </span>
             </div>
             <div className="flex items-center gap-5">
@@ -510,7 +607,33 @@ export default function DashboardPage() {
 
         <div className="mt-8">
           {loading ? (
-            <p style={{ color: "var(--text-secondary)" }}>Loading…</p>
+            <div className="flex flex-col gap-4" aria-busy="true" aria-label="Loading targets">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="rounded border p-4"
+                  style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <Skeleton className="h-5 w-48" />
+                    <div className="flex items-center gap-2">
+                      <Skeleton className="h-8 w-24 rounded" />
+                      <Skeleton className="h-8 w-16 rounded" />
+                    </div>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-x-8 gap-y-3">
+                    {Array.from({ length: 2 }).map((__, j) => (
+                      <div key={j} className="flex items-center gap-3">
+                        <Skeleton className="h-5 w-14 rounded" />
+                        <SignalLightSkeleton size="sm" />
+                        <Skeleton className="h-4 w-12" />
+                        <Skeleton className="h-3 w-28" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
           ) : items.length === 0 ? (
             <div
               className="flex flex-col items-center gap-3 rounded border border-dashed p-12 text-center"

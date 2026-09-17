@@ -100,6 +100,27 @@
   }
 }
 
+/* Loading skeletons (components/skeleton.tsx): an opacity pulse, matching this app's only
+   other motion primitive (SignalLight/LatencyGauge both animate opacity, never a color or
+   gradient sweep) rather than introducing a shimmer effect as a second motion technique. No
+   animation at all unless the OS allows it — the block just sits at its resting opacity under
+   prefers-reduced-motion: reduce, same as every other animated rule here. */
+@media (prefers-reduced-motion: no-preference) {
+  .skeleton-pulse {
+    animation: skeleton-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.7;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 /* The one hand-rolled rule still load-bearing: every page has plain <a> tags (target URLs,
    footer/about links) that rely on this default rather than an inline color. Everything else
    that used to live here (.form-group, .btn, .status-*, table styles, .dashboard-actions,
