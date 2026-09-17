@@ -4,6 +4,11 @@ Cookie-auth ONLY — every endpoint here depends on the plain get_current_user, 
 get_current_user_or_api_key, at any scope: a key must never be usable to mint or revoke other
 keys, regardless of its own scope (see auth/api_key.py's module docstring). Ownership enforced
 identically to every other user-owned resource in this app (CLAUDE.md rule 1).
+
+Rate limiting (Phase 6, prompt 6.10 security audit): DELETE /api-keys/{id} gets
+API_KEY_RATE_LIMIT's 60/minute magnitude, IP-keyed — closes a gap the original 6.7 build left
+open (creation had its own 10/minute limit from day one; revocation had none). GET /api-keys
+stays unlimited, matching every other pure-read cookie-only endpoint in this app.
 """
 
 import secrets
@@ -18,7 +23,7 @@ from auth import get_current_user
 from auth.api_key import SCOPE_LEVELS, hash_api_key
 from database import get_db
 from models import ApiKey, User
-from rate_limit import limiter
+from rate_limit import API_KEY_RATE_LIMIT, limiter
 
 router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 
@@ -116,7 +121,9 @@ async def create_api_key(
 
 
 @router.delete("/{api_key_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(API_KEY_RATE_LIMIT)
 async def revoke_api_key(
+    request: Request,
     api_key_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

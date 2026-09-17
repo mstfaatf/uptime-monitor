@@ -3,9 +3,16 @@ user-owned resource in this app (CLAUDE.md rule 1) — every query here filters 
 Tag.user_id == current_user.id. Attaching/detaching a tag to/from a target lives in
 routers/targets.py instead (POST /targets/{id}/tags, DELETE /targets/{id}/tags/{tag_id}) since
 those endpoints are ownership-scoped on the target first.
+
+Rate limiting (Phase 6, prompt 6.10 security audit): POST /tags gets the same 10/minute
+IP-keyed creation limit as every other resource-creation endpoint in this app (targets,
+webhooks, API keys). DELETE /tags/{id} gets API_KEY_RATE_LIMIT's 60/minute magnitude, IP-keyed
+(these endpoints are cookie-only, never API-key-eligible, so there's no per-key traffic to
+distinguish — the constant is reused purely for a consistent bound, not per-key behavior).
+GET /tags stays unlimited, matching every other pure-read cookie-only endpoint in this app.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import get_current_user
 from database import get_db
 from models import Tag, User
+from rate_limit import API_KEY_RATE_LIMIT, limiter
 
 router = APIRouter(prefix="/tags", tags=["tags"])
 
@@ -47,7 +55,9 @@ async def list_tags(
 
 
 @router.post("", response_model=TagResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 async def create_tag(
+    request: Request,
     body: TagCreate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -76,7 +86,9 @@ async def create_tag(
 
 
 @router.delete("/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(API_KEY_RATE_LIMIT)
 async def delete_tag(
+    request: Request,
     tag_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

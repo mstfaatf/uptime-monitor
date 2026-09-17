@@ -1,4 +1,13 @@
-"""Target endpoints with strict ownership enforcement."""
+"""Target endpoints with strict ownership enforcement.
+
+Rate limiting (Phase 6, prompt 6.10 security audit): PATCH /{id}, POST /{id}/resume,
+POST /{id}/tags, and DELETE /{id}/tags/{tag_id} each gained API_KEY_RATE_LIMIT's 60/minute
+IP-keyed bound — all four are cookie-only writes (not API-key-eligible, so there's no per-key
+traffic to distinguish; the constant is reused purely for a consistent magnitude) that had no
+rate limit at all before this pass. Every other write endpoint in this file already had one
+(create/pause/delete carry the per-key-or-IP limit from 6.7; create also keeps its own stricter
+10/minute IP-keyed creation limit from Phase 0).
+"""
 
 import asyncio
 import json
@@ -565,7 +574,9 @@ async def create_target(
 
 
 @router.patch("/{target_id}", response_model=TargetResponse)
+@limiter.limit(API_KEY_RATE_LIMIT)
 async def update_target(
+    request: Request,
     target_id: int,
     body: TargetUpdate,
     current_user: User = Depends(get_current_user),
@@ -684,7 +695,9 @@ async def pause_target(
 
 
 @router.post("/{target_id}/resume", response_model=TargetResponse)
+@limiter.limit(API_KEY_RATE_LIMIT)
 async def resume_target(
+    request: Request,
     target_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -726,7 +739,9 @@ class AttachTagBody(BaseModel):
 
 
 @router.post("/{target_id}/tags", response_model=TargetResponse)
+@limiter.limit(API_KEY_RATE_LIMIT)
 async def attach_tag(
+    request: Request,
     target_id: int,
     body: AttachTagBody,
     current_user: User = Depends(get_current_user),
@@ -758,7 +773,9 @@ async def attach_tag(
 
 
 @router.delete("/{target_id}/tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(API_KEY_RATE_LIMIT)
 async def detach_tag(
+    request: Request,
     target_id: int,
     tag_id: int,
     current_user: User = Depends(get_current_user),

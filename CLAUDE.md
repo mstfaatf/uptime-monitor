@@ -3948,5 +3948,69 @@ content or ownership-enforcement change.
   code — this fix is entirely inside `backend/export.py`'s `build_csv` (plus its docstring) and
   the corresponding test file.
 
+Prompt 6.10 (full cybersecurity walkthrough) is complete. Audited all of Phase 6's new backend
+surface (6.2–6.9) plus a regression pass across the whole app; one real gap found and fixed,
+everything else confirmed passing.
+- **Rate limiting — one real gap, fixed**: `PATCH /targets/{id}`, `POST /targets/{id}/resume`,
+  `POST /targets/{id}/tags`, `DELETE /targets/{id}/tags/{tag_id}`, `DELETE /api-keys/{id}`, and
+  the entire `tags` router (`POST /tags`/`DELETE /tags/{id}`) had **no rate limit at all** —
+  confirmed live before fixing: `PATCH /targets/{id}` processed 65+ consecutive requests with
+  zero `429`s. Everything else from 6.2–6.9 (webhooks CRUD, target create/pause/delete, API key
+  creation) was already correctly limited, and the 6.7 per-key budget
+  (`api_key_or_remote_address`) was confirmed still stacking independently on top of the
+  IP-based one wherever it applies. **Fixed**: `POST /tags` got the standard `10/minute`
+  creation-endpoint limit; the other five got `API_KEY_RATE_LIMIT`'s `60/minute` magnitude,
+  IP-keyed (none of the six are API-key-eligible, so there's no per-key traffic to distinguish
+  — the constant is reused purely for a consistent bound). Live-verified: the same `PATCH`
+  route now genuinely `429`s on request 61. 7 new regression tests
+  (`backend/tests/test_rate_limit.py`) — one per newly-limited endpoint.
+- **Injection protections — pass, one empirical check added**: confirmed `request_headers`/
+  `keyword_match` are never interpolated into SQL anywhere (every worker query uses `$1`-style
+  bind params; the jsonb column round-trips through asyncpg's registered codec, not string
+  formatting) and `keyword_match` only ever does a plain Python substring check. Empirically
+  confirmed (not just assumed from "httpx probably validates this") that httpx/h11 raises
+  `LocalProtocolError` on a CRLF embedded in a header value — tested live in a worker
+  container — which `check_url`'s broad `except` catches as an ordinary check failure, so
+  request-splitting via a target's custom headers isn't possible. Re-confirmed SSRF is
+  enforced at target creation, at every worker check, at every redirect hop (including the
+  6.2-follow-up cross-host credential-drop fix), at webhook creation, and re-validated
+  immediately before every webhook send — neither target nor webhook URLs have an edit path,
+  so "SSRF at edit time" doesn't apply by construction.
+- **Secrets/credential handling — pass, verified against real serialized responses, not just
+  the Pydantic model definitions**: created a real target with basic-auth credentials and
+  confirmed the password never appears in the create/list/detail/PATCH response bodies (all
+  grepped directly), while the DB column holds real Fernet ciphertext, not plaintext. Created a
+  real API key and confirmed `key_hash` never appears in any response (only `key_prefix` after
+  creation) by grepping `GET /api-keys`' actual output and cross-checking against the DB's real
+  hash value. Created a real webhook and confirmed `secret` is present only in the create
+  response, never in a subsequent `GET /webhooks`. Grepped `webhooks.py`/`realtime.py`/
+  `worker/main.py`'s logging: none of it includes a credential, secret, or password value —
+  only target/webhook IDs and URLs.
+- **Ownership enforcement — pass**: tags, API keys, webhooks, and `GET /targets/{id}/checks`
+  (pagination included) all filter by owner on every query and return 404, never 403, on a
+  mismatch — confirmed by grepping every new router file for `403` usage; the only hit is
+  `auth/api_key.py`'s scope-insufficiency case (a *valid* key without enough scope), which is a
+  different, correct use of 403 (identity known, action refused), not an ownership check.
+- **`CREDENTIAL_ENCRYPTION_KEY` — pass**: still required/no-default in both services' `Settings`
+  (same fail-fast mechanism as `JWT_SECRET`, covered by `test_config.py`), never logged, never
+  present in any response model.
+- **Git-history secret grep — pass, re-run and re-confirmed clean**: repeated the Phase 5.8
+  methodology across the full history and specifically the 6.2–6.9 commit range for Neon/
+  Resend/JWT/Fernet-shaped values and any tracked `.env`. Nothing real found; the one
+  historically-tracked `.env` (Phase 0) is still git's canonical empty blob. A batch of
+  base64-looking strings the grep initially flagged turned out to be `package-lock.json` npm
+  integrity hashes (traced one back to its source commit to confirm) — a false positive, not a
+  leak.
+- **pip-audit/npm audit — no new findings since Phase 5.8**: backend has only the same
+  pre-existing `ecdsa` finding (transitive via `python-jose`, no fix available, inert since this
+  app only ever signs HS256); worker is clean; frontend's `next@14.2.35`-pinned advisory count
+  grew from ~23 to 27 (new advisories published against the same pinned version since 5.8, not
+  from any change this phase — frontend wasn't touched), all still requiring the
+  already-deferred Next 16 major upgrade to fix.
+- 290 backend tests total (was 283), all passing against a rebuilt `api` image. All
+  verification data (throwaway account, its target/API key/webhook) deleted afterward via the
+  real `DELETE /auth/me` cascade, confirmed via direct SQL count. Stack left healthy
+  (`db`/`api`/`worker`/`worker-eu-west` all `Up`).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
