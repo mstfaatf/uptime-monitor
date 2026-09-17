@@ -21,6 +21,11 @@ NOTIFY_CHANNEL and the "{target_id}:{region}" payload format must match what the
 NOTIFYs (worker/main.py). The two services are deployed independently (see
 backend/security/ssrf.py's docstring for the same "deliberately duplicated, not shared"
 reasoning), so this is kept in sync by hand, not import.
+
+Also owns downtime/cert-expiry alert evaluation (Phase 4), extended in Phase 6 prompt 6.6 to
+fan out to webhooks (backend/webhooks.py) alongside email — see _evaluate_downtime_alert's
+docstring for the eligibility/fan-out split that makes webhook delivery independent of the
+user's email preference toggle.
 """
 
 import asyncio
@@ -33,7 +38,8 @@ from sqlalchemy import select
 from config import settings
 from database import AsyncSessionLocal
 from mail import cert_expiry_alert_email, downtime_alert_email, downtime_recovery_email, send_email
-from models import AlertHistory, Check, Target, User
+from models import AlertHistory, Check, Target, User, Webhook
+from webhooks import build_webhook_payload, send_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -69,21 +75,46 @@ def _publish(user_id: int, payload: dict) -> None:
         queue.put_nowait(payload)
 
 
-async def _evaluate_downtime_alert(session, target: Target, check: Check, region: str, user: User) -> None:
+async def _evaluate_downtime_alert(
+    session, target: Target, check: Check, region: str, user: User, webhooks: list[Webhook]
+) -> None:
     """Send (or suppress) a downtime alert for this (target, region), based on the check that
-    just landed and what alert_history last recorded — see the Phase 4 design report:
+    just landed and what alert_history last recorded.
+
+    **Restructured in Phase 6 prompt 6.6** to separate condition-eligibility (channel-agnostic
+    — is this transition worth alerting on at all, per the existing cooldown/alert_history
+    check) from channel fan-out (email if user.alert_on_downtime, each webhook independently if
+    its own alert_on_downtime is set). Before this, the email-send call and the eligibility
+    check were the same code path, so adding webhook delivery would have wrongly coupled it to
+    the user's *email* preference specifically — a user with email alerts off but a webhook
+    configured would have silently never gotten webhook alerts either, which is not what either
+    toggle is supposed to mean.
+
+    Eligibility (channel-agnostic):
       - is_up=false, and (no row or last_state != 'down'), and the cooldown has elapsed since
-        the last email of any kind for this (target, region) -> send, upsert last_state='down'.
+        the last alert of any kind for this (target, region) -> eligible, event="down".
       - is_up=false, last_state=='down' already -> suppress (still down, already alerted).
-      - is_up=true, last_state=='down' -> recovered; send a "back up" email, upsert
-        last_state='up'. No cooldown gate on recovery itself (per the Phase 4 report/prompt) —
-        but the *next* down transition still respects the cooldown against this email's own
-        last_sent_at, which is what actually dampens rapid flapping.
+      - is_up=true, last_state=='down' -> recovered -> eligible, event="up". No cooldown gate
+        on recovery itself (per the original Phase 4 report/prompt) — but the *next* down
+        transition still respects the cooldown against this alert's own last_sent_at, which is
+        what actually dampens rapid flapping.
+      - is_up=true and (no row, or already 'up') -> nothing to do.
+
+    Fan-out: attempts email (if user.alert_on_downtime) and every passed-in webhook (if that
+    webhook's own alert_on_downtime is set — `webhooks` is already pre-filtered to this user's
+    *enabled* webhooks by the caller) independently. alert_history bookkeeping is written ONCE,
+    after fan-out, if AT LEAST ONE channel actually delivered — generalizing the existing
+    single-channel rule ("a failed send must not be recorded as alerted, so the next check
+    retries") to multiple channels: if nothing got through, nothing is recorded, and the very
+    next check retries every channel from scratch. **Known, accepted limitation**: if one
+    channel succeeds (e.g. email) and another fails (e.g. a flaky webhook), the successful
+    channel's delivery still marks the condition "alerted," so the failed channel is NOT
+    individually retried on the next check — alert_history tracks "was this transition alerted
+    at all," not per-channel delivery status. A per-channel retry/delivery-log system would be
+    a materially bigger feature than what's being built here.
+
     Does not commit — the caller commits once after both alert types are evaluated.
     """
-    if not user.alert_on_downtime:
-        return
-
     result = await session.execute(
         select(AlertHistory).where(
             AlertHistory.target_id == target.id,
@@ -93,67 +124,87 @@ async def _evaluate_downtime_alert(session, target: Target, check: Check, region
     )
     row = result.scalar_one_or_none()
     now = datetime.now(timezone.utc)
-    target_label = target.name or target.url
-    detail_url = f"{settings.FRONTEND_URL}/dashboard/{target.id}"
-    settings_url = f"{settings.FRONTEND_URL}/settings"
-    checked_at = check.checked_at.isoformat() if check.checked_at else "unknown"
 
     if not check.is_up:
         if row is not None and row.last_state == "down":
             return  # still down since the last alert — suppress
         if row is not None and (now - row.last_sent_at).total_seconds() < settings.DOWNTIME_ALERT_COOLDOWN_SECONDS:
             return  # a flapping target can't re-trigger faster than the cooldown
-        subject, body = downtime_alert_email(
-            target_label=target_label,
-            target_url=target.url,
-            region=region,
-            checked_at=checked_at,
-            error=check.error,
-            detail_url=detail_url,
-            settings_url=settings_url,
-        )
-        sent = await send_email(user.email, subject, body)
-        if not sent:
-            # A failed send (bad key, Resend outage, or — found live in prompt 4.6.1 — a
-            # misconfigured async client) must NOT be recorded as "already alerted": doing so
-            # would permanently suppress the real alert via the "still down" check above, with
-            # no retry, even after whatever broke the send is fixed. Leaving no row (or an
-            # untouched existing one) means the very next check retries this from scratch.
-            return
-        if row is None:
-            session.add(
-                AlertHistory(target_id=target.id, region=region, alert_type="downtime", last_state="down", last_sent_at=now)
+        event = "down"
+    elif row is not None and row.last_state == "down":
+        event = "up"
+    else:
+        return  # is_up=true and no row, or already 'up' — nothing to do, no bookkeeping needed
+
+    target_label = target.name or target.url
+    detail_url = f"{settings.FRONTEND_URL}/dashboard/{target.id}"
+    settings_url = f"{settings.FRONTEND_URL}/settings"
+    checked_at = check.checked_at.isoformat() if check.checked_at else "unknown"
+
+    delivered = False
+
+    if user.alert_on_downtime:
+        if event == "down":
+            subject, body = downtime_alert_email(
+                target_label=target_label,
+                target_url=target.url,
+                region=region,
+                checked_at=checked_at,
+                error=check.error,
+                detail_url=detail_url,
+                settings_url=settings_url,
             )
         else:
-            row.last_state = "down"
-            row.last_sent_at = now
-    elif row is not None and row.last_state == "down":
-        subject, body = downtime_recovery_email(
-            target_label=target_label,
-            target_url=target.url,
-            region=region,
-            checked_at=checked_at,
-            detail_url=detail_url,
-            settings_url=settings_url,
+            subject, body = downtime_recovery_email(
+                target_label=target_label,
+                target_url=target.url,
+                region=region,
+                checked_at=checked_at,
+                detail_url=detail_url,
+                settings_url=settings_url,
+            )
+        if await send_email(user.email, subject, body):
+            delivered = True
+
+    webhook_event = "target.down" if event == "down" else "target.up"
+    payload = build_webhook_payload(webhook_event, target, region, check, detail_url)
+    for webhook in webhooks:
+        if webhook.alert_on_downtime:
+            if await send_webhook(webhook.url, webhook.secret, payload):
+                delivered = True
+
+    if not delivered:
+        # No channel actually got through (bad Resend key, every webhook unreachable, or both
+        # gated off entirely) — must NOT be recorded as "already alerted": doing so would
+        # permanently suppress the real alert via the "still down" check above, with no retry,
+        # even after whatever broke delivery is fixed. Leaving no row (or an untouched existing
+        # one) means the very next check retries every channel from scratch.
+        return
+    if row is None:
+        session.add(
+            AlertHistory(target_id=target.id, region=region, alert_type="downtime", last_state=event, last_sent_at=now)
         )
-        sent = await send_email(user.email, subject, body)
-        if not sent:
-            return  # same reasoning as above — retry on the next check, don't fake success
-        row.last_state = "up"
+    else:
+        row.last_state = event
         row.last_sent_at = now
-    # else: is_up=true and no row, or already 'up' — nothing to do, no bookkeeping needed.
 
 
-async def _evaluate_cert_expiry_alert(session, target: Target, check: Check, region: str, user: User) -> None:
+async def _evaluate_cert_expiry_alert(
+    session, target: Target, check: Check, region: str, user: User, webhooks: list[Webhook]
+) -> None:
     """Send (or suppress) a cert-expiry alert for this (target, region). Fires once when
     tls_cert_days_remaining first crosses <= CERT_EXPIRY_WARN_DAYS, then re-reminds at most
     every CERT_EXPIRY_REMINDER_COOLDOWN_DAYS while still expiring and unrenewed. Renewal
     (a changed tls_cert_expires_at from what alert_history last recorded) resets eligibility
     immediately, regardless of the reminder cooldown, since it's a genuinely new expiry window
-    worth its own first alert. Does not commit — same caller-commits contract as the downtime
-    evaluator above."""
-    if not user.alert_on_cert_expiry:
-        return
+    worth its own first alert.
+
+    Restructured the same way as _evaluate_downtime_alert above (Phase 6 prompt 6.6): the
+    eligibility check below is channel-agnostic, fan-out to email/webhooks happens
+    independently afterward, and alert_history is written once if any channel delivered — see
+    that function's docstring for the full reasoning, including the known per-channel-retry
+    limitation. Does not commit — same caller-commits contract as the downtime evaluator.
+    """
     if check.tls_cert_expires_at is None:
         return  # no cert data on this check (plain http, or a failed check)
 
@@ -183,19 +234,33 @@ async def _evaluate_cert_expiry_alert(session, target: Target, check: Check, reg
     if row is not None and not renewed and not cooldown_elapsed:
         return  # already reminded recently about this same cert — suppress
 
-    subject, body = cert_expiry_alert_email(
-        target_label=target.name or target.url,
-        target_url=target.url,
-        region=region,
-        days_remaining=days_remaining,
-        expires_at=check.tls_cert_expires_at.isoformat(),
-        issuer=check.tls_cert_issuer,
-        detail_url=f"{settings.FRONTEND_URL}/dashboard/{target.id}",
-        settings_url=f"{settings.FRONTEND_URL}/settings",
-    )
-    sent = await send_email(user.email, subject, body)
-    if not sent:
-        return  # same reasoning as the downtime evaluator — a failed send retries next check
+    detail_url = f"{settings.FRONTEND_URL}/dashboard/{target.id}"
+    settings_url = f"{settings.FRONTEND_URL}/settings"
+
+    delivered = False
+
+    if user.alert_on_cert_expiry:
+        subject, body = cert_expiry_alert_email(
+            target_label=target.name or target.url,
+            target_url=target.url,
+            region=region,
+            days_remaining=days_remaining,
+            expires_at=check.tls_cert_expires_at.isoformat(),
+            issuer=check.tls_cert_issuer,
+            detail_url=detail_url,
+            settings_url=settings_url,
+        )
+        if await send_email(user.email, subject, body):
+            delivered = True
+
+    payload = build_webhook_payload("target.cert_expiring", target, region, check, detail_url)
+    for webhook in webhooks:
+        if webhook.alert_on_cert_expiry:
+            if await send_webhook(webhook.url, webhook.secret, payload):
+                delivered = True
+
+    if not delivered:
+        return  # same reasoning as the downtime evaluator — retry every channel next check
     if row is None:
         session.add(
             AlertHistory(
@@ -258,8 +323,15 @@ async def _handle_notification(payload: str) -> None:
                 user_result = await session.execute(select(User).where(User.id == target.user_id))
                 user = user_result.scalar_one_or_none()
                 if user is not None:
-                    await _evaluate_downtime_alert(session, target, check, region, user)
-                    await _evaluate_cert_expiry_alert(session, target, check, region, user)
+                    # Fetched once here and passed to both evaluators — only *enabled*
+                    # webhooks are candidates at all; each evaluator further filters by its
+                    # own alert_on_downtime/alert_on_cert_expiry toggle (see their docstrings).
+                    webhooks_result = await session.execute(
+                        select(Webhook).where(Webhook.user_id == target.user_id, Webhook.enabled.is_(True))
+                    )
+                    webhooks = list(webhooks_result.scalars().all())
+                    await _evaluate_downtime_alert(session, target, check, region, user, webhooks)
+                    await _evaluate_cert_expiry_alert(session, target, check, region, user, webhooks)
                     await session.commit()
             except Exception:
                 logger.exception(

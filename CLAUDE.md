@@ -3631,12 +3631,90 @@ suggested next item) — sequencing is the user's call, not a fixed order to enf
 - Not touched in this prompt, per its explicit scope: any frontend code (deferred to prompt
   6.14), webhooks, API keys, retention, any other Phase 6 feature area.
 
-**Next: continue Phase 6** — per the 6.1 report's substantive recommendations, API keys and
-webhooks (with the alerting fan-out restructuring as webhooks' own prerequisite) remain the
-two backend feature areas not yet built; retention/pagination are lower-priority infra items;
-frontend work for everything shipped so far (customization, pause/resume, tags, analytics) is
-still entirely outstanding, deferred to prompts 6.13/6.14 per the explicit per-prompt scoping
-used throughout this phase.
+Phase 6, prompt 6.6 (alerting fan-out restructure + webhook alerts) is complete — closes out
+the alerting-fan-out prerequisite flagged since 6.1 and builds webhooks on top of it in the
+same prompt. Explicit scope boundary honored: API keys and rate limiting untouched.
+- **Prerequisite restructuring done first, as instructed**: `_evaluate_downtime_alert`/
+  `_evaluate_cert_expiry_alert` in `realtime.py` now separate condition-eligibility (the
+  existing cooldown/`alert_history` check — channel-agnostic, computes an `event`
+  ("down"/"up"/none) or returns early) from channel fan-out (email if `user.alert_on_downtime`,
+  each *enabled* webhook independently if its own `alert_on_downtime` is set). Bookkeeping is
+  written once, after fan-out, if **at least one** channel delivered — a deliberate
+  generalization of the existing single-channel "a failed send isn't recorded as alerted"
+  rule, documented with one **known, accepted limitation**: if one channel succeeds and
+  another fails, the failed one isn't individually retried next check, since `alert_history`
+  tracks "was this transition alerted at all," not per-channel delivery status. Confirmed this
+  was a real, not hypothetical, prerequisite — building webhook sends against the old fused
+  shape would have wrongly tied webhook delivery to the *email* toggle specifically.
+- **Schema**: migration `013_add_webhooks.py` — `webhooks(id, user_id FK CASCADE, url, secret,
+  alert_on_downtime default true, alert_on_cert_expiry default true, enabled default true,
+  created_at)`. `secret` stored plaintext, not Fernet-encrypted like a target's basic-auth
+  password — documented reasoning: unlike that credential (authenticates INTO a third-party
+  system), this one only ever authenticates payloads this app sends OUT to the user's own
+  endpoint, a lower-severity exposure if the database were ever compromised. Flagged as
+  revisitable, not silently decided.
+- **New `backend/routers/webhooks.py`**: `POST/GET /webhooks`, `DELETE /webhooks/{id}` —
+  matches `routers/tags.py`'s exact CRUD shape/precedent (no PATCH; ownership-enforced;
+  404-not-403). `secret` is always server-generated (`secrets.token_urlsafe(32)`, same
+  generation approach as password-reset tokens) and returned **only** in the create response,
+  never by `GET /webhooks` afterward — same "shown once" convention as a generated API key.
+  URL validated via `security.ssrf.is_url_blocked()` at creation — same 400 shape as
+  `POST /targets`'s own creation-time check, called directly (not `to_thread`-wrapped), matching
+  that existing endpoint's own precedent; the prompt's `to_thread` requirement is specifically
+  for the send-time re-check (see below), where blocking the shared event loop would delay
+  every other concurrent request, not just one request handler blocking itself.
+- **New `backend/webhooks.py`**: `send_webhook()` mirrors `mail/client.py`'s `send_email()`
+  philosophy exactly — one attempt, 5s timeout, log-and-swallow, never raises, so it structurally
+  can't corrupt the SSE-push half of `_handle_notification`. Re-validates the URL via
+  `is_url_blocked()` immediately before every send (DNS-rebinding defense — a URL can resolve
+  safely at creation and unsafely later), wrapped in `asyncio.to_thread()` exactly as
+  instructed. Sends via `httpx.AsyncClient(follow_redirects=False)`; a 3xx is simply not
+  chased and fails the same `is_success` check as any other non-2xx — no need for a separate
+  redirect-specific branch. Payload: `{event, target: {id, name, url}, region, checked_at,
+  error, cert: {...} | null, detail_url}`, `event` one of `target.down`/`target.up`/
+  `target.cert_expiring`. Signed via `X-Uptime-Monitor-Signature: sha256=<hex HMAC-SHA256 of
+  the exact raw JSON body, using the webhook's secret>`.
+- **Tests**: `test_webhook_delivery.py` (10, hermetic — mocked httpx: payload shape, SSRF
+  rejection at send time using real IP literals matching this codebase's established
+  convention, signature correctness/uniqueness-per-secret, no-redirect-following, non-2xx/
+  connection-error/timeout handling), `test_webhooks.py` (9: CRUD, SSRF-at-creation for
+  localhost/private-IP/link-local, non-http scheme rejected, ownership, auth-required), and
+  11 new tests appended to `test_alerting.py` covering exactly what the prompt asked for:
+  webhook fires on downtime/recovery/cert-expiry each independently of the email toggle (the
+  core proof the restructuring worked), webhook respects the same cooldown as email, a
+  disabled webhook never fires, per-webhook per-alert-type independence, bookkeeping recorded
+  once whether one or both channels fire, bookkeeping recorded when only the webhook channel
+  succeeds (and withheld when every channel fails), and multiple webhooks each firing
+  independently. Plus 3 new assertions in `test_ownership.py`. **238 backend tests total (was
+  208)**. Caught and fixed one real test-timing bug before it could land: an exact
+  `timedelta(days=9)` fixture computed `days_remaining` a moment later than it fixed
+  `expires_at`, and since `timedelta.days` truncates, that reads as 8 deterministically, not
+  occasionally — fixed with an hour of margin, not a retry/tolerance hack.
+- **Verified end-to-end against real infrastructure, about as strong as this project's own
+  verification gets**: rebuilt `api`, confirmed migration `012 → 013` applied cleanly. Created
+  a real webhook via the live API pointed at a real `webhook.site` capture token, created a
+  real failing target, and let the real worker check it — webhook.site's own API confirmed a
+  genuine HTTP POST was received with the exact expected payload (including real TLS cert
+  data) and a `X-Uptime-Monitor-Signature` header. **Independently recomputed the HMAC-SHA256
+  over the exact received body using the real secret and confirmed it matched the received
+  signature byte-for-byte** — cryptographic proof the signing implementation is correct, not
+  just that *a* header was present. Then forced a real recovery check via direct SQL +
+  `pg_notify` and confirmed webhook.site received a second real request
+  (`target.up`, after `target.down`, in the correct order) — proving both alert directions
+  fire for real over genuine network I/O, decoupled from email (which was never configured to
+  fail here — the test target's owner never touched `alert_on_downtime`, so this also
+  incidentally reconfirms email continues to work unchanged alongside webhooks). Also
+  reconfirmed SSRF-at-creation blocks a real metadata-IP URL (400) live. All verification data
+  deleted afterward via the real `DELETE /auth/me` flow. Stack left healthy (`db`/`api`/
+  `worker` all `Up`).
+- Not touched in this prompt, per its explicit scope: API keys, rate limiting, any frontend
+  code, retention, pagination.
+
+**Next: continue Phase 6** — API keys is the one backend feature area from the 6.1 report not
+yet built; retention/pagination remain lower-priority infra items; frontend work for
+everything shipped in Phase 6 so far (customization, pause/resume, tags, analytics, webhooks)
+is still entirely outstanding, deferred to its own later prompts per the explicit per-prompt
+scoping used throughout this phase.
 
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

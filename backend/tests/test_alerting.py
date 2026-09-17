@@ -1,12 +1,18 @@
 """Coverage for backend/realtime.py's alert-evaluation logic (prompt 4.6): downtime and
-cert-expiry alerting, wired into _handle_notification.
+cert-expiry alerting, wired into _handle_notification. Extended in Phase 6 prompt 6.6 with
+webhook fan-out coverage — see the "webhook fan-out" section below, which is the core proof
+that the eligibility/fan-out restructuring actually decoupled webhook delivery from the
+user's *email* preference toggle (building webhooks against the pre-6.6 shape would have
+wrongly coupled the two).
 
-Hermetic by construction, not by luck: mail.send_email (imported into realtime's own
-namespace) is mocked in every test here via `patch("realtime.send_email", ...)`. This matters
+Hermetic by construction, not by luck: mail.send_email and webhooks.send_webhook (both
+imported into realtime's own namespace) are mocked in every test here via
+`patch("realtime.send_email", ...)` / `patch("realtime.send_webhook", ...)`. This matters
 concretely in this environment — a genuine RESEND_API_KEY is configured in this project's own
 .env (needed for manual delivery verification), so without mocking, this suite would attempt
 real network calls to Resend and could actually send real email as a side effect of running
-pytest. That must never happen.
+pytest. That must never happen; the same reasoning applies to webhook delivery, which would
+otherwise make a real outbound HTTP request.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -85,6 +91,41 @@ async def _get_alert_history(target_id: int, region: str, alert_type: str):
             {"target_id": target_id, "region": region, "alert_type": alert_type},
         )
         return result.mappings().first()
+
+
+async def _insert_webhook(
+    user_id: int,
+    url: str = "http://8.8.8.8/hook",
+    secret: str = "test-secret",
+    alert_on_downtime: bool = True,
+    alert_on_cert_expiry: bool = True,
+    enabled: bool = True,
+) -> int:
+    """Raw SQL, not POST /webhooks — needed to construct states the API can't (a disabled
+    webhook; WebhookCreate has no `enabled` field, per routers/webhooks.py's own docstring
+    reasoning). Uses a real IP literal for the default URL, matching this codebase's
+    established SSRF-test convention — is_url_blocked() isn't mocked in these tests and does a
+    real DNS lookup, so a made-up hostname would fail resolution rather than exercising the
+    fan-out logic under test."""
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            text(
+                """
+                INSERT INTO webhooks (user_id, url, secret, alert_on_downtime, alert_on_cert_expiry, enabled)
+                VALUES (:user_id, :url, :secret, :alert_on_downtime, :alert_on_cert_expiry, :enabled)
+                RETURNING id
+                """
+            ),
+            {
+                "user_id": user_id,
+                "url": url,
+                "secret": secret,
+                "alert_on_downtime": alert_on_downtime,
+                "alert_on_cert_expiry": alert_on_cert_expiry,
+                "enabled": enabled,
+            },
+        )
+        return result.scalar_one()
 
 
 async def test_downtime_alert_fires_on_first_down_transition(client):
@@ -373,3 +414,236 @@ async def test_sse_push_still_delivers_when_alert_evaluation_raises(client):
 
     # The failed evaluation must not have left a half-written alert_history row behind either.
     assert await _get_alert_history(target_id, "local", "downtime") is None
+
+
+# --- Webhook fan-out (Phase 6, prompt 6.6) ---
+#
+# The core thing every test in this section proves, one way or another: webhook delivery is
+# independent of the user's *email* alert preference — email and webhooks are two separate
+# channels fanned out to after a single, channel-agnostic eligibility check, not two names for
+# the same code path. Building webhooks against the pre-6.6 shape (email-send and eligibility
+# fused together) would have made this impossible to prove, because there would have been no
+# way to enable a webhook without also enabling email.
+
+
+async def test_webhook_fires_on_downtime_independently_of_email_toggle(client):
+    register = await client.post("/auth/register", json={"email": "webhookdown1@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    await client.patch("/auth/preferences", json={"alert_on_downtime": False})  # email off
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-down1"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id)
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="Connection timed out")
+
+    with (
+        patch("realtime.send_email", new=AsyncMock(return_value=True)) as mock_email,
+        patch("realtime.send_webhook", new=AsyncMock(return_value=True)) as mock_webhook,
+    ):
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_email.assert_not_awaited()  # the whole point: email stayed off
+    mock_webhook.assert_awaited_once()
+    payload = mock_webhook.call_args[0][2]
+    assert payload["event"] == "target.down"
+    assert payload["target"]["id"] == target_id
+    row = await _get_alert_history(target_id, "local", "downtime")
+    assert row["last_state"] == "down"
+
+
+async def test_webhook_fires_on_recovery_independently_of_email_toggle(client):
+    register = await client.post("/auth/register", json={"email": "webhookrecover1@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    await client.patch("/auth/preferences", json={"alert_on_downtime": False})
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-recover1"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id)
+    await _insert_alert_history(target_id, "local", "downtime", "down", datetime.now(timezone.utc) - timedelta(minutes=5))
+    await _insert_check(target_id, is_up=True, status_code=200, latency_ms=150)
+
+    with (
+        patch("realtime.send_email", new=AsyncMock(return_value=True)) as mock_email,
+        patch("realtime.send_webhook", new=AsyncMock(return_value=True)) as mock_webhook,
+    ):
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_email.assert_not_awaited()
+    mock_webhook.assert_awaited_once()
+    payload = mock_webhook.call_args[0][2]
+    assert payload["event"] == "target.up"
+    row = await _get_alert_history(target_id, "local", "downtime")
+    assert row["last_state"] == "up"
+
+
+async def test_webhook_fires_on_cert_expiry_independently_of_email_toggle(client):
+    register = await client.post("/auth/register", json={"email": "webhookcert1@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    await client.patch("/auth/preferences", json={"alert_on_cert_expiry": False})
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-cert1"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=9)
+    await _insert_check(target_id, tls_cert_expires_at=expires_at, tls_cert_issuer="CN=R3")
+
+    with (
+        patch("realtime.send_email", new=AsyncMock(return_value=True)) as mock_email,
+        patch("realtime.send_webhook", new=AsyncMock(return_value=True)) as mock_webhook,
+    ):
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_email.assert_not_awaited()
+    mock_webhook.assert_awaited_once()
+    payload = mock_webhook.call_args[0][2]
+    assert payload["event"] == "target.cert_expiring"
+    row = await _get_alert_history(target_id, "local", "cert_expiry")
+    assert row["last_state"] == "expiring"
+
+
+async def test_webhook_respects_cooldown_same_as_email(client):
+    """The channel-agnostic eligibility check (cooldown/alert_history) applies before fan-out
+    — a webhook doesn't get its own independent cooldown clock, it shares the one eligibility
+    decision with email."""
+    register = await client.post("/auth/register", json={"email": "webhookcooldown1@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-cooldown1"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id)
+    await _insert_alert_history(target_id, "local", "downtime", "up", datetime.now(timezone.utc) - timedelta(seconds=30))
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="Connection timed out")
+
+    with (
+        patch("realtime.send_email", new=AsyncMock(return_value=True)) as mock_email,
+        patch("realtime.send_webhook", new=AsyncMock(return_value=True)) as mock_webhook,
+    ):
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_email.assert_not_awaited()
+    mock_webhook.assert_not_awaited()  # suppressed by the same cooldown, not just email
+
+
+async def test_disabled_webhook_never_fires(client):
+    register = await client.post("/auth/register", json={"email": "webhookdisabled1@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-disabled1"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id, enabled=False)
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="Connection timed out")
+
+    with (
+        patch("realtime.send_email", new=AsyncMock(return_value=True)),
+        patch("realtime.send_webhook", new=AsyncMock(return_value=True)) as mock_webhook,
+    ):
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_webhook.assert_not_awaited()
+
+
+async def test_webhook_downtime_toggle_off_does_not_suppress_its_own_cert_expiry_alert(client):
+    """Per-webhook, per-alert-type independence: a webhook with alert_on_downtime=False must
+    still fire for cert-expiry — the two toggles are genuinely independent, not one global
+    on/off."""
+    register = await client.post("/auth/register", json={"email": "webhooktypes1@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-types1"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id, alert_on_downtime=False, alert_on_cert_expiry=True)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=9)
+    await _insert_check(target_id, tls_cert_expires_at=expires_at, tls_cert_issuer="CN=R3")
+
+    with patch("realtime.send_webhook", new=AsyncMock(return_value=True)) as mock_webhook:
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_webhook.assert_awaited_once()
+    assert mock_webhook.call_args[0][2]["event"] == "target.cert_expiring"
+
+
+async def test_webhook_downtime_toggle_off_suppresses_downtime_alert(client):
+    register = await client.post("/auth/register", json={"email": "webhooktypes2@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-types2"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id, alert_on_downtime=False)
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="timeout")
+
+    with patch("realtime.send_webhook", new=AsyncMock(return_value=True)) as mock_webhook:
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_webhook.assert_not_awaited()
+
+
+async def test_alert_history_recorded_once_when_both_email_and_webhook_fire(client):
+    register = await client.post("/auth/register", json={"email": "webhookboth1@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-both1"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id)
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="timeout")
+
+    with (
+        patch("realtime.send_email", new=AsyncMock(return_value=True)) as mock_email,
+        patch("realtime.send_webhook", new=AsyncMock(return_value=True)) as mock_webhook,
+    ):
+        await realtime._handle_notification(f"{target_id}:local")
+
+    mock_email.assert_awaited_once()
+    mock_webhook.assert_awaited_once()
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            text("SELECT count(*) FROM alert_history WHERE target_id = :target_id"), {"target_id": target_id}
+        )
+        assert result.scalar_one() == 1  # exactly one bookkeeping row, not one per channel
+
+
+async def test_alert_history_recorded_when_only_the_webhook_channel_succeeds(client):
+    """"At least one channel delivered" is the bar for bookkeeping — a failed email alongside
+    a successful webhook still counts as alerted, per the documented multi-channel
+    generalization of the original single-channel rule."""
+    register = await client.post("/auth/register", json={"email": "webhookonly1@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-only1"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id)
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="timeout")
+
+    with (
+        patch("realtime.send_email", new=AsyncMock(return_value=False)),
+        patch("realtime.send_webhook", new=AsyncMock(return_value=True)),
+    ):
+        await realtime._handle_notification(f"{target_id}:local")
+
+    row = await _get_alert_history(target_id, "local", "downtime")
+    assert row is not None
+    assert row["last_state"] == "down"
+
+
+async def test_no_bookkeeping_when_every_channel_fails(client):
+    register = await client.post("/auth/register", json={"email": "webhookallfail1@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-allfail1"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id)
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="timeout")
+
+    with (
+        patch("realtime.send_email", new=AsyncMock(return_value=False)),
+        patch("realtime.send_webhook", new=AsyncMock(return_value=False)),
+    ):
+        await realtime._handle_notification(f"{target_id}:local")
+
+    assert await _get_alert_history(target_id, "local", "downtime") is None
+
+
+async def test_multiple_webhooks_each_fire_independently(client):
+    register = await client.post("/auth/register", json={"email": "webhookmulti1@example.com", "password": "pw"})
+    user_id = register.json()["id"]
+    created = await client.post("/targets", json={"url": "https://example.com/webhook-multi1"})
+    target_id = created.json()["id"]
+    await _insert_webhook(user_id, url="http://8.8.8.8/hook-a")
+    await _insert_webhook(user_id, url="http://1.1.1.1/hook-b")
+    await _insert_check(target_id, is_up=False, status_code=None, latency_ms=None, error="timeout")
+
+    with patch("realtime.send_webhook", new=AsyncMock(return_value=True)) as mock_webhook:
+        await realtime._handle_notification(f"{target_id}:local")
+
+    assert mock_webhook.await_count == 2
+    called_urls = {call.args[0] for call in mock_webhook.call_args_list}
+    assert called_urls == {"http://8.8.8.8/hook-a", "http://1.1.1.1/hook-b"}

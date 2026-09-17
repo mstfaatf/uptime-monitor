@@ -8,6 +8,7 @@ from models.target import Target
 from models.target_region_schedule import TargetRegionSchedule
 from models.target_tag import target_tags
 from models.user import User
+from models.webhook import Webhook
 
 __all__ = [
     "User",
@@ -18,4 +19,5 @@ __all__ = [
     "PasswordResetToken",
     "Tag",
     "target_tags",
+    "Webhook",
 ]
