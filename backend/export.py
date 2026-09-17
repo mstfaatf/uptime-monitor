@@ -1,5 +1,5 @@
-"""CSV compliance export (Phase 4, prompt 4.8): SLA %/incident-list computation
-re-implemented in Python, plus the CSV-building logic itself.
+"""CSV compliance export (Phase 4, prompt 4.8; formatting fixed in Phase 6, prompt 6.9):
+SLA %/incident-list computation re-implemented in Python, plus the CSV-building logic itself.
 
 The SLA/incident math already exists in TypeScript, client-side only — app/dashboard/[id]/
 page.tsx's computeSla and components/incident-timeline.tsx's computeIncidents, used to render
@@ -9,6 +9,45 @@ generation happens server-side in Python, the frontend's logic runs in the brows
 TypeScript, and there's no shared runtime between them to import one from the other. Kept in
 sync by hand, not import — if the frontend's incident/SLA definition ever changes, this file
 needs the same change made separately.
+
+**Prompt 6.9 formatting fix — what was wrong, concretely**: the original export packed three
+differently-shaped mini-tables (a 2-column key/value summary, a 3-column incident table, a
+10-column check-row table) into one physical CSV with only a blank line between them and no
+section titles beyond a bare "Incidents" row — a properly-typed CSV parser reading the whole
+file as one table (csv.DictReader, pandas.read_csv, most compliance tooling) would misread or
+choke on it, not just a human eyeballing it. Concrete, provable bugs, not just "could be
+nicer":
+  1. Timestamps were inconsistently formatted: bare datetime.isoformat() omits the fractional-
+     seconds part entirely when microsecond happens to be exactly 0 and includes 6 digits
+     otherwise, so two rows could render with different string lengths/shapes in the same
+     column depending on what microsecond a check happened to land on, not on any real
+     distinction. Fixed by formatting every timestamp-shaped cell with isoformat(timespec=
+     "seconds") — a single call site (_format_timestamp below), always the same shape.
+  2. The "Date range" summary field mixed a real ISO timestamp with literal English words
+     ("all time", "now") depending on whether a bound was given, and the Incidents section's
+     "End" column did the same thing for an unresolved incident ("ongoing" in the timestamp
+     column itself). Fixed: "Range Start"/"Range End" are now two separate cells, each either
+     a real timestamp or genuinely empty — never a word standing in for one — and the
+     Incidents section gained its own explicit "Ongoing" column instead of overloading "End".
+  3. The Incidents "Duration" column was a hand-formatted string like "20m" or "2h 15m" — a
+     number with its unit baked directly into the text, unparseable as a number without first
+     stripping/interpreting the unit suffix. Fixed: "Duration (minutes)" is now a plain
+     integer (blank while an incident is ongoing, matching "End" — a stable export shouldn't
+     report a duration that would change every time the same range is re-exported).
+  4. No section actually announced itself except "Incidents" (a bare title row with no
+     equivalent for the summary or the check rows) — an asymmetric, easy-to-miss structure.
+     Fixed: every section now opens with the same single-cell title convention ("Summary",
+     "Incidents", "Checks"), so the file's own structure is self-describing and a parser can
+     split on blank lines + read each section's title unambiguously.
+  5. Minor internal inconsistencies: "Is Up" used Python's capitalized True/False while
+     nothing else in the file used that casing; "SLA %" didn't follow the "(unit)" bracketing
+     convention every other unit-bearing header uses ("Latency (ms)", etc.); "Total checks"
+     wasn't Title Case like its sibling summary labels. Fixed by normalizing all of these —
+     true/false lowercase everywhere a boolean-shaped value appears, "SLA (%)", "Total Checks".
+
+None of this changes what data is in the export or who can request it — same checks, same
+ownership enforcement (GET /targets/{id}/export's own query/auth is untouched), same SLA/
+incident math. Only how it's written to the page changed.
 """
 
 import csv
@@ -52,14 +91,23 @@ def compute_incidents(checks: list[Check]) -> list[dict]:
     return incidents
 
 
-def _format_duration(delta: timedelta | None) -> str:
-    if delta is None:
-        return "ongoing"
-    total_minutes = round(delta.total_seconds() / 60)
-    if total_minutes < 60:
-        return f"{total_minutes}m"
-    hours, minutes = divmod(total_minutes, 60)
-    return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+def _format_timestamp(dt: datetime | None) -> str:
+    """The one place every timestamp-shaped cell in this file goes through — see the module
+    docstring's bug #1. timespec="seconds" forces a fixed shape regardless of whether the
+    value's microsecond component happens to be zero, so two timestamps in the same column
+    always render with the same format. None (an unbounded range boundary, or an unresolved
+    incident's end) becomes a genuinely empty cell, never a word like "now"/"ongoing" standing
+    in for a timestamp — see bug #2."""
+    if dt is None:
+        return ""
+    return dt.isoformat(timespec="seconds")
+
+
+def _format_bool(value: bool) -> str:
+    """Lowercase "true"/"false" — the one boolean convention used everywhere in this file
+    (Is Up, Ongoing), instead of Python's capitalized True/False the original export leaked
+    through unchanged from str(bool) — see the module docstring's bug #5."""
+    return "true" if value else "false"
 
 
 def build_csv(
@@ -71,18 +119,22 @@ def build_csv(
     checks: list[Check],
     retention_days: int | None = None,
 ) -> str:
-    """Build the full export file: a summary section (target/region/date range/SLA %/incident
-    list), a blank-line separator, then the raw check rows — one CSV file, readable both as a
-    human report (opened directly) and as tabular data (imported past the summary section).
+    """Build the full export file as three cleanly separated sections — Summary, Incidents,
+    Checks — each opening with its own single-cell title row and separated from its neighbors
+    by a blank line (see the module docstring's bug #4 for why every section needs one, not
+    just Incidents as before). A caller that wants to read this programmatically should split
+    on blank lines and treat each section as its own small, uniformly-shaped table — every row
+    within one section has the same column count, so a section read in isolation is a
+    perfectly well-formed CSV; it's only the *whole file* that mixes shapes, and only because
+    it's genuinely three different reports concatenated into one download, not one table.
 
     retention_days (Phase 6, prompt 6.8): when given, and the *requested* range_from predates
     the retention cutoff (now() - retention_days) — including range_from=None, "all time",
     which trivially predates any cutoff — a Note row is added to the summary saying so. This
-    compares the requested range, not the actual earliest row present, per the prompt's own
+    compares the requested range, not the actual earliest row present, per that prompt's own
     framing: the point is to warn a caller who asked for more history than the retention
     policy could possibly still have, not to describe exactly what happened to be pruned by
-    the time this particular export ran. Optional (default None = no note) so every pre-6.8
-    caller/test that doesn't pass it keeps getting the exact same output as before.
+    the time this particular export ran. Optional (default None = no note).
     """
     sla = compute_sla(checks)
     incidents = compute_incidents(checks)
@@ -90,18 +142,15 @@ def build_csv(
     buf = io.StringIO()
     writer = csv.writer(buf)
 
+    # --- Summary ---
+    writer.writerow(["Summary"])
     writer.writerow(["Target", target_label])
     writer.writerow(["URL", target_url])
     writer.writerow(["Region", region])
-    writer.writerow(
-        [
-            "Date range",
-            f"{range_from.isoformat() if range_from else 'all time'} to "
-            f"{range_to.isoformat() if range_to else 'now'}",
-        ]
-    )
-    writer.writerow(["Total checks", len(checks)])
-    writer.writerow(["SLA %", f"{sla:.2f}" if sla is not None else ""])
+    writer.writerow(["Range Start", _format_timestamp(range_from)])
+    writer.writerow(["Range End", _format_timestamp(range_to)])
+    writer.writerow(["Total Checks", len(checks)])
+    writer.writerow(["SLA (%)", f"{sla:.2f}" if sla is not None else ""])
     if retention_days is not None:
         retention_cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         if range_from is None or range_from < retention_cutoff:
@@ -115,18 +164,24 @@ def build_csv(
             )
     writer.writerow([])
 
+    # --- Incidents ---
     writer.writerow(["Incidents"])
-    writer.writerow(["Start", "End", "Duration"])
+    writer.writerow(["Start", "End", "Ongoing", "Duration (minutes)"])
     for incident in incidents:
+        ongoing = incident["end"] is None
+        duration_minutes = "" if incident["duration"] is None else round(incident["duration"].total_seconds() / 60)
         writer.writerow(
             [
-                incident["start"].isoformat(),
-                incident["end"].isoformat() if incident["end"] else "ongoing",
-                _format_duration(incident["duration"]),
+                _format_timestamp(incident["start"]),
+                _format_timestamp(incident["end"]),
+                _format_bool(ongoing),
+                duration_minutes,
             ]
         )
     writer.writerow([])
 
+    # --- Checks ---
+    writer.writerow(["Checks"])
     writer.writerow(
         [
             "Checked At",
@@ -155,8 +210,8 @@ def build_csv(
         )
         writer.writerow(
             [
-                c.checked_at.isoformat() if c.checked_at else "",
-                c.is_up,
+                _format_timestamp(c.checked_at),
+                _format_bool(c.is_up),
                 c.status_code if c.status_code is not None else "",
                 c.latency_ms if c.latency_ms is not None else "",
                 c.dns_ms if c.dns_ms is not None else "",

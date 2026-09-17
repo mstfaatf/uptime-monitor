@@ -3880,5 +3880,73 @@ customization/pause/resume/tags, 6.14 for analytics, plus whatever prompts cover
 webhooks/API-key management UI) per the explicit per-prompt scoping used throughout this phase.
 No backend/worker work is currently outstanding in the 6.1 report.
 
+Prompt 6.9 (CSV export formatting fix) is complete. Standalone, independent of the rest of
+Phase 6, per the prompt — fixes the poor formatting flagged as a Phase 4 leftover; no data
+content or ownership-enforcement change.
+- **What was actually wrong, found via live investigation against real seeded data before
+  touching any code**: the original `build_csv` produced one physical CSV file that was really
+  three differently-shaped mini-tables (a 2-column summary, a 3-column incident table, a
+  10-column check-row table) with only a bare "Incidents" title row and blank lines separating
+  them — asymmetric and not self-describing. Concretely: (1) timestamps were inconsistently
+  formatted — bare `datetime.isoformat()` omits the fractional-seconds part only when
+  `microsecond == 0`, so two otherwise-identical-shaped timestamps in the same column could
+  render with different string lengths depending on what microsecond a check happened to land
+  on, confirmed via both a standalone Python reproduction and real seeded rows (one exact
+  10:00:00, two with real `.123456`/`.654321` fractional seconds); (2) the "Date range" field
+  mixed a real ISO timestamp with the English words "all time"/"now," and the Incidents
+  section's "End" column did the same with the literal word "ongoing"; (3) the Incidents
+  "Duration" column was a hand-formatted string like "20m"/"2h 15m" — a number with its unit
+  baked into the text, unparseable without stripping the suffix, directly matching the
+  prompt's "numeric fields... stringified with units baked in" complaint; (4) no section but
+  Incidents had a title row, so the file's own structure wasn't self-describing; (5) minor
+  inconsistencies — `True`/`False` casing, "SLA %" not following the "(unit)" convention every
+  other header uses, "Total checks" not Title Case.
+- **Fix** (`backend/export.py`): every timestamp-shaped cell now goes through one
+  `_format_timestamp()` helper using `isoformat(timespec="seconds")` (`None` → empty string,
+  never a word). "Date range" split into separate "Range Start"/"Range End" summary rows.
+  Incidents gained an explicit "Ongoing" column (`true`/`false`) instead of overloading "End";
+  "Duration (minutes)" is now a plain integer, blank while ongoing (deliberately not computed
+  "as of now," so a fixed query's export stays deterministic on re-export). All three sections
+  now open with the same single-cell title convention ("Summary"/"Incidents"/"Checks"),
+  blank-line-separated — a caller can split on blank lines and read each section as its own
+  well-formed sub-table. `Is Up` and `Ongoing` are lowercase `true`/`false`; header renamed to
+  "SLA (%)"; "Total checks" → "Total Checks". The now-unused `_format_duration()` helper (the
+  "20m" formatter) was deleted rather than left dead. `compute_sla`/`compute_incidents` (the
+  data functions) were not touched — formatting only, confirmed by re-running the SLA/incident
+  pure-function tests unchanged and by live-checking that the seeded data's SLA/incident
+  figures matched hand computation before and after.
+- **Tests** (`backend/tests/test_export.py`): added a `_parse_sections()` helper that splits
+  the CSV into its three named sections by blank line + title row, then rewrote the structural
+  test to assert against parsed sections instead of hardcoded row indices (which would have
+  silently drifted every time a summary field is added/removed) — checks every section is
+  present, every summary field/incident row/check row has the exact expected value and type
+  (plain numbers, lowercase booleans, blank vs. populated). Added dedicated tests for: the
+  ongoing-incident case (blank End/Duration, `Ongoing=true`), unbounded vs. explicit
+  Range Start/End, and the exact microsecond-inconsistency bug (two checks at the same second
+  with/without microseconds render byte-identical timestamp shapes). Updated the four
+  endpoint-level tests whose assertions depended on the old row layout (`rows[2]` → `rows[3]`
+  for the Region row now that Summary has its own title row at index 0, `,True,` → `,true,`,
+  `"Total checks"` → `"Total Checks"`). All pre-existing retention-note tests
+  (`_note_row`-based) needed zero changes — the Note row's own label/position logic didn't
+  change, only its neighbors' formatting. 283 backend tests total (was 279; net +4 after
+  replacing one old test with five new ones).
+- **Verified live against the real running stack**: rebuilt `api`, registered a throwaway
+  user, created and paused a target, and seeded 4 real check rows via direct SQL — one exact
+  round-second timestamp, two with genuine `.123456`/`.654321` fractional seconds (to
+  concretely exercise the fixed bug, not just a synthetic case), forming one resolved
+  20-minute incident. Fetched the real export and inspected it with `cat -A`: confirmed all
+  three timestamps in the Checks section render with identical shape
+  (`2026-09-17T10:10:00+00:00`, fractional seconds correctly dropped) rather than the old
+  inconsistent lengths, `Range Start`/`Range End` both genuinely blank (no target `from`/`to`
+  was given), the Incidents row reads `...,false,20` (plain integer minutes, `Ongoing=false`),
+  and all three sections open with their own title row. Re-confirmed ownership enforcement is
+  untouched: a second user's export attempt on the same target still 404s, an unauthenticated
+  attempt still 401s. Cleaned up both verification accounts via the real `DELETE /auth/me`
+  cascade; confirmed via a direct query that the seeded checks were gone afterward.
+- Not touched in this prompt, per its explicit scope: `compute_sla`/`compute_incidents` (data,
+  not formatting), the export endpoint's auth/ownership/query logic, PDF export, any frontend
+  code — this fix is entirely inside `backend/export.py`'s `build_csv` (plus its docstring) and
+  the corresponding test file.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

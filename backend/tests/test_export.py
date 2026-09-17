@@ -33,6 +33,33 @@ def _t(minutes: int) -> datetime:
     return datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=minutes)
 
 
+def _parse_sections(csv_text: str) -> dict[str, list[list[str]]]:
+    """Split an exported CSV into its named sections (Summary/Incidents/Checks) — the "clean
+    separation" structure prompt 6.9 introduced. Each section is led by a single-cell title
+    row and separated from its neighbors by a blank line; returns {section_name: [rows...]},
+    excluding the title row itself. Used so tests assert against the real section structure
+    instead of hardcoded row indices, which would silently drift every time a summary field
+    is added/removed."""
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    sections: dict[str, list[list[str]]] = {}
+    current_name: str | None = None
+    current_rows: list[list[str]] = []
+    for row in rows:
+        if not row:
+            if current_name is not None:
+                sections[current_name] = current_rows
+            current_name = None
+            current_rows = []
+            continue
+        if current_name is None:
+            current_name = row[0]
+            continue
+        current_rows.append(row)
+    if current_name is not None:
+        sections[current_name] = current_rows
+    return sections
+
+
 def test_compute_sla_empty_is_none():
     assert compute_sla([]) is None
 
@@ -97,26 +124,100 @@ def test_build_csv_days_remaining_is_relative_to_checked_at_not_now():
     assert data_row[8] == "10"  # TLS Cert Days Remaining column, not a huge negative number
 
 
-def test_build_csv_contains_summary_and_data_sections():
+def test_build_csv_has_three_cleanly_separated_sections():
+    """The core 6.9 structural fix: Summary/Incidents/Checks are each their own title-rowed,
+    blank-line-separated, uniformly-shaped sub-table — not one section (Incidents) singled out
+    with a title while the other two aren't."""
     checks = [
         _FakeCheck(_t(0), True, status_code=200, latency_ms=120),
         _FakeCheck(_t(1), False, error="Connection timed out"),
         _FakeCheck(_t(2), True, status_code=200, latency_ms=95),
     ]
     csv_text = build_csv("My Target", "https://example.com", "local", None, None, checks)
-    rows = list(csv.reader(io.StringIO(csv_text)))
+    sections = _parse_sections(csv_text)
 
-    assert rows[0] == ["Target", "My Target"]
-    assert rows[1] == ["URL", "https://example.com"]
-    assert rows[2] == ["Region", "local"]
-    sla_row = next(r for r in rows if r and r[0] == "SLA %")
-    assert sla_row[1] == "66.67"
-    header_row = next(r for r in rows if r and r[0] == "Checked At")
-    assert header_row == [
+    assert set(sections) == {"Summary", "Incidents", "Checks"}
+
+    summary = {row[0]: row[1] for row in sections["Summary"]}
+    assert summary["Target"] == "My Target"
+    assert summary["URL"] == "https://example.com"
+    assert summary["Region"] == "local"
+    assert summary["Range Start"] == ""
+    assert summary["Range End"] == ""
+    assert summary["Total Checks"] == "3"
+    assert summary["SLA (%)"] == "66.67"
+
+    # The down check at _t(1) recovers at _t(2) — a resolved, not ongoing, incident.
+    incidents_header, *incident_rows = sections["Incidents"]
+    assert incidents_header == ["Start", "End", "Ongoing", "Duration (minutes)"]
+    assert len(incident_rows) == 1
+    assert incident_rows[0][0] == _t(1).isoformat(timespec="seconds")
+    assert incident_rows[0][1] == _t(2).isoformat(timespec="seconds")
+    assert incident_rows[0][2] == "false"
+    assert incident_rows[0][3] == "1"
+
+    checks_header, *check_rows = sections["Checks"]
+    assert checks_header == [
         "Checked At", "Is Up", "Status Code", "Latency (ms)", "DNS (ms)", "TCP (ms)",
         "TLS (ms)", "TTFB (ms)", "TLS Cert Days Remaining", "Error",
     ]
-    assert len(rows) - (rows.index(header_row) + 1) == 3  # one data row per check
+    assert len(check_rows) == 3
+    assert check_rows[0][1] == "true"  # lowercase, not Python's "True"
+    assert check_rows[0][3] == "120"  # a plain number, never "120ms"
+    assert check_rows[1][1] == "false"
+    assert check_rows[1][9] == "Connection timed out"
+
+
+def test_build_csv_incident_ongoing_has_blank_end_and_duration():
+    checks = [_FakeCheck(_t(0), True), _FakeCheck(_t(1), False, error="timeout")]
+    csv_text = build_csv("My Target", "https://example.com", "local", None, None, checks)
+    sections = _parse_sections(csv_text)
+    _, *incident_rows = sections["Incidents"]
+    assert len(incident_rows) == 1
+    assert incident_rows[0][1] == ""  # End: blank, never the literal word "ongoing"
+    assert incident_rows[0][2] == "true"  # Ongoing
+    assert incident_rows[0][3] == ""  # Duration: blank, not a stringified guess
+
+
+def test_build_csv_range_start_and_end_are_plain_iso_timestamps_not_english_words():
+    range_from = _t(-60)
+    range_to = _t(60)
+    checks = [_FakeCheck(_t(0), True, status_code=200, latency_ms=100)]
+    csv_text = build_csv("My Target", "https://example.com", "local", range_from, range_to, checks)
+    sections = _parse_sections(csv_text)
+    summary = {row[0]: row[1] for row in sections["Summary"]}
+    assert summary["Range Start"] == range_from.isoformat(timespec="seconds")
+    assert summary["Range End"] == range_to.isoformat(timespec="seconds")
+
+
+def test_build_csv_unbounded_range_is_blank_not_a_word():
+    """Previously rendered as the English words "all time"/"now" mixed into a timestamp
+    column — now genuinely empty, matching every other unset value in the file."""
+    checks = [_FakeCheck(_t(0), True, status_code=200, latency_ms=100)]
+    csv_text = build_csv("My Target", "https://example.com", "local", None, None, checks)
+    sections = _parse_sections(csv_text)
+    summary = {row[0]: row[1] for row in sections["Summary"]}
+    assert summary["Range Start"] == ""
+    assert summary["Range End"] == ""
+
+
+def test_build_csv_timestamps_are_consistently_formatted_regardless_of_microseconds():
+    """The concrete bug this prompt fixes: bare datetime.isoformat() omits the fractional-
+    seconds part only when microsecond happens to be exactly 0, so two otherwise-identical-
+    shaped timestamps would render with different string lengths depending on data, not
+    intent. timespec="seconds" makes every timestamp in the file the same shape."""
+    exact_second = datetime(2026, 1, 1, 12, 0, 0, 0, tzinfo=timezone.utc)
+    with_micros = datetime(2026, 1, 1, 12, 0, 1, 123456, tzinfo=timezone.utc)
+    checks = [
+        _FakeCheck(exact_second, True, status_code=200, latency_ms=100),
+        _FakeCheck(with_micros, True, status_code=200, latency_ms=100),
+    ]
+    csv_text = build_csv("My Target", "https://example.com", "local", None, None, checks)
+    sections = _parse_sections(csv_text)
+    _, *check_rows = sections["Checks"]
+    assert check_rows[0][0] == "2026-01-01T12:00:00+00:00"
+    assert check_rows[1][0] == "2026-01-01T12:00:01+00:00"
+    assert len(check_rows[0][0]) == len(check_rows[1][0])
 
 
 def _note_row(rows):
@@ -247,7 +348,8 @@ async def test_export_returns_csv_with_correct_headers_and_content(client):
     assert f'target-{target_id}-local-checks.csv' in resp.headers["content-disposition"]
 
     rows = list(csv.reader(io.StringIO(resp.text)))
-    assert rows[2] == ["Region", "local"]
+    assert rows[0] == ["Summary"]
+    assert rows[3] == ["Region", "local"]
 
 
 async def test_export_scopes_to_the_requested_region_only(client):
@@ -262,7 +364,7 @@ async def test_export_scopes_to_the_requested_region_only(client):
     header_row_idx = resp.text.splitlines().index("Checked At,Is Up,Status Code,Latency (ms),DNS (ms),TCP (ms),TLS (ms),TTFB (ms),TLS Cert Days Remaining,Error")
     data_lines = resp.text.splitlines()[header_row_idx + 1:]
     assert len(data_lines) == 1
-    assert ",True," in data_lines[0]  # the local (up) check, not eu-west's down one
+    assert ",true," in data_lines[0]  # the local (up) check, not eu-west's down one
 
 
 async def test_export_filters_by_date_range(client):
@@ -278,7 +380,7 @@ async def test_export_filters_by_date_range(client):
     resp = await client.get(f"/targets/{target_id}/export", params={"region": "local", "from": from_param})
     assert resp.status_code == 200
     rows = list(csv.reader(io.StringIO(resp.text)))
-    total_row = next(r for r in rows if r and r[0] == "Total checks")
+    total_row = next(r for r in rows if r and r[0] == "Total Checks")
     assert total_row[1] == "1"  # only the check inside the range
 
 
