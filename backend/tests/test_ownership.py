@@ -58,6 +58,8 @@ async def test_user_cannot_view_another_users_target_detail_or_checks(client):
     assert patch_resp.status_code == 404
     assert (await client.post(f"/targets/{target_id}/pause")).status_code == 404
     assert (await client.post(f"/targets/{target_id}/resume")).status_code == 404
+    assert (await client.post(f"/targets/{target_id}/tags", json={"tag_id": 1})).status_code == 404
+    assert (await client.delete(f"/targets/{target_id}/tags/1")).status_code == 404
     await client.post("/auth/logout")
 
     # Confirm it's untouched for the real owner — including that the other user's failed PATCH
@@ -87,3 +89,8 @@ async def test_anonymous_user_cannot_access_any_target_endpoint(client):
     assert (await client.patch(f"/targets/{target_id}", json={"name": "x"})).status_code == 401
     assert (await client.post(f"/targets/{target_id}/pause")).status_code == 401
     assert (await client.post(f"/targets/{target_id}/resume")).status_code == 401
+    assert (await client.post(f"/targets/{target_id}/tags", json={"tag_id": 1})).status_code == 401
+    assert (await client.delete(f"/targets/{target_id}/tags/1")).status_code == 401
+    assert (await client.get("/tags")).status_code == 401
+    assert (await client.post("/tags", json={"name": "x"})).status_code == 401
+    assert (await client.delete("/tags/1")).status_code == 401

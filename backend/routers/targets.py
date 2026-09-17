@@ -10,14 +10,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased, selectinload
 
 import realtime
 from auth import get_current_user
 from database import get_db
 from export import build_csv
-from models import Check, Target, TargetRegionSchedule, User
+from models import Check, Tag, Target, TargetRegionSchedule, User
 from rate_limit import limiter
+from routers.tags import TagResponse, _tag_to_response
 from security.crypto import encrypt_secret
 from security.ssrf import is_url_blocked
 
@@ -116,18 +117,27 @@ class TargetResponse(BaseModel):
     keyword_match_mode: str
     paused: bool
     check_interval_seconds: int | None
+    # Phase 6, prompt 6.4 — the multi-tag shape (a target can carry several labels), not a
+    # single group_id. Attach/detach via POST/DELETE /targets/{id}/tags below.
+    tags: list[TagResponse]
 
     class Config:
         from_attributes = True
 
 
-def _target_to_response(target: Target) -> TargetResponse:
-    """Build a TargetResponse from an ORM Target — shared by create/list/update/pause/resume so
-    the field list can't silently drift between call sites. basic_auth_password_encrypted is
-    deliberately never included here or anywhere else: the decrypted password is never
-    returned by any endpoint, and neither is the encrypted form (there's no legitimate reason
-    for a client to see it — an edit form shows only the username, per the "blank means
-    unchanged" convention in update_target)."""
+def _target_to_response(target: Target, tags: list[Tag]) -> TargetResponse:
+    """Build a TargetResponse from an ORM Target — shared by create/list/update/pause/resume/
+    attach/detach so the field list can't silently drift between call sites.
+    basic_auth_password_encrypted is deliberately never included here or anywhere else: the
+    decrypted password is never returned by any endpoint, and neither is the encrypted form
+    (there's no legitimate reason for a client to see it — an edit form shows only the
+    username, per the "blank means unchanged" convention in update_target).
+
+    `tags` is a required, explicit argument rather than read off `target.tags` internally —
+    SQLAlchemy's async ORM doesn't support lazy-loading a relationship outside an awaited
+    context, so every call site must have already loaded (or, for a brand-new target, simply
+    knows to be empty) the tags list itself before calling this function. Forcing it as a
+    parameter makes that a call-site decision that can't be silently forgotten."""
     return TargetResponse(
         id=target.id,
         url=target.url,
@@ -140,6 +150,7 @@ def _target_to_response(target: Target) -> TargetResponse:
         keyword_match_mode=target.keyword_match_mode,
         paused=target.paused,
         check_interval_seconds=target.check_interval_seconds,
+        tags=[_tag_to_response(t) for t in tags],
     )
 
 
@@ -414,15 +425,33 @@ async def stream_target_updates(
 
 @router.get("", response_model=list[TargetResponse])
 async def list_targets(
+    tag: str | None = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return all targets owned by the authenticated user."""
-    result = await db.execute(
-        select(Target).where(Target.user_id == current_user.id).order_by(Target.created_at.desc())
+    """Return all targets owned by the authenticated user, each with its full tags list.
+
+    `?tag=<name>` optionally filters to targets carrying a tag with that exact name. Filters by
+    name (not tag_id) — the more natural shape for a query-string filter, matching how `region`
+    is a plain string identifier elsewhere in this file, not a numeric id a caller would have to
+    look up first. The join+filter only restricts *which targets* come back; it doesn't affect
+    which tags are eager-loaded for them below — a matched target's response still lists every
+    tag it has, not just the one that matched the filter. No explicit Tag.user_id check needed
+    on the filter join: a tag can only ever be attached to one of the caller's own targets in
+    the first place (enforced at attach time), so any tag reachable via this join already
+    belongs to the caller.
+    """
+    query = (
+        select(Target)
+        .where(Target.user_id == current_user.id)
+        .options(selectinload(Target.tags))
+        .order_by(Target.created_at.desc())
     )
+    if tag is not None:
+        query = query.join(Target.tags).where(Tag.name == tag)
+    result = await db.execute(query)
     targets = result.scalars().all()
-    return [_target_to_response(t) for t in targets]
+    return [_target_to_response(t, tags=t.tags) for t in targets]
 
 
 @router.post("", response_model=TargetResponse, status_code=status.HTTP_201_CREATED)
@@ -485,7 +514,7 @@ async def create_target(
     db.add(target)
     await db.flush()
     await db.refresh(target)
-    return _target_to_response(target)
+    return _target_to_response(target, tags=[])  # a brand-new target never has any tags yet
 
 
 @router.patch("/{target_id}", response_model=TargetResponse)
@@ -516,10 +545,18 @@ async def update_target(
     to actually remove basic auth entirely vs. just rotate the password vs. rename the
     username.
     """
-    result = await db.execute(select(Target).where(Target.id == target_id, Target.user_id == current_user.id))
+    result = await db.execute(
+        select(Target)
+        .where(Target.id == target_id, Target.user_id == current_user.id)
+        .options(selectinload(Target.tags))
+    )
     target = result.scalar_one_or_none()
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+    # Captured now, before db.refresh() below — this endpoint never touches the tags
+    # relationship itself, and capturing into a plain list here sidesteps any question about
+    # whether a relationship loaded via selectinload survives an explicit refresh().
+    tags = list(target.tags)
 
     provided = body.model_dump(exclude_unset=True)
 
@@ -567,7 +604,7 @@ async def update_target(
 
     await db.flush()
     await db.refresh(target)
-    return _target_to_response(target)
+    return _target_to_response(target, tags=tags)
 
 
 @router.post("/{target_id}/pause", response_model=TargetResponse)
@@ -581,14 +618,19 @@ async def pause_target(
     region, until it's resumed. Idempotent — pausing an already-paused target just re-confirms
     the state, no error. 404 (not 403) for a target that doesn't exist or isn't owned by the
     caller, same pattern as every other target-scoped endpoint."""
-    result = await db.execute(select(Target).where(Target.id == target_id, Target.user_id == current_user.id))
+    result = await db.execute(
+        select(Target)
+        .where(Target.id == target_id, Target.user_id == current_user.id)
+        .options(selectinload(Target.tags))
+    )
     target = result.scalar_one_or_none()
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+    tags = list(target.tags)  # captured before refresh() — see update_target's comment on this
     target.paused = True
     await db.flush()
     await db.refresh(target)
-    return _target_to_response(target)
+    return _target_to_response(target, tags=tags)
 
 
 @router.post("/{target_id}/resume", response_model=TargetResponse)
@@ -610,10 +652,15 @@ async def resume_target(
     worker-owned. 404 (not 403) for a target that doesn't exist or isn't owned by the caller,
     same pattern as every other target-scoped endpoint.
     """
-    result = await db.execute(select(Target).where(Target.id == target_id, Target.user_id == current_user.id))
+    result = await db.execute(
+        select(Target)
+        .where(Target.id == target_id, Target.user_id == current_user.id)
+        .options(selectinload(Target.tags))
+    )
     target = result.scalar_one_or_none()
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+    tags = list(target.tags)  # captured before refresh() — see update_target's comment on this
     target.paused = False
     await db.execute(
         text("UPDATE target_region_schedule SET next_check_at = now() WHERE target_id = :target_id"),
@@ -621,7 +668,75 @@ async def resume_target(
     )
     await db.flush()
     await db.refresh(target)
-    return _target_to_response(target)
+    return _target_to_response(target, tags=tags)
+
+
+class AttachTagBody(BaseModel):
+    tag_id: int
+
+
+@router.post("/{target_id}/tags", response_model=TargetResponse)
+async def attach_tag(
+    target_id: int,
+    body: AttachTagBody,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Attach an existing tag (create it first via POST /tags) to a target. Ownership-enforced
+    on BOTH sides: the target must belong to the caller AND the tag must belong to the caller —
+    either failing returns the same 404 (can't tell which one failed, or that either even
+    exists, matching every other ownership check in this file). Idempotent — attaching a tag
+    that's already attached is a no-op, not an error."""
+    target_result = await db.execute(
+        select(Target)
+        .where(Target.id == target_id, Target.user_id == current_user.id)
+        .options(selectinload(Target.tags))
+    )
+    target = target_result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+
+    tag_result = await db.execute(select(Tag).where(Tag.id == body.tag_id, Tag.user_id == current_user.id))
+    tag = tag_result.scalar_one_or_none()
+    if tag is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tag not found")
+
+    if tag not in target.tags:
+        target.tags.append(tag)
+        await db.flush()
+    return _target_to_response(target, tags=list(target.tags))
+
+
+@router.delete("/{target_id}/tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def detach_tag(
+    target_id: int,
+    tag_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Detach a tag from a target. Ownership-enforced on both — same pattern as attach_tag: a
+    target or tag that doesn't exist or isn't owned by the caller is 404. Detaching a tag that
+    exists, is owned by the caller, but isn't currently attached to this particular target is
+    NOT an error (204) — the end state the caller wanted (not attached) already holds either
+    way, same idempotency convention as pause/resume above."""
+    target_result = await db.execute(
+        select(Target)
+        .where(Target.id == target_id, Target.user_id == current_user.id)
+        .options(selectinload(Target.tags))
+    )
+    target = target_result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+
+    tag_result = await db.execute(select(Tag).where(Tag.id == tag_id, Tag.user_id == current_user.id))
+    tag = tag_result.scalar_one_or_none()
+    if tag is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tag not found")
+
+    if tag in target.tags:
+        target.tags.remove(tag)
+        await db.flush()
+    return None
 
 
 @router.get("/{target_id}", response_model=TargetStatusResponse)

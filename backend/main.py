@@ -13,7 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 import realtime
 from config import settings
 from rate_limit import limiter
-from routers import auth, targets
+from routers import auth, tags, targets
 
 
 @asynccontextmanager
@@ -74,6 +74,7 @@ async def add_security_headers(request: Request, call_next):
 
 app.include_router(auth.router)
 app.include_router(targets.router)
+app.include_router(tags.router)
 
 
 @app.get("/health")

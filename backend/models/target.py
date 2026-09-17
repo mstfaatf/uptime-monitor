@@ -8,9 +8,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
+from models.target_tag import target_tags
 
 if TYPE_CHECKING:
     from models.check import Check
+    from models.tag import Tag
     from models.target_region_schedule import TargetRegionSchedule
     from models.user import User
 
@@ -63,3 +65,8 @@ class Target(Base):
     region_schedules: Mapped[list["TargetRegionSchedule"]] = relationship(
         "TargetRegionSchedule", back_populates="target", cascade="all, delete-orphan"
     )
+    # Many-to-many via target_tags (Phase 6, prompt 6.4). No cascade= here — deleting a target
+    # must never delete a Tag itself (it might be attached to other targets, or just sitting
+    # unused), only the target_tags row, which ON DELETE CASCADE on the FK already handles at
+    # the database level.
+    tags: Mapped[list["Tag"]] = relationship("Tag", secondary=target_tags, back_populates="targets")

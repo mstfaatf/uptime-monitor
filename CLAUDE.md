@@ -3498,9 +3498,78 @@ directly, not verified by this session — no Railway access) — the deploy blo
 real end-to-end production check (same technique as 6.2's basic-auth live verification) once
 this branch is actually deployed, rather than assuming it's correct.
 
-**Next: continue Phase 6 per the 6.1 build order — step 3, groups** (independent, low-risk —
-per the 6.1 report, worth confirming the single-group-vs-multi-tag shape first, still an open
-question).
+Phase 6, prompt 6.4 (monitor tags) is complete — the "groups" item from the 6.1 report,
+implemented using the multi-tag shape (a target can carry several labels), not a single
+group_id — this resolves the open question flagged since 6.1. Schema and API only, no
+frontend, per this prompt's explicit scope; the frontend for tags is its own later prompt
+(6.13).
+- **Schema**: migration `012_add_tags_and_target_tags.py` adds `tags(id, user_id FK CASCADE,
+  name, created_at, UNIQUE(user_id, name))` and `target_tags(target_id, tag_id)` — a pure
+  many-to-many join table (composite PK, both FKs `ON DELETE CASCADE`, no columns of its own).
+  New `backend/models/tag.py` (`Tag`) and `backend/models/target_tag.py` (the `target_tags`
+  Core `Table`, used as the `secondary=` for a `Target.tags <-> Tag.targets` relationship — the
+  first many-to-many relationship in this codebase; every other cross-table link so far has
+  been one-to-many). `target_tag.py` is deliberately its own tiny module so neither `target.py`
+  nor `tag.py` has to import the other's module just to reach the join table.
+- **New `backend/routers/tags.py`** (registered in `main.py`): `GET /tags`, `POST /tags`
+  (409 on a duplicate name for the same user — name uniqueness is per-user, not global, same
+  convention as target-URL uniqueness), `DELETE /tags/{id}` (404-not-403 if not owned;
+  `target_tags` rows cascade at the database level, no explicit cleanup code).
+- **`POST /targets/{id}/tags` and `DELETE /targets/{id}/tags/{tag_id}`** (in
+  `routers/targets.py`, since they're target-scoped first): both ownership-enforced on *both*
+  sides — the target must belong to the caller AND the tag must belong to the caller, either
+  failing returns the same 404. Both idempotent (attaching an already-attached tag, or
+  detaching one that isn't attached, is a no-op success, not an error) — same convention 6.3
+  established for pause/resume.
+- **`GET /targets` now returns each target's full `tags` list**, plus an optional `?tag=<name>`
+  filter (by tag **name**, not `tag_id` — the more natural shape for a query-string filter,
+  matching how `region` is already a plain string elsewhere in this file rather than a numeric
+  id a caller would have to look up first). Deliberately scoped to `GET /targets`
+  (`TargetResponse`) only, not `GET /targets/status` (`TargetStatusResponse`) — consistent with
+  6.2/6.3's own precedent of keeping target-configuration metadata off the check-status
+  response, which is reserved for check-result data. `GET /targets/status` tags/filtering is
+  left for whichever later prompt actually wires the frontend dashboard to it.
+- **Real async-ORM correctness issue, caught and designed around before it could become a live
+  bug**: SQLAlchemy's async engine doesn't support lazy-loading a relationship outside an
+  awaited context (accessing an unloaded `target.tags` inside a plain sync function would raise
+  `MissingGreenlet`), and it was genuinely unclear whether `AsyncSession.refresh()` reliably
+  keeps a `selectinload`-loaded relationship populated afterward. Rather than gamble on that,
+  `_target_to_response()` now takes `tags` as a **required, explicit argument** instead of
+  reading `target.tags` internally — every call site either knows the answer trivially (a
+  brand-new target from `create_target` always has `tags=[]`) or captures `list(target.tags)`
+  into a plain Python variable immediately after an eager `.options(selectinload(Target.tags))`
+  fetch, *before* any subsequent `db.refresh()` call, sidestepping the ambiguity entirely
+  rather than relying on undocumented-feeling framework behavior.
+- **Tests**: `test_tags.py` (11: CRUD, alphabetical listing, duplicate-name 409, same name
+  allowed across different users, empty/overlong name rejected, cross-user list/delete
+  isolation, auth-required) and `test_target_tags.py` (18: attach/detach + idempotency,
+  attach/detach 404 on a nonexistent tag, **both** cross-ownership directions — another user's
+  tag onto my target, and my tag onto another user's target — detach-side cross-ownership,
+  cross-user invisibility via target list, the `?tag=` filter returning the exact subset
+  including with two different users each having their own same-named tag, deleting a tag
+  detaches it everywhere, deleting a target leaves its tags alone, auth-required) plus 6 new
+  assertions in `test_ownership.py`'s consolidated cross-user/anonymous tests. 183 backend
+  tests total (was 156). No worker changes in this prompt — worker tests unaffected.
+- **Verified end-to-end against the real running stack, not just tests**: rebuilt `api`,
+  confirmed migration `011 → 012` applied cleanly. Created two real tags and three real
+  targets, attached "production" to two of them and "staging" to the third via real HTTP
+  calls, and confirmed `GET /targets?tag=production` returned exactly the two matching ids and
+  `?tag=staging` returned exactly the one — real proof of the filter's correctness, not just
+  the mocked/DB-backed test suite. Registered a second real user and confirmed live: their
+  `GET /tags` came back empty (never sees the first user's tags) and attempting to attach the
+  first user's real tag id to their own target returned a real 404. All verification data
+  (both accounts, cascading their targets/tags) deleted afterward via the real
+  `DELETE /auth/me` flow, confirmed via a subsequent `401` on login. Stack left healthy
+  (`db`/`api`/`worker` all `Up`).
+- Not touched in this prompt, per its explicit scope: any frontend code (deferred to prompt
+  6.13), analytics, webhooks, API keys, retention, any other Phase 6 feature area.
+
+**Next: continue Phase 6 per the 6.1 report's build order — API keys** (independent of tags;
+per the 6.1 report, scope the first pass to read-oriented endpoints and a per-key rate limit
+rather than retrofitting every write endpoint immediately). Note: the actual prompt sequence
+has diverged slightly from the 6.1 report's original numbered list — 6.2 combined that list's
+schema and keyword-monitoring items into one prompt — so treat "next" as the report's
+substantive recommendation, not a literal step number.
 
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
