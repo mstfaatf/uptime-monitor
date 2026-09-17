@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
 import realtime
+from analytics import ALLOWED_WINDOWS, compute_region_analytics
 from auth import get_current_user
 from database import get_db
 from export import build_csv
@@ -253,6 +254,35 @@ class CheckHistoryEntry(LatestCheckResponse):
     # region it's from — needed here because GET /targets/{id}/checks returns a flat list
     # for one region rather than a region-keyed dict.
     region: str
+
+
+class RegionAnalyticsResponse(BaseModel):
+    # None only when there are zero checks for this region in the window (shouldn't normally
+    # happen — a region only appears in TargetAnalyticsResponse.regions at all if it has at
+    # least one check in the window — but kept nullable to match compute_sla's own contract
+    # rather than asserting a non-null guarantee analytics.py doesn't actually promise).
+    uptime_percent: float | None
+    total_checks: int
+    latency_p50_ms: int | None
+    latency_p95_ms: int | None
+    latency_p99_ms: int | None
+    # Mean time to recovery, in seconds, over incidents overlapping this window — see
+    # analytics.py's _compute_mttr docstring for exactly how an unresolved (still-ongoing)
+    # incident and a window-boundary-crossing incident are each handled. None when zero
+    # incidents overlap the window (nothing to average).
+    mttr_seconds: float | None
+    incident_count: int
+
+
+class TargetAnalyticsResponse(BaseModel):
+    window: str
+    window_start: str
+    # Keyed by region, same convention as TargetStatusResponse.latest_checks — every stat
+    # stays per-region, never collapsed into one target-wide number (see analytics.py's module
+    # docstring). Only regions with at least one check in the window appear here; a region a
+    # target has checks in historically but none within this particular window is simply
+    # absent, not present with a bunch of nulls.
+    regions: dict[str, RegionAnalyticsResponse]
 
 
 def _check_to_response_dict(check: Check, consecutive_failures: int | None = None) -> dict:
@@ -789,6 +819,68 @@ async def get_target_checks(
     )
     checks = result.scalars().all()
     return [CheckHistoryEntry(**_check_to_response_dict(check), region=check.region) for check in checks]
+
+
+@router.get("/{target_id}/analytics", response_model=TargetAnalyticsResponse)
+async def get_target_analytics(
+    target_id: int,
+    window: str = "7d",
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Windowed uptime %/latency percentiles (p50/p95/p99)/MTTR, per region, over one of
+    ALLOWED_WINDOWS (24h/7d/30d/90d). 404 (not 403) if the target doesn't exist or isn't owned
+    by the caller, same pattern as every other target-scoped endpoint.
+
+    Unlike GET /targets/{id}/checks and GET /targets/{id}/export, `region` is NOT a query
+    param here — every region the target has data for in the window comes back at once, keyed
+    by region in the response (see TargetAnalyticsResponse). That's a deliberate departure from
+    those two endpoints' per-region-required convention: this endpoint's whole point is a
+    side-by-side comparison across regions (the same reason GET /targets/status returns
+    latest_checks as a region-keyed dict rather than requiring a separate call per region), so
+    requiring N calls for N regions here would work against its own purpose.
+    """
+    delta = ALLOWED_WINDOWS.get(window)
+    if delta is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"window must be one of {sorted(ALLOWED_WINDOWS)}",
+        )
+
+    owns = await db.execute(
+        select(Target.id).where(Target.id == target_id, Target.user_id == current_user.id)
+    )
+    if owns.scalar_one_or_none() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+
+    window_start = datetime.now(timezone.utc) - delta
+
+    result = await db.execute(
+        select(Check)
+        .where(Check.target_id == target_id, Check.checked_at >= window_start)
+        .order_by(Check.checked_at.asc())
+    )
+    checks_by_region: dict[str, list[Check]] = {}
+    for check in result.scalars().all():
+        checks_by_region.setdefault(check.region, []).append(check)
+
+    regions: dict[str, RegionAnalyticsResponse] = {}
+    for region, window_checks in checks_by_region.items():
+        # The single most recent check strictly before window_start, for THIS region — gives
+        # compute_region_analytics' incident detection the correct up/down state at the moment
+        # the window opens (see analytics.py's compute_region_analytics docstring for why).
+        context_result = await db.execute(
+            select(Check)
+            .where(Check.target_id == target_id, Check.region == region, Check.checked_at < window_start)
+            .order_by(Check.checked_at.desc())
+            .limit(1)
+        )
+        context_check = context_result.scalar_one_or_none()
+        regions[region] = RegionAnalyticsResponse(
+            **compute_region_analytics(window_checks, context_check, window_start)
+        )
+
+    return TargetAnalyticsResponse(window=window, window_start=window_start.isoformat(), regions=regions)
 
 
 @router.get("/{target_id}/export")

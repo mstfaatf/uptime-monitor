@@ -54,6 +54,7 @@ async def test_user_cannot_view_another_users_target_detail_or_checks(client):
     # Same 404-not-403 pattern as delete: a cross-user probe can't even confirm the id exists.
     assert (await client.get(f"/targets/{target_id}")).status_code == 404
     assert (await client.get(f"/targets/{target_id}/checks?region=local")).status_code == 404
+    assert (await client.get(f"/targets/{target_id}/analytics")).status_code == 404
     patch_resp = await client.patch(f"/targets/{target_id}", json={"name": "hijacked"})
     assert patch_resp.status_code == 404
     assert (await client.post(f"/targets/{target_id}/pause")).status_code == 404
@@ -86,6 +87,7 @@ async def test_anonymous_user_cannot_access_any_target_endpoint(client):
     assert (await client.delete(f"/targets/{target_id}")).status_code == 401
     assert (await client.get(f"/targets/{target_id}")).status_code == 401
     assert (await client.get(f"/targets/{target_id}/checks?region=local")).status_code == 401
+    assert (await client.get(f"/targets/{target_id}/analytics")).status_code == 401
     assert (await client.patch(f"/targets/{target_id}", json={"name": "x"})).status_code == 401
     assert (await client.post(f"/targets/{target_id}/pause")).status_code == 401
     assert (await client.post(f"/targets/{target_id}/resume")).status_code == 401

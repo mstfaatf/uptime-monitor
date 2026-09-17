@@ -3564,12 +3564,79 @@ frontend, per this prompt's explicit scope; the frontend for tags is its own lat
 - Not touched in this prompt, per its explicit scope: any frontend code (deferred to prompt
   6.13), analytics, webhooks, API keys, retention, any other Phase 6 feature area.
 
-**Next: continue Phase 6 per the 6.1 report's build order — API keys** (independent of tags;
-per the 6.1 report, scope the first pass to read-oriented endpoints and a per-key rate limit
-rather than retrofitting every write endpoint immediately). Note: the actual prompt sequence
-has diverged slightly from the 6.1 report's original numbered list — 6.2 combined that list's
-schema and keyword-monitoring items into one prompt — so treat "next" as the report's
-substantive recommendation, not a literal step number.
+Phase 6, prompt 6.5 (windowed uptime/latency-percentile/MTTR analytics) is complete. Backend
+computation only, no frontend, per this prompt's explicit scope — the frontend for this is its
+own later prompt (6.14). The user chose to build this ahead of API keys (the 6.1 report's own
+suggested next item) — sequencing is the user's call, not a fixed order to enforce.
+- **New endpoint `GET /targets/{id}/analytics?window=24h|7d|30d|90d`** (default `7d`) in
+  `routers/targets.py` — 400 on an unsupported window value, 404-not-403 on a target that
+  doesn't exist or isn't owned by the caller, same pattern as every other target-scoped
+  endpoint. **Deliberately not `?region=`-scoped** like `/checks`/`/export` — every region the
+  target has data for in the window comes back at once, keyed by region in one response, since
+  side-by-side region comparison is this endpoint's whole point (same reasoning
+  `/targets/status`'s `latest_checks` is already a region-keyed dict rather than one call per
+  region).
+- **New `backend/analytics.py`**: reuses `export.py`'s `compute_sla()`/`compute_incidents()`
+  directly (imported, not reimplemented) — one definition of "uptime %" and "what counts as an
+  incident" shared with the CSV export, per the prompt's explicit ask. Adds a linear-
+  interpolation `_percentile()` helper (same method numpy's default and Excel's
+  PERCENTILE.INC use — no new dependency, hand-rolled) for p50/p95/p99, and a new
+  `_compute_mttr()` aggregate over `compute_incidents()`'s output.
+- **MTTR handling of an in-progress (unresolved) incident — explicitly decided, not left
+  ambiguous**: counted up to "now," not excluded. Justification (documented in
+  `_compute_mttr`'s docstring): MTTR exists to reflect real user-facing pain from downtime;
+  quietly excluding whatever is currently down would make the number look artificially healthy
+  at exactly the moment it matters most. An unresolved incident's "up to now" duration also
+  always overlaps the window by construction, since the window's right edge is always "now"
+  itself (this endpoint has no `from`/`to` range concept, unlike `/export` — always
+  right-anchored at "now").
+- **A second, related window-boundary decision, also explicit**: a resolved incident counts
+  toward MTTR if it recovered at or after `window_start` — using its own TRUE duration, not one
+  clipped to the window edge, even if it actually started slightly before the window opened.
+  Enabled by a small "context check" (the single most recent check strictly before
+  `window_start`, fetched per region) prepended to the list handed to `compute_incidents()`
+  purely to seed correct up/down boundary state — **used only for incident detection, never for
+  uptime %/latency percentiles**, which are computed strictly from checks inside the window, so
+  they keep their literal, expected meaning ("uptime % over the window," not "uptime % over the
+  window plus one extra point"). Without the context check, a target already down when the
+  window opened would misreport its incident as starting exactly at the window boundary,
+  understating the real outage length.
+- **Confirmed no per-region collapsing**: `TargetAnalyticsResponse.regions` is a plain
+  `dict[str, RegionAnalyticsResponse]`, same convention as `TargetStatusResponse.latest_checks`
+  — no derived cross-region average or overall figure anywhere. A region with zero checks in
+  the requested window is simply absent from the dict (not present with nulls).
+- **Tests**: `test_analytics.py` — 13 pure-function tests (`_percentile` including a verified
+  known-value case, `_compute_mttr` covering every window-boundary/resolved/unresolved
+  combination the prompt asked for, `compute_region_analytics` including the context-check
+  behavior directly) plus 12 endpoint tests against the real test database: auth/ownership,
+  invalid window, default window, a region absent when it has no checks in the window,
+  independent per-region stats, **one dedicated boundary test per window value** (24h/7d/30d/
+  90d, each inserting one check just inside and one just outside), real percentile computation
+  from ten known latencies, and MTTR from a genuine mix of one resolved and one unresolved
+  incident. Plus 2 new assertions in `test_ownership.py`. 208 backend tests total (was 183). No
+  worker changes in this prompt — worker tests unaffected.
+- **Verified end-to-end against the real running stack, not just tests**: rebuilt `api`
+  (no migration needed — no schema change this prompt), created a real target, paused it
+  immediately via the real `/pause` endpoint to stop the live worker from interfering, and
+  seeded a real, hand-computed check history directly via SQL: ten checks with latencies
+  10-100ms, one resolved 10-minute incident, one still-ongoing incident. Queried the real
+  endpoint and confirmed **every figure matched independent hand-calculation exactly**:
+  `uptime_percent=78.5714...` (11/14), `latency_p50_ms=50`, `p95=95`, `p99=99` (computed over
+  all 11 checks with a real latency, including the recovered incident's own check — not just
+  the clean 10-value set), `incident_count=2`, and `mttr_seconds≈456` (consistent with the
+  600s resolved incident and the ~300s-and-still-growing unresolved one averaging correctly).
+  Also confirmed live: an invalid `window` value 400s, and a second real user gets a real 404
+  querying the first user's target's analytics. All verification data deleted afterward via
+  the real `DELETE /auth/me` flow. Stack left healthy (`db`/`api`/`worker` all `Up`).
+- Not touched in this prompt, per its explicit scope: any frontend code (deferred to prompt
+  6.14), webhooks, API keys, retention, any other Phase 6 feature area.
+
+**Next: continue Phase 6** — per the 6.1 report's substantive recommendations, API keys and
+webhooks (with the alerting fan-out restructuring as webhooks' own prerequisite) remain the
+two backend feature areas not yet built; retention/pagination are lower-priority infra items;
+frontend work for everything shipped so far (customization, pause/resume, tags, analytics) is
+still entirely outstanding, deferred to prompts 6.13/6.14 per the explicit per-prompt scoping
+used throughout this phase.
 
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
