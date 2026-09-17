@@ -74,6 +74,85 @@ async def test_delete_tag_removes_it(client):
     assert listing.json() == []
 
 
+async def test_rename_tag(client):
+    await _register(client)
+    created = await client.post("/tags", json={"name": "staging"})
+    tag_id = created.json()["id"]
+
+    renamed = await client.patch(f"/tags/{tag_id}", json={"name": "pre-prod"})
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "pre-prod"
+    assert renamed.json()["id"] == tag_id
+
+    listing = await client.get("/tags")
+    assert [t["name"] for t in listing.json()] == ["pre-prod"]
+
+
+async def test_rename_tag_to_same_name_is_a_no_op_not_a_conflict(client):
+    await _register(client)
+    created = await client.post("/tags", json={"name": "staging"})
+    tag_id = created.json()["id"]
+
+    renamed = await client.patch(f"/tags/{tag_id}", json={"name": "staging"})
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "staging"
+
+
+async def test_rename_tag_to_a_name_already_used_by_another_of_the_same_users_tags_rejected(client):
+    await _register(client)
+    await client.post("/tags", json={"name": "production"})
+    created = await client.post("/tags", json={"name": "staging"})
+    tag_id = created.json()["id"]
+
+    conflict = await client.patch(f"/tags/{tag_id}", json={"name": "production"})
+    assert conflict.status_code == 409
+
+    # The tag being renamed is untouched by the rejected attempt.
+    listing = await client.get("/tags")
+    names = sorted(t["name"] for t in listing.json())
+    assert names == ["production", "staging"]
+
+
+async def test_rename_tag_empty_or_overlong_name_rejected(client):
+    await _register(client)
+    created = await client.post("/tags", json={"name": "staging"})
+    tag_id = created.json()["id"]
+
+    assert (await client.patch(f"/tags/{tag_id}", json={"name": "   "})).status_code == 400
+    assert (await client.patch(f"/tags/{tag_id}", json={"name": "x" * 101})).status_code == 400
+
+
+async def test_rename_tag_keeps_it_attached_to_its_targets(client):
+    await _register(client)
+    tag_id = (await client.post("/tags", json={"name": "staging"})).json()["id"]
+    target_id = (await client.post("/targets", json={"url": "https://example.com/rename-attached"})).json()["id"]
+    attach = await client.post(f"/targets/{target_id}/tags", json={"tag_id": tag_id})
+    assert attach.status_code == 200
+
+    await client.patch(f"/tags/{tag_id}", json={"name": "pre-prod"})
+
+    targets = await client.get("/targets")
+    target = next(t for t in targets.json() if t["id"] == target_id)
+    assert [t["name"] for t in target["tags"]] == ["pre-prod"]
+
+
+async def test_user_cannot_rename_another_users_tag(client):
+    await _register(client, "tag-owner2@example.com")
+    tag_id = (await client.post("/tags", json={"name": "owner-only"})).json()["id"]
+    await client.post("/auth/logout")
+
+    await _register(client, "tag-intruder2@example.com")
+    # 404, not 403 — same "can't confirm the id even exists" pattern as every other
+    # ownership-scoped endpoint in this app.
+    resp = await client.patch(f"/tags/{tag_id}", json={"name": "hijacked"})
+    assert resp.status_code == 404
+
+    await client.post("/auth/logout")
+    await client.post("/auth/login", json={"email": "tag-owner2@example.com", "password": "pw"})
+    still_there = await client.get("/tags")
+    assert [t["name"] for t in still_there.json()] == ["owner-only"]
+
+
 async def test_user_cannot_list_or_delete_another_users_tags(client):
     await _register(client, "tag-owner@example.com")
     created = await client.post("/tags", json={"name": "owner-only"})
@@ -100,4 +179,5 @@ async def test_user_cannot_list_or_delete_another_users_tags(client):
 async def test_tag_endpoints_require_authentication(client):
     assert (await client.get("/tags")).status_code == 401
     assert (await client.post("/tags", json={"name": "x"})).status_code == 401
+    assert (await client.patch("/tags/1", json={"name": "x"})).status_code == 401
     assert (await client.delete("/tags/1")).status_code == 401

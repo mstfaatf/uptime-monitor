@@ -4224,5 +4224,109 @@ and fixed before finishing.
   exactly as it was), any filter bar (still doesn't exist), any feature-specific form fields
   (request customization, tags, check interval — all still 6.14's job), any backend/worker code.
 
+Prompt 6.13 (filter/search/sort bar + tag management UI) is complete. Third frontend prompt.
+One real, unplanned-but-necessitated backend addition (tag rename never existed); one real
+bug found and fixed during verification (a tag rename wasn't propagating to already-loaded
+row chips).
+- **Backend: `PATCH /tags/{id}` (rename), added because it genuinely didn't exist** — 6.4's
+  original tag CRUD was POST/GET/DELETE only, and this prompt's "create/rename/delete tags"
+  ask needs a real rename operation to mean anything. Same validation as creation
+  (non-empty, length cap) plus the same per-user duplicate-name 409; renaming to the tag's own
+  current name is treated as a no-op success, not a spurious conflict against itself. 404 (not
+  403) on a tag that doesn't exist or isn't owned by the caller, same pattern as every other
+  ownership-scoped endpoint; `API_KEY_RATE_LIMIT`'s 60/minute IP-keyed bound, matching the
+  other cookie-only tag-management endpoints per 6.10's precedent. 7 new backend tests (6 for
+  the endpoint itself, 1 rate-limit boundary test) — **297 backend tests total (was 290)**,
+  all passing against a rebuilt `api` image.
+- **Data-shape decision, stated explicitly rather than left implicit**: the dashboard list
+  page fetches `GET /targets` (authoritative existence + tags) and `GET /targets/status` (live
+  per-region check data) and merges them client-side by id — **`tags` was deliberately not
+  added to `TargetStatusResponse`/the SSE push payload**, since that would mean joining
+  `target_tags` on every single check-update notification (a genuinely hot path — every worker
+  check, times every connected client) for data that changes rarely. One extra fetch on page
+  load is the right place to pay that cost, not the realtime pipeline. Direct consequence,
+  handled explicitly: the SSE payload never carries `tags`, so the merge on every incoming
+  `check_update` spreads the update *and* explicitly preserves the row's already-known
+  `tags` — confirmed via the type system by typing the SSE payload as
+  `Omit<TargetStatusRow, "tags">`, not the full row type, so a future edit that forgets this
+  can't silently compile.
+- **Filter/search/sort — computed fresh from `items` on every render, never a separate
+  "filtered copy" kept in sync imperatively**: this is what makes it correct under live SSE
+  updates for free, per the prompt's own explicit requirement — a `check_update` (or a tag
+  attach/detach) changing `items` re-renders the page, which re-runs the filter/sort against
+  the new data, so a row updates in place, disappears, or reappears exactly according to the
+  *current* filter with no reconciliation logic anywhere. **Verified this isn't just true in
+  theory**: with a live status filter narrowed to "No signal" showing exactly one down target,
+  inserted a real recovery check for it directly via SQL and fired the real
+  `pg_notify('checks_inserted', ...)` the worker itself sends — in the same still-open browser
+  tab, with no reload, the row disappeared into a real "No targets match the current filters"
+  empty state, the overview strip updated to 100% uptime/0 down, the persistent banner
+  downgraded from red ("2 regions") to amber ("1 region"), and the existing state-transition
+  toast fired, all from one real underlying event.
+- **Filtering model**: status and region filters narrow which *region entries* within a row
+  are visible (not just which rows) — a target is included if at least one of its regions
+  survives both filters together (so "status=down AND region=eu-west" correctly means "down
+  specifically in eu-west," not "down anywhere and also happens to have an eu-west reading").
+  A target with zero checks in any region only matches the neutral case (no region filter,
+  and status filter either "all" or "pending") since it has no real region to match against
+  a specific filter. Tag filter and text search (name/URL, case-insensitive) are target-level
+  filters, applied before the per-region narrowing.
+- **Sort**: name (A-Z), status (worst-first — down > degraded > pending > up, matching the
+  app's own existing severity language), latency (slowest-first, across a target's regions
+  averaged — the readings worth noticing), last-checked (most recent first). Defaults to
+  "Default order" (the backend's own newest-first ordering, left untouched) rather than
+  silently reordering the list before anyone's touched the control. Nulls (no reading yet)
+  always sort last on both numeric sorts regardless of direction — "unknown" isn't better or
+  worse than a number, just not comparable.
+- **Tag management UI**: `components/tag-manager-modal.tsx` (reuses the Dialog primitive from
+  6.12 — create/rename/delete in one place) and `components/target-tag-chips.tsx` (per-row
+  attach/detach, since a tag's attachment is a property of the target instance, not the tag
+  itself). Small-radius bordered chips, mono tag-name text — the exact same convention
+  `RegionBadge` already established, not a new pattern. Attaching uses a plain native
+  `<select>` (populated with the tags not yet on that row) rather than pulling in a second
+  Radix dependency for a handful of small dropdowns — Dialog earned its dependency in 6.12 by
+  being genuinely hard to hand-build correctly (focus trap, portal, Escape); a `<select>` has
+  none of that difficulty.
+- **Real bug found and fixed during verification, not assumed correct**: renaming a tag in the
+  manager updated the filter bar's own tag list (`allTags`) but **not** any target row's
+  already-loaded copy of that tag (each row keeps its own `tags` array — see the data-shape
+  note above) — confirmed live: renamed "staging" to "staging-env," and a row that already had
+  "staging" attached kept showing the stale name until Reset. Fixed by adding a dedicated
+  `onTagRenamed` callback (separate from `onTagsChanged`, mirroring the existing
+  `onTagDeleted` callback's same reasoning) that pushes the rename into every row's own tags
+  list. Re-verified after the fix: the same rename now updates the row's chip live, with no
+  reload.
+- **Verified end-to-end against the real running stack** with four real targets spanning every
+  state (healthy/two-region, degraded, down, never-checked) and two real tags attached via the
+  real API: confirmed status/tag/region filters and text search each isolate exactly the
+  expected subset (independently verified via each control, not assumed from reading the
+  code), confirmed worst-first status sorting produces the exact expected order, confirmed the
+  live-SSE-vs-filter interaction described above, confirmed attach/detach through each row's
+  own picker/× button (not just via curl), and confirmed the tag manager's keyboard
+  accessibility (focus trap held across repeated tabs, focus correctly returned to the
+  "Manage tags" trigger on close — the same explicit-restore fix from 6.12 applied here too,
+  since this is the same "opened by an external button outside the Dialog's own tree"
+  situation). Checked the filter bar at 400px width — wraps into a clean two-column grid, no
+  overflow, side gutters hold. Did not re-verify `prefers-reduced-motion` on this Dialog usage
+  specifically — it reuses the exact same `.dialog-overlay`/`.dialog-content` classes already
+  proven twice (6.12's own verification, and empirically re-confirmed there), so there's
+  nothing new in this prompt's own code that could regress it.
+- **Self-critique against the `frontend-design` skill's avoid-list**: clean. No new colors,
+  shadows, or gradients; tag chips reuse `RegionBadge`'s exact small-radius/mono/bordered
+  treatment rather than inventing a pill/card style; filter labels are plain sentence case
+  (no all-caps eyebrows); no em dashes in any new copy; no middle-dot meta text; no numbered
+  markers; the "×"/"+ tag" affordances are plain text glyphs, not a new icon system (the only
+  icon dependency in this app remains the Dialog's own close **X**, from 6.12).
+- All verification data deleted afterward via the real `DELETE /auth/me` cascade, confirmed
+  via direct SQL count of zero remaining rows across targets and tags. All scratch Playwright
+  scripts written directly under `frontend/` (for local `node_modules` resolution), deleted
+  before finishing — never committed. Docker stack and the dev server (started fresh for this
+  prompt) both confirmed healthy; dev server stopped cleanly and workers restarted once
+  verification finished.
+- Not touched in this prompt, per its explicit scope: the quick-add modal (6.12's work, only
+  the `handleTargetCreated` call site's return type changed to satisfy the new `tags` field),
+  the overview strip's own computations (still operate on unfiltered `items`, exactly as
+  6.11 left them).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

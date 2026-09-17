@@ -6,10 +6,15 @@ those endpoints are ownership-scoped on the target first.
 
 Rate limiting (Phase 6, prompt 6.10 security audit): POST /tags gets the same 10/minute
 IP-keyed creation limit as every other resource-creation endpoint in this app (targets,
-webhooks, API keys). DELETE /tags/{id} gets API_KEY_RATE_LIMIT's 60/minute magnitude, IP-keyed
-(these endpoints are cookie-only, never API-key-eligible, so there's no per-key traffic to
-distinguish — the constant is reused purely for a consistent bound, not per-key behavior).
-GET /tags stays unlimited, matching every other pure-read cookie-only endpoint in this app.
+webhooks, API keys). DELETE /tags/{id} and PATCH /tags/{id} get API_KEY_RATE_LIMIT's 60/minute
+magnitude, IP-keyed (these endpoints are cookie-only, never API-key-eligible, so there's no
+per-key traffic to distinguish — the constant is reused purely for a consistent bound, not
+per-key behavior). GET /tags stays unlimited, matching every other pure-read cookie-only
+endpoint in this app.
+
+PATCH /tags/{id} (rename) added in prompt 6.13 — the tag-management UI it's built for needs a
+real rename operation, which prompt 6.4's original CRUD (POST/GET/DELETE only) never included.
+Same validation/409-on-duplicate rules as creation, reusing _validate_tag_name.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -31,6 +36,10 @@ class TagCreate(BaseModel):
     name: str
 
 
+class TagUpdate(BaseModel):
+    name: str
+
+
 class TagResponse(BaseModel):
     id: int
     name: str
@@ -42,6 +51,20 @@ class TagResponse(BaseModel):
 
 def _tag_to_response(tag: Tag) -> TagResponse:
     return TagResponse(id=tag.id, name=tag.name, created_at=tag.created_at.isoformat())
+
+
+def _validate_tag_name(name: str) -> str:
+    """Shared by create and rename: strip, then enforce non-empty and the length cap. Returns
+    the cleaned name; raises HTTPException(400) on violation."""
+    cleaned = name.strip()
+    if not cleaned:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tag name cannot be empty")
+    if len(cleaned) > MAX_TAG_NAME_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Tag name must be at most {MAX_TAG_NAME_LENGTH} characters",
+        )
+    return cleaned
 
 
 @router.get("", response_model=list[TagResponse])
@@ -65,14 +88,7 @@ async def create_tag(
     """Create a new tag. Duplicate name for the same user returns 409 — same convention as
     duplicate-target-URL handling in routers/targets.py. A tag name is only unique per user,
     not globally: two different users can each have their own tag named "production"."""
-    name = body.name.strip()
-    if not name:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tag name cannot be empty")
-    if len(name) > MAX_TAG_NAME_LENGTH:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Tag name must be at most {MAX_TAG_NAME_LENGTH} characters",
-        )
+    name = _validate_tag_name(body.name)
 
     result = await db.execute(select(Tag).where(Tag.user_id == current_user.id, Tag.name == name))
     if result.scalar_one_or_none() is not None:
@@ -82,6 +98,39 @@ async def create_tag(
     db.add(tag)
     await db.flush()
     await db.refresh(tag)
+    return _tag_to_response(tag)
+
+
+@router.patch("/{tag_id}", response_model=TagResponse)
+@limiter.limit(API_KEY_RATE_LIMIT)
+async def rename_tag(
+    request: Request,
+    tag_id: int,
+    body: TagUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Rename a tag only if it belongs to the authenticated user. Same validation as creation
+    (non-empty, length cap) plus the same per-user duplicate-name rejection (409) — renaming
+    "staging" to a name that collides with another of this user's own tags is exactly as
+    invalid as creating a duplicate would have been. 404 (not 403) if the tag doesn't exist or
+    isn't owned by the caller, same pattern as every other ownership-scoped endpoint. Every
+    target this tag is already attached to keeps it — renaming never touches target_tags."""
+    result = await db.execute(select(Tag).where(Tag.id == tag_id, Tag.user_id == current_user.id))
+    tag = result.scalar_one_or_none()
+    if tag is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tag not found")
+
+    new_name = _validate_tag_name(body.name)
+    if new_name != tag.name:
+        dupe_result = await db.execute(
+            select(Tag).where(Tag.user_id == current_user.id, Tag.name == new_name, Tag.id != tag_id)
+        )
+        if dupe_result.scalar_one_or_none() is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A tag with this name already exists.")
+        tag.name = new_name
+        await db.flush()
+        await db.refresh(tag)
     return _tag_to_response(tag)
 
 

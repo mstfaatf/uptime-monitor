@@ -10,8 +10,12 @@ import { LatencyGauge } from "@/components/latency-gauge";
 import { Skeleton, SignalLightSkeleton, LatencyGaugeSkeleton } from "@/components/skeleton";
 import { EmptyState } from "@/components/empty-state";
 import { QuickAddTargetModal, type QuickAddCreatedTarget } from "@/components/quick-add-target-modal";
+import { TargetFilterBar, type SortKey } from "@/components/target-filter-bar";
+import { TagManagerModal } from "@/components/tag-manager-modal";
+import { TargetTagChips } from "@/components/target-tag-chips";
 import { Button } from "@/components/ui/button";
 import { LATENCY_WARN_MS, CERT_EXPIRY_WARN_DAYS, CONSECUTIVE_FAILURES_DOWN_THRESHOLD } from "@/lib/thresholds";
+import type { Tag } from "@/lib/types";
 
 type LatestCheck = {
   checked_at: string | null;
@@ -30,13 +34,17 @@ type LatestCheck = {
 };
 
 // Keyed by region — see backend/routers/targets.py's TargetStatusResponse (since prompt 2.6).
-// A target with no checks yet in any region reports an empty object, not null.
+// A target with no checks yet in any region reports an empty object, not null. `tags` isn't
+// part of that response at all (see loadStatus below) — merged in client-side from GET /targets
+// instead, since carrying tags through the SSE push/poll hot path for something that changes
+// rarely wasn't worth the extra join on every single check-update notification.
 type TargetStatusRow = {
   id: number;
   url: string;
   name: string | null;
   created_at: string;
   latest_checks: Record<string, LatestCheck>;
+  tags: Tag[];
 };
 
 function formatTimestamp(iso: string | null | undefined): string {
@@ -69,7 +77,12 @@ function deriveState(check: LatestCheck | undefined): SignalState {
 // A real-time state change is worth interrupting the user for even if they're not looking at
 // the row that changed — that's the whole point of a toast here, as opposed to the row's own
 // SignalLight flip, which only helps if they're already looking at it.
-function notifyTransition(target: TargetStatusRow, region: string, from: SignalState, to: SignalState) {
+function notifyTransition(
+  target: Pick<TargetStatusRow, "name" | "url">,
+  region: string,
+  from: SignalState,
+  to: SignalState
+) {
   const label = target.name || target.url;
   const description = `${region}: ${SIGNAL_STATE_LABELS[from]} → ${SIGNAL_STATE_LABELS[to]}`;
   if (to === "down") {
@@ -129,6 +142,25 @@ export default function DashboardPage() {
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [deleteError, setDeleteError] = useState("");
 
+  // Filter/search/sort bar state — pure view state, never mutates `items` itself. The visible
+  // row list is recomputed fresh from `items` + this state on every render (see visibleItems
+  // below), so a live SSE update to `items` always flows straight through the current filter/
+  // sort with no separate "filtered copy" to keep in sync and no risk of it going stale.
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<SignalState | "all">("all");
+  const [regionFilter, setRegionFilter] = useState("all");
+  const [tagFilter, setTagFilter] = useState<number | "all">("all");
+  const [sortBy, setSortBy] = useState<SortKey>("default");
+
+  // All of the user's tags (not just the ones currently attached to something) — used by the
+  // filter bar's own Tag dropdown and by each row's "attach a tag" picker. Loaded once
+  // alongside targets/status (see loadStatus) and kept in sync afterward by the tag manager
+  // modal's own callbacks, rather than refetched on every mutation.
+  const [allTags, setAllTags] = useState<Tag[]>([]);
+
+  const [tagManagerOpen, setTagManagerOpen] = useState(false);
+  const tagManagerTriggerRef = useRef<HTMLButtonElement | null>(null);
+
   const [live, setLive] = useState(false);
 
   // The one deliberate motion moment on this page: rows light up top-to-bottom once on initial
@@ -143,36 +175,41 @@ export default function DashboardPage() {
   // after initial load (see the effect below), not on every render.
   const prevStatesRef = useRef<Record<string, SignalState>>({});
 
+  // GET /targets is the authoritative source of which targets exist (id/url/name/tags) — it
+  // never reports partial/missing data the way a defensive fallback would need to guess at.
+  // GET /targets/status supplies the live latest_checks overlay on top of that; if it's ever
+  // unavailable for some reason, every target still renders correctly as "pending" rather than
+  // not rendering at all.
   const loadStatus = useCallback(async () => {
     setError("");
     try {
+      const [targetsRes, tagsRes] = await Promise.all([apiFetch("/targets"), apiFetch("/tags")]);
+      if (targetsRes.status === 401 || tagsRes.status === 401) {
+        setAuthFailed(true);
+        return;
+      }
+      if (!targetsRes.ok) throw new Error(`Status ${targetsRes.status}`);
+      const targets = (await targetsRes.json()) as {
+        id: number;
+        url: string;
+        name: string | null;
+        created_at: string;
+        tags: Tag[];
+      }[];
+      if (tagsRes.ok) setAllTags((await tagsRes.json()) as Tag[]);
+
       const statusRes = await apiFetch("/targets/status");
       if (statusRes.status === 401) {
         setAuthFailed(true);
         return;
       }
+      let checksById = new Map<number, Record<string, LatestCheck>>();
       if (statusRes.ok) {
         const data = (await statusRes.json()) as TargetStatusRow[];
-        setItems(data);
-        return;
+        checksById = new Map(data.map((d) => [d.id, d.latest_checks]));
       }
-      if (statusRes.status === 404) {
-        const targetsRes = await apiFetch("/targets");
-        if (targetsRes.status === 401) {
-          setAuthFailed(true);
-          return;
-        }
-        if (!targetsRes.ok) throw new Error("Failed to load targets");
-        const targets = (await targetsRes.json()) as { id: number; url: string; name: string | null; created_at: string }[];
-        setItems(
-          targets.map((t) => ({
-            ...t,
-            latest_checks: {},
-          }))
-        );
-        return;
-      }
-      throw new Error(`Status ${statusRes.status}`);
+
+      setItems(targets.map((t) => ({ ...t, latest_checks: checksById.get(t.id) ?? {} })));
     } catch (err) {
       const res = await apiFetch("/auth/me").catch(() => null);
       if (res?.status === 401) setAuthFailed(true);
@@ -251,7 +288,10 @@ export default function DashboardPage() {
     es.onerror = () => setLive(false);
     es.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data) as { type: string; target: TargetStatusRow };
+        // The real push payload never includes `tags` (see TargetStatusRow's own comment) —
+        // typed without it here so the compiler can't paper over the merge below forgetting
+        // that.
+        const message = JSON.parse(event.data) as { type: string; target: Omit<TargetStatusRow, "tags"> };
         if (message.type !== "check_update") return;
 
         // Compare each region's new state against what we last knew, and toast on a genuine
@@ -267,8 +307,12 @@ export default function DashboardPage() {
           prevStatesRef.current[key] = newState;
         }
 
+        // message.target never carries `tags` (see TargetStatusRow's own comment on why) — a
+        // bare replace here would silently wipe a target's tags on every single live update.
         setItems((prev) =>
-          prev.map((item) => (item.id === message.target.id ? message.target : item))
+          prev.map((item) =>
+            item.id === message.target.id ? { ...item, ...message.target, tags: item.tags } : item
+          )
         );
       } catch {
         // Ignore malformed/unrecognized messages rather than breaking the whole subscription.
@@ -298,7 +342,7 @@ export default function DashboardPage() {
   // live, with zero new wiring needed for that part. Prepended, matching GET /targets/status'
   // own newest-first ordering.
   function handleTargetCreated(target: QuickAddCreatedTarget) {
-    setItems((prev) => [{ ...target, latest_checks: {} }, ...prev]);
+    setItems((prev) => [{ ...target, latest_checks: {}, tags: [] }, ...prev]);
   }
 
   // Two different buttons can open the quick-add modal (the toolbar button next to the h1, and
@@ -320,6 +364,56 @@ export default function DashboardPage() {
     if (!next) {
       requestAnimationFrame(() => quickAddTriggerRef.current?.focus());
     }
+  }
+
+  function handleOpenTagManager() {
+    setTagManagerOpen(true);
+  }
+
+  // Same explicit-focus-restore need as the quick-add modal above — the "Manage tags" button
+  // is a plain external trigger too, not a <DialogTrigger>.
+  function handleTagManagerOpenChange(next: boolean) {
+    setTagManagerOpen(next);
+    if (!next) {
+      requestAnimationFrame(() => tagManagerTriggerRef.current?.focus());
+    }
+  }
+
+  // Deleting a tag in the manager doesn't know which targets had it attached — strip it out of
+  // every row's own `tags` list here instead, so a row's chips never show a tag that no longer
+  // exists.
+  function handleTagDeletedGlobally(tagId: number) {
+    setItems((prev) => prev.map((item) => ({ ...item, tags: item.tags.filter((t) => t.id !== tagId) })));
+    setTagFilter((prev) => (prev === tagId ? "all" : prev));
+  }
+
+  // Same reasoning as handleTagDeletedGlobally: the manager only knows tags in the abstract,
+  // not which target rows already carry a copy of one — a rename has to be pushed into every
+  // row's own `tags` list explicitly, or an already-attached chip would keep showing the old
+  // name until the next full reload.
+  function handleTagRenamedGlobally(tag: Tag) {
+    setItems((prev) =>
+      prev.map((item) => ({
+        ...item,
+        tags: item.tags.map((t) => (t.id === tag.id ? tag : t)),
+      }))
+    );
+  }
+
+  function handleTagAttached(targetId: number, tag: Tag) {
+    setItems((prev) =>
+      prev.map((item) =>
+        item.id === targetId && !item.tags.some((t) => t.id === tag.id)
+          ? { ...item, tags: [...item.tags, tag].sort((a, b) => a.name.localeCompare(b.name)) }
+          : item
+      )
+    );
+  }
+
+  function handleTagDetached(targetId: number, tagId: number) {
+    setItems((prev) =>
+      prev.map((item) => (item.id === targetId ? { ...item, tags: item.tags.filter((t) => t.id !== tagId) } : item))
+    );
   }
 
   async function handleDelete(id: number) {
@@ -383,6 +477,109 @@ export default function DashboardPage() {
 
   const degradedOrDownCount = regionEntries.filter((e) => e.state === "degraded" || e.state === "down").length;
   const anyDown = regionEntries.some((e) => e.state === "down");
+
+  // Every region name currently seen across any target, for the filter bar's Region dropdown —
+  // computed fresh from live data rather than a fixed list, so a newly-active region shows up
+  // on its own the moment anything reports from it.
+  const allRegions = Array.from(new Set(items.flatMap((item) => Object.keys(item.latest_checks)))).sort();
+
+  const hasActiveFilters =
+    search.trim() !== "" || statusFilter !== "all" || regionFilter !== "all" || tagFilter !== "all";
+
+  function resetFilters() {
+    setSearch("");
+    setStatusFilter("all");
+    setRegionFilter("all");
+    setTagFilter("all");
+  }
+
+  // Filtering/sorting is recomputed fresh from `items` on every render — never a separate
+  // "filtered items" state array kept in sync imperatively. That's what makes this correct
+  // under live SSE updates for free: `items` changing (a check landing, a tag being attached)
+  // re-renders the page, which re-runs this block against the new data, so a row updates in
+  // place, disappears, or reappears exactly according to the current filter with no special
+  // "reconcile the filtered copy" logic anywhere.
+  type VisibleRow = TargetStatusRow & { visibleRegions: [string, LatestCheck][] };
+  const visibleItems: VisibleRow[] = items
+    .filter((item) => {
+      if (tagFilter !== "all" && !item.tags.some((t) => t.id === tagFilter)) return false;
+      const q = search.trim().toLowerCase();
+      if (q && !((item.name ?? "").toLowerCase().includes(q) || item.url.toLowerCase().includes(q))) return false;
+      return true;
+    })
+    .map((item) => {
+      const entries = Object.entries(item.latest_checks);
+      const visibleRegions = entries.filter(
+        ([region, check]) =>
+          (regionFilter === "all" || region === regionFilter) &&
+          (statusFilter === "all" || deriveState(check) === statusFilter)
+      );
+      return { item, entries, visibleRegions };
+    })
+    .filter(({ entries, visibleRegions }) => {
+      // A target with zero regions at all (nothing has checked it yet) only "belongs" to a
+      // status/region combination of "all regions" + ("all statuses" or specifically
+      // "pending") — it doesn't have a region to match a specific region filter against, and
+      // its only honest status is pending.
+      if (entries.length === 0) {
+        return regionFilter === "all" && (statusFilter === "all" || statusFilter === "pending");
+      }
+      return visibleRegions.length > 0;
+    })
+    .map(({ item, visibleRegions }) => ({ ...item, visibleRegions }));
+
+  function severityRank(state: SignalState): number {
+    return { down: 3, degraded: 2, pending: 1, up: 0 }[state];
+  }
+  function targetWorstState(row: TargetStatusRow): SignalState {
+    const states = Object.values(row.latest_checks).map(deriveState);
+    if (states.length === 0) return "pending";
+    return states.reduce((worst, s) => (severityRank(s) > severityRank(worst) ? s : worst), states[0]);
+  }
+  function targetAvgLatency(row: TargetStatusRow): number | null {
+    const vals = Object.values(row.latest_checks)
+      .map((c) => c.latency_ms)
+      .filter((v): v is number => v != null);
+    return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  }
+  function targetLastChecked(row: TargetStatusRow): number | null {
+    const vals = Object.values(row.latest_checks)
+      .map((c) => (c.checked_at ? new Date(c.checked_at).getTime() : null))
+      .filter((v): v is number => v != null);
+    return vals.length > 0 ? Math.max(...vals) : null;
+  }
+  // Nulls (no reading yet) always sort last, regardless of direction, for both numeric sorts —
+  // "unknown" isn't meaningfully "worse" or "better" than a real number, it's just not
+  // comparable, so it belongs at the edge rather than wherever a bare numeric comparison would
+  // otherwise place it.
+  function sortRows(rows: VisibleRow[]): VisibleRow[] {
+    const sorted = [...rows];
+    if (sortBy === "name") {
+      sorted.sort((a, b) => (a.name || a.url).localeCompare(b.name || b.url));
+    } else if (sortBy === "status") {
+      // Worst-first: the point of sorting by status is almost always "show me what's broken",
+      // matching this dashboard's own severity language (down > degraded > pending > up).
+      sorted.sort((a, b) => severityRank(targetWorstState(b)) - severityRank(targetWorstState(a)));
+    } else if (sortBy === "latency") {
+      sorted.sort((a, b) => {
+        const la = targetAvgLatency(a);
+        const lb = targetAvgLatency(b);
+        if (la == null) return lb == null ? 0 : 1;
+        if (lb == null) return -1;
+        return lb - la; // slowest first — the readings worth noticing
+      });
+    } else if (sortBy === "lastChecked") {
+      sorted.sort((a, b) => {
+        const ta = targetLastChecked(a);
+        const tb = targetLastChecked(b);
+        if (ta == null) return tb == null ? 0 : 1;
+        if (tb == null) return -1;
+        return tb - ta; // most recently checked first
+      });
+    }
+    return sorted;
+  }
+  const sortedVisibleItems = sortRows(visibleItems);
 
   return (
     <>
@@ -546,6 +743,27 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {!loading && items.length > 0 && (
+          <TargetFilterBar
+            search={search}
+            onSearchChange={setSearch}
+            statusFilter={statusFilter}
+            onStatusFilterChange={setStatusFilter}
+            regionFilter={regionFilter}
+            onRegionFilterChange={setRegionFilter}
+            regions={allRegions}
+            tagFilter={tagFilter}
+            onTagFilterChange={setTagFilter}
+            tags={allTags}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            onManageTags={handleOpenTagManager}
+            manageTagsButtonRef={tagManagerTriggerRef}
+            onReset={resetFilters}
+            hasActiveFilters={hasActiveFilters}
+          />
+        )}
+
         {deleteError && (
           <p className="mt-4 text-sm" style={{ color: "var(--signal-down)" }}>
             {deleteError}
@@ -596,11 +814,22 @@ export default function DashboardPage() {
                 </Button>
               }
             />
+          ) : sortedVisibleItems.length === 0 ? (
+            <EmptyState
+              size="md"
+              title="No targets match the current filters"
+              description="Try a different status, region, or tag, or clear the search."
+              action={
+                <Button type="button" variant="outline" onClick={resetFilters}>
+                  Reset filters
+                </Button>
+              }
+            />
           ) : (
             <div className="flex flex-col gap-4">
-              {items.map((row, index) => {
+              {sortedVisibleItems.map((row, index) => {
                 const revealed = revealComplete || index < revealedCount;
-                const regions = Object.entries(row.latest_checks).sort(([a], [b]) => a.localeCompare(b));
+                const regions = [...row.visibleRegions].sort(([a], [b]) => a.localeCompare(b));
 
                 return (
                   <div
@@ -667,6 +896,17 @@ export default function DashboardPage() {
                         })
                       )}
                     </div>
+
+                    <div className="mt-3">
+                      <TargetTagChips
+                        targetId={row.id}
+                        tags={row.tags}
+                        allTags={allTags}
+                        onAttached={(tag) => handleTagAttached(row.id, tag)}
+                        onDetached={(tagId) => handleTagDetached(row.id, tagId)}
+                        onAuthFailed={() => router.replace("/login")}
+                      />
+                    </div>
                   </div>
                 );
               })}
@@ -679,6 +919,15 @@ export default function DashboardPage() {
         open={quickAddOpen}
         onOpenChange={handleQuickAddOpenChange}
         onCreated={handleTargetCreated}
+        onAuthFailed={() => router.replace("/login")}
+      />
+
+      <TagManagerModal
+        open={tagManagerOpen}
+        onOpenChange={handleTagManagerOpenChange}
+        onTagsChanged={setAllTags}
+        onTagDeleted={handleTagDeletedGlobally}
+        onTagRenamed={handleTagRenamedGlobally}
         onAuthFailed={() => router.replace("/login")}
       />
     </>

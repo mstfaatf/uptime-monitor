@@ -32,3 +32,10 @@ export type TargetDetail = {
 // region it's from (the endpoint already filters to one region, but the field rides along for
 // clarity/type reuse).
 export type CheckHistoryEntry = LatestCheck & { region: string };
+
+// Matches backend/routers/tags.py's TagResponse (Phase 6, prompt 6.4/6.13).
+export type Tag = {
+  id: number;
+  name: string;
+  created_at: string;
+};
