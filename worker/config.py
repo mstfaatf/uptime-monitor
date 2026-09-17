@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     # basic auth configured, rather than at startup.
     CREDENTIAL_ENCRYPTION_KEY: str
 
+    # How many days of raw checks history to keep before a background sweep prunes it (Phase
+    # 6, prompt 6.8 — see retention.py). 90 matches the frontend detail page's existing 90-day
+    # heatmap window, so pruning never silently breaks a UI feature that already reads that far
+    # back. Also read by the backend (backend/config.py's own copy of this setting, same
+    # "duplicated across independently-deployed services, kept in sync by hand" tradeoff
+    # already established for SSRF/NOTIFY_CHANNEL/etc.) so a compliance export can note when a
+    # requested range predates what's actually still on disk.
+    CHECKS_RETENTION_DAYS: int = 90
+
     @property
     def asyncpg_database_url(self) -> str:
         return _strip_asyncpg_dialect_suffix(self.DATABASE_URL)

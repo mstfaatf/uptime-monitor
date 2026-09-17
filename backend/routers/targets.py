@@ -15,6 +15,7 @@ from sqlalchemy.orm import aliased, selectinload
 import realtime
 from analytics import ALLOWED_WINDOWS, compute_region_analytics
 from auth import get_current_user, get_current_user_or_api_key
+from config import settings
 from database import get_db
 from export import build_csv
 from models import Check, Tag, Target, TargetRegionSchedule, User
@@ -953,7 +954,12 @@ async def export_target_checks(
     synchronous response is fine at this project's real scale — see the export prompt's
     report for the actual row-count numbers behind that call. PDF is not built yet;
     `format` is validated so a caller gets a clear error instead of silently receiving CSV
-    under a different label."""
+    under a different label.
+
+    Passes settings.CHECKS_RETENTION_DAYS through to build_csv (Phase 6, prompt 6.8), which
+    adds a Note row to the summary whenever the requested `from` predates what the worker's
+    retention sweep could still have on disk — including an omitted `from` ("all time"), which
+    trivially predates any retention cutoff."""
     if format != "csv":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -982,6 +988,7 @@ async def export_target_checks(
         range_from=from_,
         range_to=to,
         checks=checks,
+        retention_days=settings.CHECKS_RETENTION_DAYS,
     )
 
     # A fixed, id-based filename rather than interpolating target.name/url directly — both are

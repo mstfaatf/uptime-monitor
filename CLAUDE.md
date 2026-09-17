@@ -3799,14 +3799,86 @@ no frontend code touched.
   flow. Stack left healthy (`db`/`api`/`worker` all `Up`).
 - Not touched in this prompt, per its explicit scope: any frontend code, retention.
 
-**Phase 6's backend feature work is now complete**: target request customization + keyword
-monitoring, pause/resume + configurable interval, tags, windowed analytics, webhook alerting,
-and API keys/public REST access have all shipped, tested, and been verified live. **Next**:
-per the 6.1 report, retention (the checks-table pruning job) is the one remaining backend item,
-lower priority than everything above; otherwise, frontend work for everything shipped in this
-phase is entirely outstanding, deferred to its own later prompts (6.13 for
-customization/pause/resume/tags, 6.14 for analytics, plus whatever prompt covers webhooks/API
-key management UI) per the explicit per-prompt scoping used throughout.
+Phase 6, prompt 6.8 (checks-table retention) is complete — the last backend item from the 6.1
+report. **Retention window: 90 days**, matching the frontend detail page's existing 90-day
+heatmap window exactly, so pruning never silently breaks a UI feature that already reads that
+far back. Explicit scope boundary honored: no frontend code touched.
+- **Plain delete, no rollup table, exactly as directed**: `worker/retention.py`'s
+  `prune_old_checks()` is one `DELETE FROM checks WHERE checked_at < $1` — nothing else. A
+  rollup/aggregate table remains a clean additive follow-up if long-term trend data beyond the
+  window ever matters, not built speculatively now.
+- **`CHECKS_RETENTION_DAYS` added to both `worker/config.py` (the real source of truth — this
+  is the value the worker actually prunes by) and `backend/config.py`** (informational only,
+  read by `build_csv`'s note logic; the backend never deletes a `checks` row itself). Both
+  default to 90 — the same "duplicated across independently-deployed services, kept in sync by
+  hand" tradeoff already established for `CERT_EXPIRY_WARN_DAYS`/SSRF/`NOTIFY_CHANNEL`/etc.,
+  flagged explicitly so a future change to one without the other doesn't silently make the
+  export note's threshold disagree with what's actually still on disk.
+- **Runs as a second, independent `asyncio.create_task` in `worker/main.py`'s `main()`**,
+  started once at boot alongside (not nested inside) the existing check-cycle `while True`
+  loop, cancelled in the same `finally` block that closes the connection pool — the exact
+  "second long-lived asyncio task... not folded into the 5s scheduler tick" shape the prompt
+  asked for. Sleeps a full `RETENTION_INTERVAL_SECONDS` (24h) **before** its first sweep, not
+  immediately at startup, so a routine redeploy/restart never triggers a prune burst as a side
+  effect.
+- **Idempotency, confirmed explicitly**: the bare `DELETE ... WHERE checked_at < cutoff` is
+  naturally idempotent — a second identical DELETE from the other region's worker instance
+  simply matches zero rows. No new "primary region"/coordination concept was introduced, per
+  the prompt's own explicit steer away from inventing one.
+- **Sequencing relative to Phase 2's row-claiming, stated explicitly, not just implied by the
+  code structure**: `prune_old_checks()` only ever touches the `checks` table — never
+  `targets` or `target_region_schedule`, the two tables `claim_due_targets()`'s
+  `FOR UPDATE OF trs SKIP LOCKED` and `reschedule_target()`'s `UPDATE` actually lock. There is
+  therefore no row-level contention between the retention loop and the claim/schedule path at
+  any point in time, regardless of interleaving — the two loops share only the connection
+  pool, which supports concurrent acquisition by design, and the retention loop holds its
+  connection only for the duration of one DELETE statement, never across an await boundary
+  that could stall a check cycle.
+- **`build_csv` note line**: a `retention_days: int | None = None` parameter (default `None` —
+  every pre-6.8 caller/test keeps getting byte-identical output). When given, a `Note` row is
+  added to the summary whenever the **requested** `range_from` predates the retention cutoff —
+  including `range_from=None` ("all time"), which trivially predates any cutoff — comparing
+  the requested range as the prompt specified, not the actual earliest row present. The
+  `GET /targets/{id}/export` endpoint now passes `settings.CHECKS_RETENTION_DAYS` through.
+- **Tests**: `worker/tests/test_retention.py` (5, hermetic — same mocked-pool/connection
+  convention as `test_scheduling.py`: exact `DELETE FROM checks WHERE checked_at < $1` SQL and
+  cutoff-math assertions, command-status parsing including a malformed-status case, and the
+  24h-interval constant itself). **Explicitly flagged, not silently accepted**: the specific
+  claim "removes rows older than the cutoff and leaves recent ones untouched" is a real-data
+  selectivity claim a mocked connection can't actually prove — worker's test suite has no real-
+  database path at all (by design, since Phase 1), and building one for this single prompt
+  would have been a heavier lift than the ask warranted, so that exact proof was done via live
+  verification against the real dev database instead (below), not skipped. `test_export.py`
+  gained 5 pure-function tests (note present/absent by range, the `range_from=None` case, and
+  a boundary test confirming the comparison is strict `<` not `<=`) plus 3 endpoint tests
+  against the real `GET /targets/{id}/export`. **279 backend tests total (was 271); 59 worker
+  tests total (was 54)**.
+- **Verified end-to-end against the real running stack, including the one thing hermetic tests
+  structurally couldn't prove**: rebuilt both images, confirmed the worker's startup log now
+  reads `retention_days=90` and the check cycle keeps running normally alongside it (no
+  migration this prompt — no schema change). Seeded 6 real rows for one target spanning the
+  90-day boundary (100/95/91 days old, and 89/10/1 days old) directly via SQL, then invoked the
+  real `prune_old_checks()` against the real dev database from inside the running worker
+  container (rather than waiting a real 24h for the loop's own timer) — **confirmed exactly
+  the three >90-day rows were deleted and exactly the three ≤90-day rows survived untouched**,
+  a precise boundary proof against genuine data, not a synthetic assertion. The same real sweep
+  also pruned 147 total rows of old history accumulated across this project's own many
+  verification sessions since Phase 0 — a real, non-trivial cleanup, not just a no-op on an
+  empty table. Also confirmed live: an export with an old `from` shows the `Note` row with the
+  correct cutoff date, and an export with a recent `from` shows no note at all. All
+  verification data deleted afterward via the real `DELETE /auth/me` flow. Stack left healthy
+  (`db`/`api`/`worker` all `Up`).
+- Not touched in this prompt, per its explicit scope: pagination (already covered in 6.7), any
+  frontend code, a rollup/aggregate table.
+
+**Phase 6's entire backend feature list from the 6.1 report is now complete**: target request
+customization + keyword monitoring, pause/resume + configurable interval, tags, windowed
+analytics, webhook alerting, API keys/public REST access, and checks-table retention have all
+shipped, tested, and been verified live. **Next**: everything remaining in Phase 6 is frontend
+work for what's already shipped — deferred to its own later prompts (6.13 for
+customization/pause/resume/tags, 6.14 for analytics, plus whatever prompts cover
+webhooks/API-key management UI) per the explicit per-prompt scoping used throughout this phase.
+No backend/worker work is currently outstanding in the 6.1 report.
 
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

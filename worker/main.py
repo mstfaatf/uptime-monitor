@@ -22,9 +22,14 @@ several seconds) ever starts, so a lock is never held for network I/O. A single 
 sees this as a no-op: it always gets every due target back, just via two quick transactions
 instead of one bare SELECT. Two instances in *different* regions never contend for the same
 row at all, since each only ever queries its own region's rows.
+
+Also runs a checks-table retention sweep (Phase 6, prompt 6.8) as a second, independent
+asyncio task — see retention.py and main()'s own comment on why it's sequenced this way rather
+than folded into the check-cycle loop above.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -37,6 +42,7 @@ from backoff import compute_backoff_seconds
 from config import settings
 from checker import check_url
 from crypto import decrypt_secret
+from retention import run_retention_loop
 from ssrf import is_url_blocked
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -424,14 +430,22 @@ async def run_cycle(pool: asyncpg.Pool, client: httpx.AsyncClient) -> None:
 
 async def main() -> None:
     logger.info(
-        "Worker starting (region=%s, interval=%ss, tick=%ss, timeout=%ss, concurrency=%s)",
+        "Worker starting (region=%s, interval=%ss, tick=%ss, timeout=%ss, concurrency=%s, "
+        "retention_days=%s)",
         settings.REGION,
         settings.CHECK_INTERVAL_SECONDS,
         SCHEDULER_TICK_SECONDS,
         settings.HTTP_TIMEOUT_SECONDS,
         CHECK_CONCURRENCY,
+        settings.CHECKS_RETENTION_DAYS,
     )
     pool = await asyncpg.create_pool(settings.asyncpg_database_url, init=_init_connection)
+    # Retention (Phase 6, prompt 6.8) runs as a second, independent task for the life of the
+    # process — started here, before the check-cycle loop below, and cancelled in `finally`
+    # alongside closing the pool. It never nests inside run_cycle()/the check loop and shares
+    # nothing with it but the connection pool — see retention.py's module docstring for exactly
+    # why that's safe with respect to Phase 2's row-claiming.
+    retention_task = asyncio.create_task(run_retention_loop(pool))
     try:
         # max_keepalive_connections=0: force a brand-new TCP+TLS connection for every single
         # request instead of reusing a pooled one. A reused connection would skip the
@@ -451,6 +465,9 @@ async def main() -> None:
                     logger.exception("Cycle failed: %s", e)
                 await asyncio.sleep(SCHEDULER_TICK_SECONDS)
     finally:
+        retention_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await retention_task
         await pool.close()
 
 

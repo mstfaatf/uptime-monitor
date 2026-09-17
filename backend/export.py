@@ -13,7 +13,7 @@ needs the same change made separately.
 
 import csv
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from models import Check
 
@@ -69,10 +69,21 @@ def build_csv(
     range_from: datetime | None,
     range_to: datetime | None,
     checks: list[Check],
+    retention_days: int | None = None,
 ) -> str:
     """Build the full export file: a summary section (target/region/date range/SLA %/incident
     list), a blank-line separator, then the raw check rows — one CSV file, readable both as a
-    human report (opened directly) and as tabular data (imported past the summary section)."""
+    human report (opened directly) and as tabular data (imported past the summary section).
+
+    retention_days (Phase 6, prompt 6.8): when given, and the *requested* range_from predates
+    the retention cutoff (now() - retention_days) — including range_from=None, "all time",
+    which trivially predates any cutoff — a Note row is added to the summary saying so. This
+    compares the requested range, not the actual earliest row present, per the prompt's own
+    framing: the point is to warn a caller who asked for more history than the retention
+    policy could possibly still have, not to describe exactly what happened to be pruned by
+    the time this particular export ran. Optional (default None = no note) so every pre-6.8
+    caller/test that doesn't pass it keeps getting the exact same output as before.
+    """
     sla = compute_sla(checks)
     incidents = compute_incidents(checks)
 
@@ -91,6 +102,17 @@ def build_csv(
     )
     writer.writerow(["Total checks", len(checks)])
     writer.writerow(["SLA %", f"{sla:.2f}" if sla is not None else ""])
+    if retention_days is not None:
+        retention_cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        if range_from is None or range_from < retention_cutoff:
+            writer.writerow(
+                [
+                    "Note",
+                    f"Raw check data older than {retention_days} days is periodically pruned; "
+                    f"rows before approximately {retention_cutoff.date().isoformat()} may be "
+                    "missing from this export, even though the requested range starts earlier.",
+                ]
+            )
     writer.writerow([])
 
     writer.writerow(["Incidents"])

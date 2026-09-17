@@ -92,6 +92,15 @@ class Settings(BaseSettings):
     # miss it) or on every single check (spam for a slow-moving, monotonic signal).
     CERT_EXPIRY_REMINDER_COOLDOWN_DAYS: int = 3
 
+    # How many days of raw checks history the worker keeps before pruning (Phase 6, prompt
+    # 6.8) — see worker/config.py's own copy of this setting, the actual source of truth for
+    # what's really still on disk (this one is read-only informational, for
+    # export.build_csv's retention note; the backend never deletes checks rows itself). Same
+    # "duplicated across independently-deployed services, kept in sync by hand" tradeoff as
+    # CERT_EXPIRY_WARN_DAYS above. Defaults must match worker/config.py's default (90) or the
+    # export note's threshold would silently disagree with what's actually pruned.
+    CHECKS_RETENTION_DAYS: int = 90
+
     @model_validator(mode="after")
     def _enforce_secure_cookie_settings_in_production(self) -> "Settings":
         """ENVIRONMENT=production always gets a secure, cross-site-capable cookie, even if

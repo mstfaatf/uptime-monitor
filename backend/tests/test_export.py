@@ -119,6 +119,63 @@ def test_build_csv_contains_summary_and_data_sections():
     assert len(rows) - (rows.index(header_row) + 1) == 3  # one data row per check
 
 
+def _note_row(rows):
+    return next((r for r in rows if r and r[0] == "Note"), None)
+
+
+def test_build_csv_omits_retention_note_when_retention_days_not_given():
+    """Backward-compatible default: no retention_days passed -> no note, regardless of range —
+    every pre-6.8 caller keeps getting exactly the same output as before."""
+    checks = [_FakeCheck(_t(0), True, status_code=200, latency_ms=100)]
+    csv_text = build_csv("My Target", "https://example.com", "local", None, None, checks)
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    assert _note_row(rows) is None
+
+
+def test_build_csv_includes_retention_note_when_requested_range_predates_cutoff():
+    old_from = datetime.now(timezone.utc) - timedelta(days=120)  # older than a 90-day window
+    checks = [_FakeCheck(_t(0), True, status_code=200, latency_ms=100)]
+    csv_text = build_csv(
+        "My Target", "https://example.com", "local", old_from, None, checks, retention_days=90
+    )
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    note = _note_row(rows)
+    assert note is not None
+    assert "90 days" in note[1]
+
+
+def test_build_csv_includes_retention_note_when_range_from_is_unbounded():
+    """range_from=None ('all time') trivially predates any retention cutoff."""
+    checks = [_FakeCheck(_t(0), True, status_code=200, latency_ms=100)]
+    csv_text = build_csv(
+        "My Target", "https://example.com", "local", None, None, checks, retention_days=90
+    )
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    assert _note_row(rows) is not None
+
+
+def test_build_csv_omits_retention_note_when_requested_range_is_within_cutoff():
+    recent_from = datetime.now(timezone.utc) - timedelta(days=10)
+    checks = [_FakeCheck(_t(0), True, status_code=200, latency_ms=100)]
+    csv_text = build_csv(
+        "My Target", "https://example.com", "local", recent_from, None, checks, retention_days=90
+    )
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    assert _note_row(rows) is None
+
+
+def test_build_csv_note_boundary_is_the_retention_cutoff_itself():
+    """A range_from exactly at the cutoff does not predate it (strict '<', not '<=') — the
+    boundary is inclusive of the cutoff day itself."""
+    checks = [_FakeCheck(_t(0), True, status_code=200, latency_ms=100)]
+    at_cutoff = datetime.now(timezone.utc) - timedelta(days=90) + timedelta(minutes=5)
+    csv_text = build_csv(
+        "My Target", "https://example.com", "local", at_cutoff, None, checks, retention_days=90
+    )
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    assert _note_row(rows) is None
+
+
 async def _insert_check(target_id: int, region: str, checked_at: datetime, is_up: bool, **overrides) -> None:
     values = {
         "target_id": target_id,
@@ -223,3 +280,42 @@ async def test_export_filters_by_date_range(client):
     rows = list(csv.reader(io.StringIO(resp.text)))
     total_row = next(r for r in rows if r and r[0] == "Total checks")
     assert total_row[1] == "1"  # only the check inside the range
+
+
+async def test_export_includes_retention_note_when_from_predates_the_retention_window(client):
+    await client.post("/auth/register", json={"email": "exportretentionnote@example.com", "password": "pw"})
+    created = await client.post("/targets", json={"url": "https://example.com/export-retention-note"})
+    target_id = created.json()["id"]
+    await _insert_check(target_id, "local", datetime.now(timezone.utc), True)
+
+    old_from = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+    resp = await client.get(f"/targets/{target_id}/export", params={"region": "local", "from": old_from})
+    assert resp.status_code == 200
+    rows = list(csv.reader(io.StringIO(resp.text)))
+    assert any(r and r[0] == "Note" for r in rows)
+
+
+async def test_export_omits_retention_note_when_from_is_within_the_retention_window(client):
+    await client.post("/auth/register", json={"email": "exportnoretentionnote@example.com", "password": "pw"})
+    created = await client.post("/targets", json={"url": "https://example.com/export-no-retention-note"})
+    target_id = created.json()["id"]
+    await _insert_check(target_id, "local", datetime.now(timezone.utc), True)
+
+    recent_from = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    resp = await client.get(f"/targets/{target_id}/export", params={"region": "local", "from": recent_from})
+    assert resp.status_code == 200
+    rows = list(csv.reader(io.StringIO(resp.text)))
+    assert not any(r and r[0] == "Note" for r in rows)
+
+
+async def test_export_includes_retention_note_when_from_is_omitted(client):
+    """No `from` at all means 'all time,' which trivially predates the retention cutoff."""
+    await client.post("/auth/register", json={"email": "exportnofromnote@example.com", "password": "pw"})
+    created = await client.post("/targets", json={"url": "https://example.com/export-no-from-note"})
+    target_id = created.json()["id"]
+    await _insert_check(target_id, "local", datetime.now(timezone.utc), True)
+
+    resp = await client.get(f"/targets/{target_id}/export", params={"region": "local"})
+    assert resp.status_code == 200
+    rows = list(csv.reader(io.StringIO(resp.text)))
+    assert any(r and r[0] == "Note" for r in rows)
