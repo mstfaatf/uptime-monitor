@@ -1,6 +1,7 @@
 "use client";
 
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { EmptyState } from "@/components/empty-state";
 import type { CheckHistoryEntry } from "@/lib/types";
 
 function computeP95(latencies: number[]): number | null {
@@ -16,11 +17,7 @@ export function LatencyChart({ checks }: { checks: CheckHistoryEntry[] }) {
     .map((c) => ({ t: new Date(c.checked_at as string).getTime(), latency: c.latency_ms as number }));
 
   if (points.length === 0) {
-    return (
-      <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-        No latency data yet for this region.
-      </p>
-    );
+    return <EmptyState size="sm" title="Waiting on the first check" />;
   }
 
   const p95 = computeP95(points.map((p) => p.latency));

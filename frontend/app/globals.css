@@ -121,6 +121,27 @@
   }
 }
 
+/* Quick-add modal (components/ui/dialog.tsx): a plain opacity fade on open, replacing shadcn's
+   default zoom+slide entrance — this app's motion vocabulary is opacity only (SignalLight,
+   LatencyGauge, the loading skeleton all work this way), so introducing a second technique
+   just for the one dialog in the app would be inconsistent for no real benefit. No animation
+   at all under reduced motion — the dialog simply appears, same pattern as everything else. */
+@media (prefers-reduced-motion: no-preference) {
+  .dialog-overlay,
+  .dialog-content {
+    animation: dialog-fade-in 150ms ease-out;
+  }
+}
+
+@keyframes dialog-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 /* The one hand-rolled rule still load-bearing: every page has plain <a> tags (target URLs,
    footer/about links) that rely on this default rather than an inline color. Everything else
    that used to live here (.form-group, .btn, .status-*, table styles, .dashboard-actions,

@@ -8,9 +8,9 @@ import { API_BASE, apiFetch, apiJson } from "@/lib/api";
 import { SignalLight, SIGNAL_STATE_LABELS, type SignalState } from "@/components/signal-light";
 import { LatencyGauge } from "@/components/latency-gauge";
 import { Skeleton, SignalLightSkeleton, LatencyGaugeSkeleton } from "@/components/skeleton";
+import { EmptyState } from "@/components/empty-state";
+import { QuickAddTargetModal, type QuickAddCreatedTarget } from "@/components/quick-add-target-modal";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { LATENCY_WARN_MS, CERT_EXPIRY_WARN_DAYS, CONSECUTIVE_FAILURES_DOWN_THRESHOLD } from "@/lib/thresholds";
 
 type LatestCheck = {
@@ -45,15 +45,6 @@ function formatTimestamp(iso: string | null | undefined): string {
     return new Date(iso).toLocaleString();
   } catch {
     return "—";
-  }
-}
-
-function isValidUrl(s: string): boolean {
-  try {
-    const u = new URL(s);
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
-    return false;
   }
 }
 
@@ -130,10 +121,10 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
   const [authFailed, setAuthFailed] = useState(false);
 
-  const [url, setUrl] = useState("");
-  const [name, setName] = useState("");
-  const [formError, setFormError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  // Which button opened the modal, so focus can be explicitly returned to it on close — see
+  // handleQuickAddOpenChange below for why this can't be left to Radix's own default behavior.
+  const quickAddTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [deleteError, setDeleteError] = useState("");
@@ -300,39 +291,34 @@ export default function DashboardPage() {
     }
   }
 
-  async function handleAddTarget(e: React.FormEvent) {
-    e.preventDefault();
-    setFormError("");
-    const rawUrl = url.trim();
-    if (!rawUrl) {
-      setFormError("URL is required.");
-      return;
-    }
-    if (!isValidUrl(rawUrl)) {
-      setFormError("Please enter a valid http or https URL.");
-      return;
-    }
-    setSubmitting(true);
-    try {
-      await apiJson("/targets", {
-        method: "POST",
-        body: JSON.stringify({ url: rawUrl, name: name.trim() || undefined }),
-      });
-      setUrl("");
-      setName("");
-      await loadStatus();
-    } catch (err) {
-      if (err instanceof Error) {
-        if (err.message.includes("401") || err.message.includes("Not authenticated")) {
-          router.replace("/login");
-          return;
-        }
-        setFormError(err.message);
-      } else {
-        setFormError("Network error. Try again.");
-      }
-    } finally {
-      setSubmitting(false);
+  // The new row shows up immediately (no full-list refetch, no page navigation) with
+  // latest_checks empty — it renders "pending" exactly like any other not-yet-checked target
+  // until the worker actually claims and checks it, at which point the existing SSE subscription
+  // above (already wired to update `items` by id for any target) picks it up and updates the row
+  // live, with zero new wiring needed for that part. Prepended, matching GET /targets/status'
+  // own newest-first ordering.
+  function handleTargetCreated(target: QuickAddCreatedTarget) {
+    setItems((prev) => [{ ...target, latest_checks: {} }, ...prev]);
+  }
+
+  // Two different buttons can open the quick-add modal (the toolbar button next to the h1, and
+  // the empty state's own CTA) — this remembers whichever one actually triggered it.
+  function handleOpenQuickAdd(e: React.MouseEvent<HTMLButtonElement>) {
+    quickAddTriggerRef.current = e.currentTarget;
+    setQuickAddOpen(true);
+  }
+
+  // Confirmed empirically (not assumed): Radix Dialog's usual "return focus to the trigger on
+  // close" behavior only reliably fires for a <DialogTrigger>-wrapped element inside the
+  // Dialog's own component tree. This modal is controlled and opened by a plain external
+  // <Button> the Dialog never sees as its trigger, and without this, closing it (Escape or a
+  // successful submit) silently leaves focus on <body> instead of somewhere visible/usable —
+  // a real keyboard-accessibility regression, not a cosmetic one. Restoring it explicitly here
+  // closes that gap for every way the modal can close.
+  function handleQuickAddOpenChange(next: boolean) {
+    setQuickAddOpen(next);
+    if (!next) {
+      requestAnimationFrame(() => quickAddTriggerRef.current?.focus());
     }
   }
 
@@ -425,7 +411,12 @@ export default function DashboardPage() {
       </header>
 
       <main className="mx-auto max-w-5xl px-6 py-10">
-        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <h1 className="text-2xl font-semibold">Dashboard</h1>
+          <Button type="button" onClick={handleOpenQuickAdd}>
+            Add target
+          </Button>
+        </div>
 
         {/* Persistent banner: only rendered while at least one region is degraded/down, gone
             the moment nothing is — this is a status alert, not a standing UI element. Severity
@@ -555,45 +546,6 @@ export default function DashboardPage() {
           </div>
         )}
 
-        <section
-          className="mt-8 max-w-md rounded border p-5"
-          style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}
-        >
-          <h2 className="text-lg font-semibold">Add target</h2>
-          <form onSubmit={handleAddTarget} className="mt-4 flex flex-col gap-4">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="target-url">URL (required)</Label>
-              <Input
-                id="target-url"
-                type="url"
-                placeholder="https://example.com"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                disabled={submitting}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="target-name">Name (optional)</Label>
-              <Input
-                id="target-name"
-                type="text"
-                placeholder="My site"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                disabled={submitting}
-              />
-            </div>
-            {formError && (
-              <p className="text-sm" style={{ color: "var(--signal-down)" }}>
-                {formError}
-              </p>
-            )}
-            <Button type="submit" disabled={submitting} className="self-start">
-              {submitting ? "Adding…" : "Add target"}
-            </Button>
-          </form>
-        </section>
-
         {deleteError && (
           <p className="mt-4 text-sm" style={{ color: "var(--signal-down)" }}>
             {deleteError}
@@ -635,16 +587,15 @@ export default function DashboardPage() {
               ))}
             </div>
           ) : items.length === 0 ? (
-            <div
-              className="flex flex-col items-center gap-3 rounded border border-dashed p-12 text-center"
-              style={{ borderColor: "var(--border)" }}
-            >
-              <SignalLight state="pending" size="lg" />
-              <p className="font-semibold">No targets yet</p>
-              <p className="max-w-sm text-sm" style={{ color: "var(--text-secondary)" }}>
-                Add a URL above and it'll show up here once the worker picks it up.
-              </p>
-            </div>
+            <EmptyState
+              size="lg"
+              title="Nothing to monitor yet. Add a URL to get started."
+              action={
+                <Button type="button" onClick={handleOpenQuickAdd}>
+                  Add target
+                </Button>
+              }
+            />
           ) : (
             <div className="flex flex-col gap-4">
               {items.map((row, index) => {
@@ -723,6 +674,13 @@ export default function DashboardPage() {
           )}
         </div>
       </main>
+
+      <QuickAddTargetModal
+        open={quickAddOpen}
+        onOpenChange={handleQuickAddOpenChange}
+        onCreated={handleTargetCreated}
+        onAuthFailed={() => router.replace("/login")}
+      />
     </>
   );
 }

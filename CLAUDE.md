@@ -4103,5 +4103,126 @@ new colors, typefaces, or motion primitives introduced.
   existing "Add target" form and "No targets yet" empty state were both left exactly as they
   were), any backend/worker code.
 
+Prompt 6.12 (quick-add modal + designed empty states) is complete. Second frontend prompt;
+still no backend/worker changes. One real, screenshot-caught keyboard-accessibility bug found
+and fixed before finishing.
+- **New Dialog primitive** (`components/ui/dialog.tsx`): added via the project's pinned
+  `shadcn@2.10.0` CLI (matching the Tailwind v3 JS-config workflow established in 3.2) — the
+  first Dialog this app has ever had (4.1's delete-account flow deliberately avoided one at the
+  time, calling it "a new Radix dependency for one single use"; that tradeoff no longer holds
+  now that a second real use case exists). Trimmed to this app's own conventions, same
+  treatment every other primitive got in 3.4: no `shadow-lg` (not in the locked spec), and the
+  open/close motion is a plain opacity fade (`.dialog-overlay`/`.dialog-content` in
+  `globals.css`) replacing shadcn's default zoom+slide, since opacity is this app's only
+  established motion primitive (SignalLight, LatencyGauge, the loading skeleton all work this
+  way) — introducing a second motion technique for one component would be inconsistent for no
+  benefit. Gated behind `prefers-reduced-motion: no-preference` like every other animated rule.
+  Pulled in `@radix-ui/react-dialog` and `lucide-react` (for the close **X** glyph only) as new
+  dependencies — `tailwindcss-animate` was already installed since 3.2 but had never actually
+  been used by anything until now.
+- **`components/quick-add-target-modal.tsx`**: name/URL only, no advanced fields (request
+  method, headers, basic auth, keyword match, check interval, tags) — those stay on the full
+  edit surface, deferred to 6.14 per the prompt's explicit scope. A controlled dialog (the
+  parent owns `open` state) so it can be triggered from two different places (the dashboard's
+  own toolbar button and the empty state's CTA) without duplicating the form. On success it
+  hands the raw `POST /targets` response back to the caller and closes itself; on a 401 it
+  defers to the caller via an `onAuthFailed` callback rather than importing `useRouter` itself,
+  keeping navigation ownership in the page component.
+- **Real, screenshot-caught accessibility bug, found and fixed before finishing**: Radix
+  Dialog's documented "return focus to the trigger on close" behavior turned out not to fire
+  reliably here — confirmed empirically (not assumed) that after Escape, `document.activeElement`
+  landed on `<body>`, not the button that opened it, tested at five points in time after close
+  to rule out a timing fluke. Root cause: this modal is controlled and opened by a plain
+  external `<Button>` outside the Dialog's own component tree (not a `<DialogTrigger>`), which
+  is exactly the case Radix's built-in restore doesn't reliably cover. Fixed explicitly in
+  `app/dashboard/page.tsx`: a `quickAddTriggerRef` captures whichever button was actually
+  clicked (there are two — the toolbar button and the empty state's CTA), and
+  `handleQuickAddOpenChange` refocuses it via `requestAnimationFrame` whenever the dialog
+  closes, covering both Escape and a successful submit. Re-verified after the fix: focus lands
+  on the exact trigger element immediately and stays there across every checked delay.
+- **Dashboard**: the always-visible "Add target" card is gone, replaced by a toolbar button
+  next to the `<h1>` that opens the modal. **On submit, the new target is inserted directly
+  into local `items` state from the create response** (`latest_checks: {}`, prepended to match
+  the backend's own newest-first ordering) — no full-list refetch, no navigation. It renders
+  "pending" immediately, exactly like any other not-yet-checked target, and the *existing* SSE
+  subscription (already merges any incoming `check_update` into `items` by id, with zero new
+  wiring) takes over and updates it live the moment the worker actually checks it — this is the
+  literal sense in which "the new target appears in the list live via the existing SSE wiring,"
+  per the prompt's own framing: immediate local insert for the appearance, the pre-existing SSE
+  path for every update after that.
+- **`components/empty-state.tsx`** (new, shared): one `SignalLight state="pending"` + heading +
+  optional description/action component, used everywhere something is legitimately empty rather
+  than broken. `size="sm"` is deliberately borderless (meant to sit inside a section that's
+  already inside its own bordered panel — Latency/Timing breakdown/Uptime on the detail page);
+  `"md"`/`"lg"` get the dashed-border treatment already established for the dashboard's own
+  empty state back in 3.5, reused rather than reinvented.
+- **Dashboard empty state**: kept the existing dashed-box/pending-icon treatment (already
+  design-system-consistent since 3.5), replaced the stale copy (which referred to a form that
+  no longer exists "above") with a short one-line pitch, and added the actual "Add target"
+  button as its CTA — satisfying the prompt's "short one-line pitch plus the quick-add CTA"
+  literally, not just visually.
+- **Detail page empty states — investigated the actual reachable "insufficient history" cases
+  before building anything, rather than guessing**: confirmed a target with genuinely zero
+  checks in any region is the only way the *page-level* gate (`regions.length === 0`) is ever
+  hit — the backend only ever includes a region in `latest_checks` once it has at least one
+  check, so a listed region tab always has real data to feed the per-region components. That
+  page-level case got the shared `EmptyState` (size `md`) replacing a one-line
+  `text-secondary` message. **Found a second, more interesting case that genuinely was
+  reachable**: `load()`'s own per-region checks-history fetch falls back to `[]` on a failed
+  request even when the region's *latest* check is real — meaning `LatencyChart`,
+  `UptimeHeatmap`, and `IncidentTimeline` could each independently receive a genuinely empty
+  `checks` array while the rest of the page (region cards, tabs, Timing breakdown, TLS
+  certificate) still showed real data. `LatencyChart`/`IncidentTimeline` already had bare
+  `text-secondary` fallback text for this; `UptimeHeatmap` had **no fallback at all** — it
+  silently rendered 90 real, fully-populated "no data" cells regardless of whether the target
+  was brand new or the fetch had simply failed, technically correct but telling a misleading
+  story. All three (plus `TimingWaterfall`'s existing "No timing data" text, upgraded too for
+  visual consistency, though not explicitly named in the prompt) now use the shared
+  `EmptyState` (size `sm`, borderless) with the same "Waiting on the first check" copy the
+  prompt itself suggested.
+- **Verified against the real running stack with a genuine reproduction of the bug being
+  fixed, not just the happy path**: registered a throwaway account, screenshotted the empty
+  dashboard state and the quick-add modal open, drove the full submit flow end-to-end (fill →
+  submit → modal closes → new row visible immediately with no reload, confirmed via
+  `page.getByText(...).isVisible()` right after close) and visited its detail page with workers
+  stopped to capture the genuine page-level "Waiting on the first check" state on a real
+  brand-new target. Then, to prove the per-section fix rather than just the common case,
+  seeded one real check for that target directly via SQL and used Playwright's `context.route()`
+  to make the real `/targets/{id}/checks` endpoint return `500` — reproducing the exact
+  fetch-failure code path — and confirmed via screenshot that the region card and Timing
+  breakdown still showed real data while Latency/Uptime/Incidents each showed the clean new
+  empty state instead of a broken-looking chart or (for the heatmap) a misleadingly-populated
+  90-day grid. Confirmed keyboard accessibility empirically: autofocus lands on the URL field,
+  focus stayed trapped inside the dialog across 8 tabs, a visible focus ring was present
+  throughout, and (after the fix above) focus correctly returns to the exact trigger button.
+  Confirmed `prefers-reduced-motion` empirically the same way as 6.11 — `animationName: "none"`
+  under reduced motion, `"dialog-fade-in"` at `0.15s` under normal motion. Checked the modal at
+  400px width too; found via a `fullPage` screenshot that it looked asymmetric, then confirmed
+  via `document.documentElement.scrollWidth` (421px on a 400px viewport) and a viewport-clipped
+  screenshot that this was a **pre-existing ~21px horizontal overflow on the dashboard row
+  layout** (unrelated to anything built this prompt) distorting the `fullPage` capture, not a
+  real dialog bug — the dialog itself is correctly centered with even gutters in the true
+  viewport. **Flagged, not fixed** (out of this prompt's scope): worth a look in a future polish
+  pass.
+- **Self-critique against the `frontend-design` skill's avoid-list**: found and fixed one real
+  instance of the em-dash "label" pattern this project's own house style (established in 4.2's
+  copy pass and the later full design-pass prompt, both of which grepped for and removed em
+  dashes from user-facing copy) already explicitly disallows — the dashboard empty state's own
+  pitch text originally read "Nothing to monitor yet — add a URL to get started.", rewritten to
+  two plain sentences. Confirmed clean otherwise: no new colors/shadows/gradients, the empty
+  state's dashed-border+icon treatment reuses (not reinvents) the existing pattern, no all-caps
+  labels, no middle-dot meta text, no numbered markers, no trailing arrows, and the bare "—"
+  placeholders elsewhere on the page are the already-established idiomatic empty-value marker,
+  not the punctuation pattern the skill actually warns about.
+- All verification data deleted afterward via the real `DELETE /auth/me` cascade, confirmed via
+  direct SQL count. All scratch Playwright scripts (7 of them across this prompt's several
+  rounds of verification) written directly under `frontend/` so the local `node_modules` would
+  resolve, deleted before finishing — never committed. Docker stack and the dev server (started
+  fresh for this prompt) both confirmed healthy; the dev server was stopped cleanly and the
+  workers restarted once verification finished.
+- Not touched in this prompt, per its explicit scope: the overview strip (6.11's work, left
+  exactly as it was), any filter bar (still doesn't exist), any feature-specific form fields
+  (request customization, tags, check interval — all still 6.14's job), any backend/worker code.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

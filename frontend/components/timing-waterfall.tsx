@@ -1,3 +1,4 @@
+import { EmptyState } from "@/components/empty-state";
 import type { LatestCheck } from "@/lib/types";
 
 // Design approach (stated in the prompt-3.6 report): rather than inventing four new brand
@@ -25,11 +26,7 @@ export function TimingWaterfall({ check }: { check: LatestCheck | null | undefin
   })).filter((p) => p.ms != null && p.ms > 0);
 
   if (!check || phases.length === 0) {
-    return (
-      <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-        No timing data
-      </p>
-    );
+    return <EmptyState size="sm" title="Waiting on the first check" />;
   }
 
   return (

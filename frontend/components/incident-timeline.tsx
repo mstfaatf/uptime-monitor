@@ -1,4 +1,5 @@
 import { formatTimestamp } from "@/lib/status";
+import { EmptyState } from "@/components/empty-state";
 import type { CheckHistoryEntry } from "@/lib/types";
 
 type Incident = {
@@ -41,11 +42,7 @@ function formatDuration(ms: number): string {
 
 export function IncidentTimeline({ checks }: { checks: CheckHistoryEntry[] }) {
   if (checks.length === 0) {
-    return (
-      <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-        No checks recorded yet for this region.
-      </p>
-    );
+    return <EmptyState size="sm" title="Waiting on the first check" />;
   }
 
   const incidents = computeIncidents(checks);

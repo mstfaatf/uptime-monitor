@@ -11,6 +11,7 @@ import { TimingWaterfall } from "@/components/timing-waterfall";
 import { UptimeHeatmap } from "@/components/uptime-heatmap";
 import { IncidentTimeline } from "@/components/incident-timeline";
 import { RegionBadge } from "@/components/region-badge";
+import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import {
   Skeleton,
@@ -264,9 +265,12 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
         </div>
 
         {regions.length === 0 ? (
-          <p className="mt-8 text-sm" style={{ color: "var(--text-secondary)" }}>
-            No checks recorded yet for this target.
-          </p>
+          <EmptyState
+            className="mt-8"
+            size="md"
+            title="Waiting on the first check"
+            description="This target hasn't been checked by any monitoring region yet. Its latency chart, uptime heatmap, and incident history will appear here as soon as results start coming in."
+          />
         ) : (
           <>
             {/* Per-region header blocks: each region's signal + SLA stays entirely its own —

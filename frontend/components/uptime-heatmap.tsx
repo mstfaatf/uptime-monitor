@@ -1,4 +1,5 @@
 import { deriveState } from "@/lib/status";
+import { EmptyState } from "@/components/empty-state";
 import type { CheckHistoryEntry } from "@/lib/types";
 
 // Hand-rolled CSS grid, not a calendar-heatmap library (see the 3.1 report): dedicated
@@ -47,6 +48,13 @@ const LEGEND = [
 ];
 
 export function UptimeHeatmap({ checks }: { checks: CheckHistoryEntry[] }) {
+  // Previously absent: with zero checks this rendered 90 real, fully-populated "no data" cells
+  // regardless — not an error, but it told a misleading story (a target that looks like it has
+  // 90 days of nothing, rather than one that's simply brand new). A real bail-out belongs here.
+  if (checks.length === 0) {
+    return <EmptyState size="sm" title="Waiting on the first check" />;
+  }
+
   const buckets = buildDayBuckets(checks, DAYS);
   const days = Array.from(buckets.entries());
 
