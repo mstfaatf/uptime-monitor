@@ -39,3 +39,65 @@ export type Tag = {
   name: string;
   created_at: string;
 };
+
+// Matches backend/routers/targets.py's TargetResponse (Phase 6, prompts 6.2-6.4) — the full
+// configuration shape, distinct from TargetDetail above (which is the live check-status shape
+// GET /targets/{id} actually returns). There's no single-target endpoint for this shape today;
+// the target-settings modal gets it by fetching GET /targets and finding the matching id — see
+// that component's own comment on why a new backend endpoint wasn't worth adding for this.
+export type TargetSettings = {
+  id: number;
+  url: string;
+  name: string | null;
+  created_at: string;
+  request_method: string | null;
+  request_headers: Record<string, string> | null;
+  basic_auth_username: string | null;
+  keyword_match: string | null;
+  keyword_match_mode: string;
+  paused: boolean;
+  check_interval_seconds: number | null;
+  tags: Tag[];
+};
+
+// Matches backend/routers/webhooks.py's WebhookResponse (Phase 6, prompt 6.6). `secret` only
+// ever appears on the create response (WebhookCreatedResponse), never here or in any later
+// GET — see webhook-settings.tsx for how the create flow handles that one-time value.
+export type Webhook = {
+  id: number;
+  url: string;
+  alert_on_downtime: boolean;
+  alert_on_cert_expiry: boolean;
+  enabled: boolean;
+  created_at: string;
+};
+
+// Matches backend/routers/api_keys.py's ApiKeyResponse (Phase 6, prompt 6.7). Same one-time-
+// secret shape as Webhook above: the raw `key` only ever appears on the create response.
+export type ApiKey = {
+  id: number;
+  name: string;
+  key_prefix: string;
+  scope: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+};
+
+// Matches backend/routers/targets.py's RegionAnalyticsResponse/TargetAnalyticsResponse (Phase
+// 6, prompt 6.5).
+export type RegionAnalytics = {
+  uptime_percent: number | null;
+  total_checks: number;
+  latency_p50_ms: number | null;
+  latency_p95_ms: number | null;
+  latency_p99_ms: number | null;
+  mttr_seconds: number | null;
+  incident_count: number;
+};
+
+export type TargetAnalytics = {
+  window: string;
+  window_start: string;
+  regions: Record<string, RegionAnalytics>;
+};

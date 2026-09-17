@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiFetch, apiJson } from "@/lib/api";
 import { SignalLight } from "@/components/signal-light";
+import { WebhookSettings } from "@/components/webhook-settings";
+import { ApiKeySettings } from "@/components/api-key-settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -226,6 +228,10 @@ export default function SettingsPage() {
                 </p>
               )}
             </section>
+
+            <WebhookSettings onAuthFailed={() => setAuthFailed(true)} />
+
+            <ApiKeySettings onAuthFailed={() => setAuthFailed(true)} />
 
             <section
               className="mt-6 rounded border p-5"

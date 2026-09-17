@@ -76,6 +76,17 @@ async def test_tag_rename_rate_limited_after_sixty_per_minute(client):
     assert limited.status_code == 429
 
 
+async def test_webhook_update_rate_limited_after_sixty_per_minute(client):
+    await client.post("/auth/register", json={"email": "ratelimited-webhookpatch@example.com", "password": "pw"})
+    created = await client.post("/webhooks", json={"url": "https://example.com/patch-limit"})
+    webhook_id = created.json()["id"]
+    for _ in range(60):
+        resp = await client.patch(f"/webhooks/{webhook_id}", json={"enabled": True})
+        assert resp.status_code == 200
+    limited = await client.patch(f"/webhooks/{webhook_id}", json={"enabled": True})
+    assert limited.status_code == 429
+
+
 async def test_target_patch_rate_limited_after_sixty_per_minute(client):
     await client.post("/auth/register", json={"email": "ratelimited-targetpatch@example.com", "password": "pw"})
     created = await client.post("/targets", json={"url": "https://example.com/patch-limit"})

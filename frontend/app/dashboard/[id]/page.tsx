@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { API_BASE, apiFetch } from "@/lib/api";
@@ -12,6 +12,7 @@ import { UptimeHeatmap } from "@/components/uptime-heatmap";
 import { IncidentTimeline } from "@/components/incident-timeline";
 import { RegionBadge } from "@/components/region-badge";
 import { EmptyState } from "@/components/empty-state";
+import { TargetSettingsModal } from "@/components/target-settings-modal";
 import { Button } from "@/components/ui/button";
 import {
   Skeleton,
@@ -22,7 +23,20 @@ import {
   UptimeHeatmapSkeleton,
 } from "@/components/skeleton";
 import { deriveState, formatTimestamp } from "@/lib/status";
-import type { TargetDetail, CheckHistoryEntry } from "@/lib/types";
+import type { TargetDetail, CheckHistoryEntry, TargetAnalytics } from "@/lib/types";
+
+// Matches backend/analytics.py's ALLOWED_WINDOWS exactly.
+const ANALYTICS_WINDOWS = ["24h", "7d", "30d", "90d"] as const;
+type AnalyticsWindow = (typeof ANALYTICS_WINDOWS)[number];
+
+function formatMttr(seconds: number | null): string {
+  if (seconds == null) return "—";
+  const totalMinutes = Math.round(seconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+}
 
 function computeSla(checks: CheckHistoryEntry[]): number | null {
   if (checks.length === 0) return null;
@@ -49,6 +63,18 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
   const [authFailed, setAuthFailed] = useState(false);
   const [error, setError] = useState("");
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // `detail` (TargetDetail, from GET /targets/{id}) has no `paused` field — that's part of the
+  // full TargetResponse shape the settings modal fetches separately (see its own comment on
+  // why). Tracked here just so this page can show a small "Paused" badge without re-fetching
+  // the full settings shape itself.
+  const [paused, setPaused] = useState(false);
+
+  const [analyticsWindow, setAnalyticsWindow] = useState<AnalyticsWindow>("7d");
+  const [analytics, setAnalytics] = useState<TargetAnalytics | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+
   const load = useCallback(async () => {
     setError("");
     try {
@@ -64,6 +90,16 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
       if (!res.ok) throw new Error(`Status ${res.status}`);
       const data = (await res.json()) as TargetDetail;
       setDetail(data);
+
+      // GET /targets/{id} doesn't carry `paused` (see this component's own state comment) —
+      // a light best-effort fetch just for that one field, not treated as fatal if it fails.
+      apiFetch("/targets")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((targets: { id: number; paused: boolean }[] | null) => {
+          const match = targets?.find((t) => t.id === Number(targetId));
+          if (match) setPaused(match.paused);
+        })
+        .catch(() => {});
 
       const regions = Object.keys(data.latest_checks).sort((a, b) => a.localeCompare(b));
       if (regions.length > 0) {
@@ -96,6 +132,49 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
   useEffect(() => {
     if (authFailed) router.replace("/login");
   }, [authFailed, router]);
+
+  // Analytics is fetched independently of the region-tab logic above — the endpoint returns
+  // every region's figures in one response (see lib/types.ts's TargetAnalytics), so switching
+  // the window re-fetches once, and switching the selected region tab below just re-reads the
+  // already-fetched response rather than triggering a new request.
+  useEffect(() => {
+    if (loading || authFailed || notFound) return;
+    let cancelled = false;
+    setAnalyticsLoading(true);
+    (async () => {
+      const res = await apiFetch(`/targets/${targetId}/analytics?window=${analyticsWindow}`);
+      if (cancelled) return;
+      if (res.status === 401) {
+        setAuthFailed(true);
+        return;
+      }
+      if (res.ok) setAnalytics((await res.json()) as TargetAnalytics);
+      setAnalyticsLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [targetId, analyticsWindow, loading, authFailed, notFound]);
+
+  function handleSettingsOpen(e: React.MouseEvent<HTMLButtonElement>) {
+    settingsTriggerRef.current = e.currentTarget;
+    setSettingsOpen(true);
+  }
+
+  // Same explicit-focus-restore need documented at length in the dashboard's own quick-add/
+  // tag-manager modals (6.12/6.13) — this button is a plain external trigger too, not a
+  // <DialogTrigger>.
+  function handleSettingsOpenChange(next: boolean) {
+    setSettingsOpen(next);
+    if (!next) {
+      requestAnimationFrame(() => settingsTriggerRef.current?.focus());
+    }
+  }
+
+  function handleSettingsSaved(patch: { name: string | null; paused: boolean }) {
+    setDetail((prev) => (prev ? { ...prev, name: patch.name } : prev));
+    setPaused(patch.paused);
+  }
 
   if (authFailed) return null;
 
@@ -231,7 +310,17 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
       <main className="mx-auto max-w-5xl px-6 py-10">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold">{detail.name || detail.url}</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-semibold">{detail.name || detail.url}</h1>
+              {paused && (
+                <span
+                  className="rounded-sm border px-1.5 py-0.5 font-mono text-xs"
+                  style={{ borderColor: "var(--signal-warning)", color: "var(--signal-warning)" }}
+                >
+                  Paused
+                </span>
+              )}
+            </div>
             {detail.name && (
               <a
                 href={detail.url}
@@ -244,24 +333,29 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
               </a>
             )}
           </div>
-          {selectedRegion ? (
-            // A plain <a> to the export endpoint, not a fetch-and-blob dance: the browser
-            // already sends the session cookie on a top-level navigation like this (SameSite=
-            // lax allows it), and the backend's Content-Disposition: attachment header is what
-            // actually triggers a download instead of navigating away from the app — no client
-            // JS needed to make that happen. Exports the currently-selected region's full
-            // history (no date-range picker UI yet — the endpoint supports from/to, but this
-            // prompt's scope was wiring the button, not building range controls).
-            <Button asChild variant="outline">
-              <a href={`${API_BASE}/targets/${targetId}/export?region=${encodeURIComponent(selectedRegion)}&format=csv`}>
-                Export CSV ({selectedRegion})
-              </a>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="outline" onClick={handleSettingsOpen} ref={settingsTriggerRef}>
+              Edit settings
             </Button>
-          ) : (
-            <Button type="button" variant="outline" disabled title="No check history yet to export.">
-              Export CSV
-            </Button>
-          )}
+            {selectedRegion ? (
+              // A plain <a> to the export endpoint, not a fetch-and-blob dance: the browser
+              // already sends the session cookie on a top-level navigation like this (SameSite=
+              // lax allows it), and the backend's Content-Disposition: attachment header is what
+              // actually triggers a download instead of navigating away from the app — no client
+              // JS needed to make that happen. Exports the currently-selected region's full
+              // history (no date-range picker UI yet — the endpoint supports from/to, but this
+              // prompt's scope was wiring the button, not building range controls).
+              <Button asChild variant="outline">
+                <a href={`${API_BASE}/targets/${targetId}/export?region=${encodeURIComponent(selectedRegion)}&format=csv`}>
+                  Export CSV ({selectedRegion})
+                </a>
+              </Button>
+            ) : (
+              <Button type="button" variant="outline" disabled title="No check history yet to export.">
+                Export CSV
+              </Button>
+            )}
+          </div>
         </div>
 
         {regions.length === 0 ? (
@@ -312,6 +406,88 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
                 </Button>
               ))}
             </div>
+
+            {/* Windowed analytics (Phase 6, prompt 6.5's backend, surfaced here in 6.14) — the
+                fetch covers every region at once (see the effect above), so switching the
+                window re-fetches once and switching the region tab above just re-reads the
+                already-fetched response; only the *display* below is scoped to selectedRegion,
+                same as every other section on this page. */}
+            <section className="mt-6 rounded border p-5" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-lg font-semibold">Analytics</h2>
+                <div className="flex gap-1.5">
+                  {ANALYTICS_WINDOWS.map((w) => (
+                    <Button
+                      key={w}
+                      type="button"
+                      size="sm"
+                      variant={w === analyticsWindow ? "default" : "outline"}
+                      onClick={() => setAnalyticsWindow(w)}
+                    >
+                      {w}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+              {(() => {
+                const stats = selectedRegion ? analytics?.regions[selectedRegion] : undefined;
+                if (analyticsLoading && !analytics) {
+                  return (
+                    <p className="mt-4 text-sm" style={{ color: "var(--text-secondary)" }}>
+                      Loading…
+                    </p>
+                  );
+                }
+                if (!stats) {
+                  return (
+                    <p className="mt-4 text-sm" style={{ color: "var(--text-secondary)" }}>
+                      No checks for this region in the selected window.
+                    </p>
+                  );
+                }
+                return (
+                  <>
+                    <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+                      <div className="flex flex-col">
+                        <span className="font-mono text-2xl" style={{ color: slaColor(stats.uptime_percent) }}>
+                          {stats.uptime_percent != null ? `${stats.uptime_percent.toFixed(1)}%` : "—"}
+                        </span>
+                        <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                          uptime
+                        </span>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="font-mono text-2xl" style={{ color: "var(--text-primary)" }}>
+                          {stats.latency_p50_ms != null ? `${stats.latency_p50_ms} ms` : "—"}
+                        </span>
+                        <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                          p50 latency
+                        </span>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="font-mono text-2xl" style={{ color: "var(--text-primary)" }}>
+                          {stats.latency_p99_ms != null ? `${stats.latency_p99_ms} ms` : "—"}
+                        </span>
+                        <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                          p99 latency
+                        </span>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="font-mono text-2xl" style={{ color: "var(--text-primary)" }}>
+                          {formatMttr(stats.mttr_seconds)}
+                        </span>
+                        <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                          MTTR ({stats.incident_count} incident{stats.incident_count === 1 ? "" : "s"})
+                        </span>
+                      </div>
+                    </div>
+                    <p className="mt-3 text-xs" style={{ color: "var(--text-secondary)" }}>
+                      Based on {stats.total_checks} check{stats.total_checks === 1 ? "" : "s"} in this window.
+                    </p>
+                  </>
+                );
+              })()}
+            </section>
 
             <section className="mt-6 rounded border p-5" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
               <h2 className="text-lg font-semibold">Latency</h2>
@@ -397,6 +573,14 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
           </p>
         )}
       </main>
+
+      <TargetSettingsModal
+        open={settingsOpen}
+        onOpenChange={handleSettingsOpenChange}
+        targetId={Number(targetId)}
+        onSaved={handleSettingsSaved}
+        onAuthFailed={() => router.replace("/login")}
+      />
     </>
   );
 }

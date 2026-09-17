@@ -4328,5 +4328,134 @@ row chips).
   the overview strip's own computations (still operate on unfiltered `items`, exactly as
   6.11 left them).
 
+Prompt 6.14 (feature UI surfacing) is complete. Fourth and largest frontend prompt — every
+backend feature from 6.2/6.3/6.5/6.6/6.7 now has a real UI. One deliberate backend addition
+(webhook `PATCH`, since the toggles this prompt asked for genuinely couldn't be made
+interactive without it) and one real client-side validation gap found and fixed during
+verification.
+- **Backend: `PATCH /webhooks/{id}`, added because the prompt's own ask needed it** — 6.6's
+  webhook CRUD was create/list/delete only, with its own docstring explicitly flagging
+  "revisit if editing them without delete-and-recreate turns out to matter." It did: "per-
+  webhook alert-type toggles, enable toggle" only means something as real interactive
+  controls, and recreating a webhook on every toggle would mint a new secret and silently
+  break the receiver's already-configured signature verification. URL/alert-type/enabled are
+  all independently updatable (pydantic `exclude_unset`, same convention as
+  `PATCH /targets/{id}`); a changed URL is re-validated exactly like creation (well-formed
+  http(s) + SSRF check); the secret itself is never touched by this endpoint on principle —
+  there's still no rotation story, so delete-and-recreate remains the only way to get a new
+  one. 404 (not 403) on an unowned/missing webhook; `API_KEY_RATE_LIMIT`'s 60/minute bound,
+  matching the router's other endpoints. 9 new backend tests (8 for the endpoint, 1 rate-limit
+  boundary) — **303 backend tests total (was 297)**, all passing against a rebuilt `api`
+  image.
+- **Target settings modal** (`components/target-settings-modal.tsx`, reuses the Dialog
+  primitive) — HTTP method, a key/value custom-headers list (add/remove rows), basic auth
+  username/password (`autoComplete="new-password"`, "leave blank to keep the current password"
+  placeholder once a password is already stored — same convention `PATCH /targets/{id}`'s own
+  backend already documents), keyword match + mode, check interval override, and a pause/
+  resume `Switch`. Reachable from a new "Edit settings" button on the detail page (per the
+  quick-add modal's own 6.12 copy: "Request customization, tags, and check interval can be set
+  from the target's own page afterward" — this prompt is what makes that sentence true).
+  Pause/resume saves immediately on toggle via the dedicated `/pause`/`/resume` endpoints (not
+  bundled into the PATCH body — mirrors why the backend itself keeps pausing as its own state
+  transition, not a settable field); every other field saves together via one `PATCH` on
+  submit. No backend endpoint exists to fetch one target's full settings shape by itself (only
+  the list endpoint returns it) — the modal fetches `GET /targets` on open and picks out the
+  matching id, a deliberate reuse rather than a new backend surface for a modal that only
+  needs this once, on open.
+- **Client-side validation mirrors the backend's own rules exactly**, not just a generic
+  required-field check: HEAD + a non-empty keyword match is rejected with the same reasoning
+  the backend's `_validate_request_customization` uses, checked both live (an inline warning
+  appears the instant HEAD + a keyword are both set) and again at submit time so it can't be
+  bypassed by an already-filled field the user never touched again; basic-auth username/
+  password cross-requirement (tracked via whether the loaded target already had a stored
+  password, since a blank password field alone is ambiguous between "removing auth" and
+  "keeping the existing password"); the check-interval floor (30s, matching
+  `MIN_CHECK_INTERVAL_SECONDS`); duplicate header names. **Verified live, not just read from
+  the code**: filled in every field, switched the method to HEAD with a keyword match already
+  set, confirmed the exact same inline warning and submit-blocking message the backend would
+  give; fixed it and submitted for real, then confirmed via a direct authenticated API call
+  that every field (custom header, basic auth username, keyword match, interval, method) had
+  actually persisted — the basic-auth password itself correctly never came back in the
+  response, at any point.
+- **Analytics on the detail page** (`GET /targets/{id}/analytics`, 6.5's backend): a new
+  "Analytics" section with a 24h/7d/30d/90d window selector (button row, matching the region
+  tabs' own visual pattern) showing uptime %, p50 latency, p99 latency, and MTTR (with the
+  incident count folded into its own label) for the currently selected region, all in mono
+  matching every other stat on this page. Fetches all regions in one request per window change
+  (the endpoint's own shape) — switching the region tab re-reads the already-fetched response
+  instead of triggering a new one. **Verified against real seeded history**: seeded six real
+  checks spanning a genuine down period and a real latency spike, and confirmed the 24h window
+  showed the exact hand-computable figures (83.3% uptime, real p50/p99, 1h MTTR from 1
+  incident) — not just that numbers rendered, that they were the *correct* numbers.
+- **Webhook settings** (`components/webhook-settings.tsx`, new section on `/settings`): a
+  create form (URL + the two alert-type checkboxes) and a list of existing webhooks, each with
+  three real, independently-togglable switches (enabled/downtime/cert-expiry) now that the
+  backend supports it. The signing secret is shown exactly once, right after creation, in an
+  amber-bordered "copy this now" panel with a working clipboard-copy button — confirmed via a
+  fresh page reload that it's genuinely gone afterward and a subsequent `GET /webhooks` never
+  includes it, only the URL/toggles.
+- **API key management** (`components/api-key-settings.tsx`, new section on `/settings`): a
+  create form (name + read/full scope select, with both scopes' real capabilities spelled out
+  underneath) and a list of existing keys showing name, scope, masked `key_prefix`, created
+  date, and last-used (or "never") — each as its own separate line, deliberately not a middle-
+  dot-joined meta string (see the self-critique note below). The raw key is shown once,
+  identically to the webhook secret's own pattern. Revoking is soft-delete server-side
+  (matches `DELETE /api-keys/{id}`'s existing behavior) — a revoked key stays listed with a
+  red "Revoked" badge in place of the Revoke button, as an audit trail, not removed from view.
+  **Verified server-side, not just via the UI's own state**: queried `GET /api-keys` directly
+  after creating and revoking a key and confirmed the raw value never appears in the response
+  at any point, only `key_prefix`.
+- **Real client-side validation gap found and fixed during verification**: the webhook URL
+  `<Input>` uses `type="url"`, and a genuinely malformed string (e.g. `"not-a-url"`) never
+  reaches this app's own `isValidWebhookUrl` check at all — the browser's native constraint
+  validation blocks form submission first, showing its own browser-native bubble instead of
+  this app's error text. Found by testing with a plain garbage string and getting a Playwright
+  timeout waiting for a `<p>` error that structurally can never render. This isn't a bug (the
+  browser's own check is a legitimate first line of defense, and this app's custom check still
+  needs to exist for cases the browser's native check *doesn't* catch), but it meant the test
+  needed a case that passes native `type="url"` validation while still failing this app's own
+  http/https-only rule to actually exercise the custom logic. Re-verified with `ftp://
+  example.com/hook` (syntactically valid per the browser, invalid per this app's own rule,
+  matching the backend's own `test_create_webhook_rejects_non_http_scheme` case exactly) —
+  correctly rejected client-side with this app's own error message.
+- **Self-critique against the `frontend-design` skill's avoid-list — two real instances found
+  and fixed before finishing, not just a clean pass**: (1) the API key list's metadata line was
+  originally written as a middle-dot-joined string (`{prefix}… · created {date} · last used
+  {date}`) — exactly the template-chrome pattern the skill's avoid-list names explicitly;
+  rewritten as separate flex items, matching how every other multi-fact row in this app (e.g.
+  the dashboard's own target rows) already displays adjacent facts. (2) the API key scope
+  descriptions and both "copy this now" messages originally used em dashes
+  (`"Read — view targets..."`, `"Copy this key now — it won't be shown again."`) — this
+  project's own house style has explicitly banned em dashes from user-facing copy since 4.2's
+  copy pass (and a later full design-pass prompt found and fixed several more that had
+  survived elsewhere), so these were rewritten as plain sentences/separate lines rather than
+  left as a new instance of something already deliberately eliminated twice before. Otherwise
+  clean: no new colors, shadows, or gradients; small-radius bordered chips/panels throughout,
+  matching the existing instrument-panel vocabulary; mono used exactly where the rest of the
+  app already uses it (live-instrument numbers, tag/key-prefix text); no all-caps labels; no
+  numbered markers; no trailing arrows.
+- **Verified end-to-end against the real running stack**: registered a throwaway account,
+  created and paused a target, seeded six real check rows via SQL (workers stopped for the
+  duration, restarted after), and drove every surface through Playwright against the real dev
+  server and real backend — the settings modal's full save flow (including the HEAD+keyword
+  rejection, confirmed both inline and as a submit-time block), the analytics window switch,
+  webhook creation/toggle/secret-reveal, and API key creation/revoke — screenshotting each.
+  Checked the target-settings modal and the full `/settings` page at 400px width: the modal
+  scrolls internally (`max-h-[85vh] overflow-y-auto`, needed now that it's the single largest
+  form in the app) and wraps its header key/value rows without overflow; `/settings` itself
+  stacks cleanly with all three new/existing sections readable at that width.
+- All verification data deleted afterward via the real `DELETE /auth/me` cascade, confirmed
+  via direct SQL count of zero remaining rows across targets, webhooks, and API keys. Scratch
+  Playwright scripts (3 across this prompt) written under `frontend/`, deleted before
+  finishing, never committed. Docker stack and the dev server (started fresh for this prompt)
+  both confirmed healthy; dev server stopped cleanly and workers restarted once verification
+  finished.
+- Not touched in this prompt: the dashboard list page (filter bar, quick-add modal, overview
+  strip — all 6.11-6.13's work, untouched), the alert-preferences/change-password/danger-zone
+  sections on `/settings` (unchanged, just joined by two new sections above them).
+
+**All five backend feature areas from Phase 6 (6.2, 6.3, 6.5, 6.6, 6.7) now have a real UI.**
+No planned Phase 6 work remains outstanding.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

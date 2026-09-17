@@ -1,8 +1,13 @@
 """Webhook CRUD endpoints (Phase 6, prompt 6.6). Ownership enforced identically to every other
 user-owned resource in this app (CLAUDE.md rule 1) — every query here filters by
-Webhook.user_id == current_user.id. POST/GET/DELETE only, no PATCH — matches the precedent
-already set by routers/tags.py's own CRUD shape; a webhook's toggles are fixed at creation for
-now, revisit if editing them without delete-and-recreate turns out to matter.
+Webhook.user_id == current_user.id.
+
+PATCH /{webhook_id} added in prompt 6.14 — the settings-page UI it's built for needs the URL
+and alert-type/enabled toggles to be genuinely editable, not just fixed at creation with
+delete-and-recreate as the only way to change them (6.6's original scope explicitly deferred
+this: "revisit if editing them without delete-and-recreate turns out to matter" — it did). The
+secret is deliberately never touched by this endpoint — there's no rotation story yet, so it
+stays exactly what creation generated; delete-and-recreate is still how you'd get a new one.
 
 Webhook URLs are validated against the same SSRF blocklist used for target URLs
 (backend/security/ssrf.py) here, at creation — the same "fast feedback" principle as
@@ -56,6 +61,17 @@ class WebhookCreate(BaseModel):
     url: str
     alert_on_downtime: bool = True
     alert_on_cert_expiry: bool = True
+
+
+class WebhookUpdate(BaseModel):
+    """PATCH body — every field optional, only the ones actually present in the request JSON
+    are changed (pydantic's exclude_unset, same convention as PATCH /targets/{id}). `secret`
+    is deliberately not a field here at all — see the module docstring."""
+
+    url: str | None = None
+    alert_on_downtime: bool | None = None
+    alert_on_cert_expiry: bool | None = None
+    enabled: bool | None = None
 
 
 class WebhookResponse(BaseModel):
@@ -130,6 +146,41 @@ async def create_webhook(
     await db.flush()
     await db.refresh(webhook)
     return WebhookCreatedResponse(**_webhook_to_response(webhook).model_dump(), secret=webhook.secret)
+
+
+@router.patch("/{webhook_id}", response_model=WebhookResponse)
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
+async def update_webhook(
+    request: Request,
+    webhook_id: int,
+    body: WebhookUpdate,
+    current_user: User = _full_or_key,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a webhook's URL and/or alert-type/enabled toggles. A changed URL is re-validated
+    exactly like creation (well-formed http(s) + SSRF check) — an edit could just as easily
+    introduce a bad/blocked URL as a create could. 404 (not 403) if the webhook doesn't exist or
+    isn't owned by the caller, same pattern as every other ownership-scoped endpoint."""
+    result = await db.execute(select(Webhook).where(Webhook.id == webhook_id, Webhook.user_id == current_user.id))
+    webhook = result.scalar_one_or_none()
+    if webhook is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Webhook not found")
+
+    provided = body.model_dump(exclude_unset=True)
+    if "url" in provided and body.url is not None:
+        new_url = body.url.strip()
+        _validate_webhook_url(new_url)
+        webhook.url = new_url
+    if "alert_on_downtime" in provided and body.alert_on_downtime is not None:
+        webhook.alert_on_downtime = body.alert_on_downtime
+    if "alert_on_cert_expiry" in provided and body.alert_on_cert_expiry is not None:
+        webhook.alert_on_cert_expiry = body.alert_on_cert_expiry
+    if "enabled" in provided and body.enabled is not None:
+        webhook.enabled = body.enabled
+
+    await db.flush()
+    await db.refresh(webhook)
+    return _webhook_to_response(webhook)
 
 
 @router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
