@@ -4457,5 +4457,105 @@ verification.
 **All five backend feature areas from Phase 6 (6.2, 6.3, 6.5, 6.6, 6.7) now have a real UI.**
 No planned Phase 6 work remains outstanding.
 
+Phase 6, prompt 6.15 (general UI consistency, motion/accessibility, and mobile hardening pass
+across 6.11-6.14) is complete. A genuinely thorough, evidence-based audit — every claim
+verified against real source or real rendered behavior, not assumed — rather than a
+superficial pass; found and fixed four real issues, confirmed everything else already held.
+- **Design-system consistency audit, three real fixes**: (1) an em dash survived in a
+  `title` tooltip attribute on the dashboard's aggregate-uptime-% stat (`app/dashboard/
+  page.tsx`) — missed by 6.11's original em-dash check, which only looked at visible label
+  text, not `title` attributes (equally user-facing, shown on hover and sometimes read by
+  assistive tech); fixed by splitting into two sentences. (2) `webhook-settings.tsx`'s
+  webhook-creation form used native `<input type="checkbox">` for its two alert toggles,
+  rendering with a browser-default blue accent color outside the locked ten-token palette,
+  while this exact app already has an established `Switch` component (already imported in
+  the same file) used for every other boolean toggle everywhere else — swapped both to
+  `Switch`. (3) a systemic gap across four files hand-built in 6.13/6.14
+  (`target-filter-bar.tsx`, `target-tag-chips.tsx`, `target-settings-modal.tsx`,
+  `api-key-settings.tsx`): every raw `<select>` (and, in `target-tag-chips.tsx`, the tag
+  detach `×` button) lacked shadcn `Input`'s established
+  `focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring` pattern — the
+  detach button was the most serious instance, since it had `focus-visible:outline-none` with
+  nothing replacing the removed outline, a genuine keyboard-accessibility regression, not just
+  a visual nit. Fixed by adding the exact same utility classes to all five locations. All
+  three fixes confirmed via `tsc --noEmit` (clean) and empirically via Playwright (below), not
+  just by inspecting the added classNames.
+- **Radius/type-scale consistency, confirmed clean, no fixes needed**: re-read
+  `tailwind.config.ts`'s `borderRadius` block directly (not from memory) — `rounded-lg` on
+  `DialogContent` still resolves to `var(--radius)` (4px), matching the 3.4 lock, no drift.
+  `skeleton.tsx`'s `rounded-full` on `LatencyGaugeSkeleton` is the deliberate, already-
+  documented circular-shape exception (approximating the gauge's genuinely round footprint,
+  not a radius-token violation). Every new H2 across 6.11-6.14 (`Webhooks`, `API keys`,
+  `Analytics`, `Latency`, `Timing breakdown`, `Uptime`, `Incidents`, `TLS certificate`, `Alert
+  preferences`, `Account`, danger-zone heading) uses `text-lg font-semibold`; every new modal
+  title (`tag-manager-modal.tsx`, `quick-add-target-modal.tsx`, `target-settings-modal.tsx`)
+  uses shadcn's `DialogTitle`, itself `text-lg font-semibold` — one consistent scale
+  throughout, confirmed by grep, not assumed.
+- **Contrast audit, confirmed clean, no fixes needed**: grepped every new color usage across
+  6.11-6.14 — every single one reuses an already-3.8-audited token (`--signal-up/warning/
+  down` as text, `--signal-pending-text` for the pending case) exactly as established; no new
+  hex value was introduced anywhere in this phase. The one raw `--signal-pending` usage found
+  (`app/dashboard/[id]/page.tsx`'s null-SLA readout) is the pre-existing, already-flagged
+  large-text (`text-3xl`, 3:1 threshold) exception from 3.8, untouched by 6.11-6.14.
+- **Motion audit, confirmed empirically via Playwright, not just by reading the CSS**: drove
+  a real browser against the local dev server with `emulateMedia({ reducedMotion: "reduce" })`
+  — the quick-add modal's `.dialog-content` and a synthetic `.skeleton-pulse` element both
+  read `animationName: "none"`, `animationDuration: "0s"`; under `"no-preference"` the same
+  elements read the real animation (`dialog-fade-in`/`0.15s`, `skeleton-pulse`/`1.6s`).
+  **Explicitly re-verified for the target settings modal by name**, per the prompt's specific
+  ask: opened it under normal motion and confirmed it also correctly plays `dialog-fade-in`/
+  `0.15s` (inherits the same `.dialog-content` class as every other modal — no separate motion
+  code to diverge). The one-orchestrated-load-in rule was re-confirmed via grep across every
+  6.11-6.14 file for `transition-`/`animate-`/`hover:`/`IntersectionObserver` — only the two
+  documented primitives plus the dashboard's own existing load-in sequence exist; no new
+  scroll-triggered fades or per-card hover effects crept in with the dashboard strip, filter
+  bar, or any modal.
+- **Keyboard focus audit, confirmed empirically via Playwright computed styles** on every one
+  of the newly-fixed elements: tabbed to and read `getComputedStyle(...).boxShadow` on all
+  four filter-bar selects, the tag attach-select, the tag detach button, both target-settings-
+  modal selects, and the API-key scope select — all nine show the real
+  `rgb(236, 239, 237) 0px 0px 0px 1px` ring (the same `--ring`/`--text-primary` value 3.8
+  established), proving the fix genuinely works, not just that the CSS classes were added.
+- **Real mobile bug found and fixed, via the screenshot pass, not code review**: the target
+  detail page's header row (`app/dashboard/[id]/page.tsx`) — title plus the "Edit settings"/
+  "Export CSV" buttons — used `flex items-start justify-between` with no `flex-wrap`, so at
+  400px width the button pair forced genuine horizontal overflow (the page rendered at an
+  actual 682px against a 400px viewport, confirmed by comparing the screenshot's reported
+  dimensions before and after the fix). Fixed by adding `flex-wrap` to that row, its own
+  loading-skeleton equivalent, the inner button-group div, and the region-tab pill row (same
+  page) for consistency/safety. Re-screenshotted after the fix: genuinely 400px wide, buttons
+  wrap cleanly onto their own line below the title, no overflow anywhere.
+- **Full fresh mobile pass at 400px** across the dashboard (summary strip, legend, filter bar,
+  tag chips, quick-add modal all visible together), the detail page (region cards, analytics,
+  latency chart, timing breakdown, heatmap, incidents, cert panel, target-settings modal), and
+  `/settings` (alert preferences, webhooks, API keys, account, danger zone) — all clean after
+  the fix above, no other overflow or cramped-control issues found.
+- **Known, pre-existing gap flagged, not fixed (out of this prompt's 6.11-6.14 scope)**:
+  `site-header.tsx`'s "Sign out" button (`className="bg-transparent p-0 transition-colors
+  hover:text-fg-primary"`, no `focus-visible` ring at all) predates Phase 6 entirely — it's a
+  Phase 3 component. Consistent with this project's established practice of flagging rather
+  than silently expanding scope onto incidentally-found pre-existing issues.
+- **Verification methodology**: rebuilt nothing (frontend-only changes, backend/worker
+  untouched) — relied on `tsc --noEmit` (clean throughout) plus real Playwright verification
+  against a freshly-started local dev server and the already-healthy Docker stack. Registered
+  several throwaway accounts, created real targets (including a real basic-auth-free public
+  URL, no SQL seeding needed since this prompt's checks were about UI mechanics/motion/focus/
+  layout, not data correctness), drove the real UI end to end (quick-add, tag create/attach/
+  detach, target-settings modal open/close, region tabs, webhook/API-key sections),
+  screenshotted every major page and modal at both desktop (1280px) and mobile (400px) width
+  for the self-critique pass — clean against the avoid-list throughout, no new em dashes or
+  middle-dot-joined strings found anywhere in this fresh pass. All verification accounts (6
+  across this prompt, one recovered by direct SQL lookup after a console-output truncation
+  lost its generated email) deleted afterward via the real `DELETE /auth/me` cascade, hitting
+  and working around the real login rate limit (5/minute) along the way rather than bypassing
+  it; confirmed via direct SQL count that zero verification users/targets remain. Scratch
+  Playwright/cleanup scripts written under `frontend/`, deleted before finishing, never
+  committed. Docker stack (`api`/`db`/`worker`/`worker-eu-west`) was never touched (no seeding
+  needed this prompt) and stayed healthy throughout; the dev server was stopped cleanly at the
+  end.
+
+**Phase 6 is now fully complete, including this consistency/accessibility/motion hardening
+pass across every 6.11-6.14 UI addition.** No planned Phase 6 work remains outstanding.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

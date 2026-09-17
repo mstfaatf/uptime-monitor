@@ -684,7 +684,7 @@ export default function DashboardPage() {
               <span
                 className="font-mono text-2xl"
                 style={{ color: uptimeColor(aggregateUptimePercent) }}
-                title="Percentage of target-region pairs currently reporting up — a live snapshot across every monitored region, not a time-windowed SLA. See a target's detail page for windowed SLA % per region."
+                title="Percentage of target-region pairs currently reporting up. A live snapshot across every monitored region, not a time-windowed SLA. See a target's detail page for windowed SLA % per region."
               >
                 {aggregateUptimePercent != null ? `${aggregateUptimePercent.toFixed(1)}%` : "—"}
               </span>

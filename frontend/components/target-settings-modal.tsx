@@ -255,7 +255,7 @@ export function TargetSettingsModal({ open, onOpenChange, targetId, onSaved, onA
                 value={method}
                 onChange={(e) => setMethod(e.target.value as typeof method)}
                 disabled={saving}
-                className="rounded-sm border bg-transparent px-2 py-1.5 font-mono text-sm"
+                className="rounded-sm border bg-transparent px-2 py-1.5 font-mono text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
               >
                 <option value="auto" style={{ background: "var(--bg-surface)" }}>
@@ -346,7 +346,7 @@ export function TargetSettingsModal({ open, onOpenChange, targetId, onSaved, onA
                   value={keywordMatchMode}
                   onChange={(e) => setKeywordMatchMode(e.target.value as typeof keywordMatchMode)}
                   disabled={saving}
-                  className="rounded-sm border bg-transparent px-2 py-1.5 font-mono text-sm"
+                  className="rounded-sm border bg-transparent px-2 py-1.5 font-mono text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
                   aria-label="Keyword match mode"
                 >

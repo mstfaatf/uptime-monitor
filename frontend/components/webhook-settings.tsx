@@ -179,22 +179,22 @@ export function WebhookSettings({ onAuthFailed }: WebhookSettingsProps) {
             disabled={creating}
           />
         </div>
-        <div className="flex flex-wrap gap-5">
+        <div className="flex flex-wrap items-center gap-5">
           <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
+            <Switch
               checked={alertOnDowntime}
-              onChange={(e) => setAlertOnDowntime(e.target.checked)}
+              onCheckedChange={setAlertOnDowntime}
               disabled={creating}
+              aria-label="Downtime alerts for new webhook"
             />
             Downtime alerts
           </label>
           <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
+            <Switch
               checked={alertOnCertExpiry}
-              onChange={(e) => setAlertOnCertExpiry(e.target.checked)}
+              onCheckedChange={setAlertOnCertExpiry}
               disabled={creating}
+              aria-label="Certificate expiry alerts for new webhook"
             />
             Certificate expiry alerts
           </label>

@@ -36,7 +36,7 @@ function FilterSelect({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-sm border bg-transparent px-2 py-1.5 font-mono text-sm"
+        className="rounded-sm border bg-transparent px-2 py-1.5 font-mono text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
       >
         {options.map((opt) => (

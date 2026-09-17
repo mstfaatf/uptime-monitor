@@ -83,7 +83,7 @@ export function TargetTagChips({ targetId, tags, allTags, onAttached, onDetached
             onClick={() => handleDetach(tag.id)}
             disabled={pendingTagId !== null}
             aria-label={`Remove tag ${tag.name}`}
-            className="leading-none opacity-70 hover:opacity-100 focus-visible:outline-none"
+            className="rounded-sm leading-none opacity-70 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             style={{ color: "var(--text-secondary)" }}
           >
             ×
@@ -96,7 +96,7 @@ export function TargetTagChips({ targetId, tags, allTags, onAttached, onDetached
           onChange={(e) => handleAttach(Number(e.target.value))}
           disabled={pendingTagId !== null}
           aria-label="Attach a tag"
-          className="rounded-sm border bg-transparent px-1.5 py-0.5 font-mono text-xs"
+          className="rounded-sm border bg-transparent px-1.5 py-0.5 font-mono text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
         >
           <option value="" disabled>

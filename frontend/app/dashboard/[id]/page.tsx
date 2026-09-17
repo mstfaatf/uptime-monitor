@@ -186,7 +186,7 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
     // state did — not a structural change, just what fills the one <main> that already existed.
     return (
       <main className="mx-auto max-w-5xl px-6 py-10" aria-busy="true" aria-label="Loading target detail">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="flex flex-col gap-2">
             <Skeleton className="h-8 w-64" />
             <Skeleton className="h-4 w-40" />
@@ -308,7 +308,7 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
       </header>
 
       <main className="mx-auto max-w-5xl px-6 py-10">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-2xl font-semibold">{detail.name || detail.url}</h1>
@@ -333,7 +333,7 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
               </a>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="outline" onClick={handleSettingsOpen} ref={settingsTriggerRef}>
               Edit settings
             </Button>
@@ -393,7 +393,7 @@ export default function TargetDetailPage({ params }: { params: { id: string } })
             </div>
 
             {/* Region tabs — everything below picks one region at a time. */}
-            <div className="mt-8 flex gap-2">
+            <div className="mt-8 flex flex-wrap gap-2">
               {regions.map((region) => (
                 <Button
                   key={region}
