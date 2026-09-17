@@ -1,6 +1,7 @@
 """SQLAlchemy models."""
 
 from models.alert_history import AlertHistory
+from models.api_key import ApiKey
 from models.check import Check
 from models.password_reset_token import PasswordResetToken
 from models.tag import Tag
@@ -20,4 +21,5 @@ __all__ = [
     "Tag",
     "target_tags",
     "Webhook",
+    "ApiKey",
 ]

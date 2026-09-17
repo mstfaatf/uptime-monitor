@@ -99,3 +99,6 @@ async def test_anonymous_user_cannot_access_any_target_endpoint(client):
     assert (await client.get("/webhooks")).status_code == 401
     assert (await client.post("/webhooks", json={"url": "https://example.com/x"})).status_code == 401
     assert (await client.delete("/webhooks/1")).status_code == 401
+    assert (await client.get("/api-keys")).status_code == 401
+    assert (await client.post("/api-keys", json={"name": "x"})).status_code == 401
+    assert (await client.delete("/api-keys/1")).status_code == 401

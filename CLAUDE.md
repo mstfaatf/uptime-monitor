@@ -3710,11 +3710,103 @@ same prompt. Explicit scope boundary honored: API keys and rate limiting untouch
 - Not touched in this prompt, per its explicit scope: API keys, rate limiting, any frontend
   code, retention, pagination.
 
-**Next: continue Phase 6** — API keys is the one backend feature area from the 6.1 report not
-yet built; retention/pagination remain lower-priority infra items; frontend work for
-everything shipped in Phase 6 so far (customization, pause/resume, tags, analytics, webhooks)
-is still entirely outstanding, deferred to its own later prompts per the explicit per-prompt
-scoping used throughout this phase.
+Phase 6, prompt 6.7 (API keys, public REST API, per-key rate limiting, pagination) is
+complete — the last backend feature area from the 6.1 report. Explicit scope boundary honored:
+no frontend code touched.
+- **Schema**: migration `014_add_api_keys.py` — `api_keys(id, user_id FK CASCADE, name,
+  key_prefix, key_hash indexed, scope default 'read', created_at, last_used_at, revoked_at)`.
+  Raw key = `"um_" + secrets.token_urlsafe(32)`; only `sha256(raw_key)` is stored, same pattern
+  as `password_reset_tokens`. `revoked_at` is a soft-delete — `DELETE /api-keys/{id}` sets it,
+  never removes the row, so `GET /api-keys` keeps showing a revoked key (with its revocation
+  time) as an audit trail rather than silently dropping it.
+- **New `backend/routers/api_keys.py`**: `POST/GET /api-keys`, `DELETE /api-keys/{id}` — the
+  raw key is returned only in the create response, `key_prefix` (first 12 chars) is returned
+  everywhere else so a list UI can distinguish keys without ever seeing the full value again.
+  **Cookie-auth only, deliberately** — every endpoint here depends on the plain
+  `get_current_user`, never the new combined dependency, at any scope: confirmed live and by
+  test that presenting a valid, even `full`-scope, key with no cookie gets a real 401 on every
+  one of these three endpoints, satisfying "API-key auth can never manage API keys themselves."
+- **New `backend/auth/api_key.py`**: `get_current_user_or_api_key(scope)` — a dependency
+  factory. `Authorization: Bearer <key>` present → must resolve to a valid, unrevoked key with
+  sufficient scope (401 if the key itself is bad, 403 if under-scoped) — deliberately **no**
+  silent fallback to cookie in that case, so a caller that explicitly presented a bad key gets
+  an honest answer about it. Header **absent** → defers entirely to the existing, completely
+  unmodified `get_current_user`, which is what keeps every current cookie-authenticated caller
+  of these same endpoints (the dashboard) working exactly as before — confirmed by test that a
+  non-`Bearer` `Authorization` header (e.g. Basic auth) and no-header-at-all both still resolve
+  correctly via cookie. `last_used_at` is throttled to at most once per hour, not bumped on
+  every request, per the write-volume concern flagged back in the 6.1 report.
+- **Wired onto exactly the endpoints the prompt named**, no more: `GET /targets`,
+  `GET /targets/{id}`, `GET /targets/{id}/checks`, `GET /targets/{id}/export` at scope `read`;
+  `POST /targets`, `POST /targets/{id}/pause`, `DELETE /targets/{id}`, and all three
+  `/webhooks` endpoints at scope `full`. Deliberately **not** extended to `PATCH /targets/{id}`,
+  `POST /targets/{id}/resume`, the tags endpoints, `/targets/{id}/analytics`, `/targets/status`,
+  or `/targets/stream` — the prompt's own enumeration stops at "create/pause/delete targets and
+  manage webhooks," and extending further would have been my own extrapolation, not the
+  literal ask. Ownership enforcement is structurally identical for both auth paths: both
+  resolve to the same `current_user`, and every query already filtered by `current_user.id`
+  before this prompt — confirmed live and by test that a key can never see, read, or act on
+  another user's targets.
+- **Rate limiting values chosen**: `60/minute` per key (`rate_limit.API_KEY_RATE_LIMIT`),
+  applied via a custom `api_key_or_remote_address` key_func on every key-eligible route above
+  — generous enough for a real integration (a Prometheus exporter, a personal dashboard
+  polling every few seconds), far above anything a human clicking through the web dashboard
+  would hit on these specific routes, while still bounding a misconfigured/abusive
+  integration. `10/minute`, IP-keyed, added to `POST /api-keys` and `POST /webhooks` — the
+  exact value the prompt asked to mirror from `POST /targets`'s existing creation limit.
+  `POST /targets` and `POST /webhooks` end up with **two** stacked `@limiter.limit(...)`
+  decorators (their existing 10/minute IP-keyed creation limit, untouched, plus the new
+  60/minute per-key one) — slowapi enforces both independently; confirmed this doesn't break
+  anything by re-running the full existing rate-limit suite unchanged. Every existing IP-keyed
+  limit (login 5/min, register 3/min, target-creation 10/min, change-password 5/min,
+  forgot/reset-password 3+5/min) is completely untouched.
+- **Pagination on `GET /targets/{id}/checks`**: id-based cursor (`?cursor=<last-seen id>`),
+  default 500 / max 2000 — same numbers as the existing (unpaginated) `limit` clamp, just now
+  also cursor-walkable. Ordering switched from `checked_at ASC` to `id ASC` uniformly (the two
+  are equivalent here — checks are inserted in real time order by an autoincrement id — so this
+  doesn't change what a non-paginating caller sees, just simplifies the cursor semantics to
+  match "id-based cursor" literally). **Honored only for API-key-authenticated requests** —
+  gated on `request.state.api_key`, not just on whether `?cursor=` was passed — so the
+  dashboard's existing behavior is unaffected even in edge cases, not just in the common case.
+  A further page is signaled via an `X-Next-Cursor` response header, never a body-shape change
+  (the response stays a bare list for every caller, cookie or key) — confirmed live that a
+  cookie-authenticated request to the identical URL+params never receives that header, even
+  though more rows exist.
+- **Tests**: `test_api_keys.py` (11: CRUD, scope validation, uniqueness, revoke idempotency,
+  ownership, auth-required, **the key-cannot-manage-keys rule explicitly proven** by presenting
+  a real full-scope key with no cookie against all three `/api-keys` endpoints and confirming
+  401, creation rate limit) and `test_api_key_auth.py` (22: valid/unknown/revoked/malformed key
+  handling, non-Bearer-header and no-header cookie fallback, scope enforcement in both
+  directions — read-scope correctly blocked from writes, full-scope correctly covers reads too
+  — ownership-via-key against another user's targets across every key-eligible endpoint, the
+  per-key rate limit firing at exactly 60, **proof it's keyed by the API key and not IP** (the
+  same test client's cookie-authenticated request to the same route stays unaffected after
+  exhausting a key's budget), two keys on the same account having fully independent budgets,
+  pagination correctness via a full cursor walk across 5 known rows asserted in exact order,
+  cookie requests never receiving pagination signaling, and **the 2000-row cap proven directly
+  against 2005 real bulk-inserted rows**, not just asserted from the clamp math). Plus 3 new
+  assertions in `test_ownership.py`. **271 backend tests total (was 238)**. No worker changes
+  in this prompt — worker tests unaffected.
+- **Verified end-to-end against the real running stack, not just tests**: rebuilt `api`,
+  confirmed migration `013 → 014` applied cleanly. Created a real target via cookie auth, a
+  real read-scope key, and confirmed **with no cookie attached at all** that the raw key alone
+  reads `GET /targets`/`GET /targets/{id}` successfully, a create attempt with that same key
+  gets a real 403, and an unknown key gets a real 401. Confirmed a second real user's key gets
+  a real 404 reading the first user's target. Revoked the key live and confirmed its very next
+  use fails with a real 401. Seeded real check rows and walked real pagination pages via
+  `X-Next-Cursor`, then confirmed a cookie-authenticated request to the identical URL never
+  receives that header. All verification data deleted afterward via the real `DELETE /auth/me`
+  flow. Stack left healthy (`db`/`api`/`worker` all `Up`).
+- Not touched in this prompt, per its explicit scope: any frontend code, retention.
+
+**Phase 6's backend feature work is now complete**: target request customization + keyword
+monitoring, pause/resume + configurable interval, tags, windowed analytics, webhook alerting,
+and API keys/public REST access have all shipped, tested, and been verified live. **Next**:
+per the 6.1 report, retention (the checks-table pruning job) is the one remaining backend item,
+lower priority than everything above; otherwise, frontend work for everything shipped in this
+phase is entirely outstanding, deferred to its own later prompts (6.13 for
+customization/pause/resume/tags, 6.14 for analytics, plus whatever prompt covers webhooks/API
+key management UI) per the explicit per-prompt scoping used throughout.
 
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

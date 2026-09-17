@@ -14,16 +14,22 @@ from sqlalchemy.orm import aliased, selectinload
 
 import realtime
 from analytics import ALLOWED_WINDOWS, compute_region_analytics
-from auth import get_current_user
+from auth import get_current_user, get_current_user_or_api_key
 from database import get_db
 from export import build_csv
 from models import Check, Tag, Target, TargetRegionSchedule, User
-from rate_limit import limiter
+from rate_limit import API_KEY_RATE_LIMIT, api_key_or_remote_address, limiter
 from routers.tags import TagResponse, _tag_to_response
 from security.crypto import encrypt_secret
 from security.ssrf import is_url_blocked
 
 router = APIRouter(prefix="/targets", tags=["targets"])
+
+# API-key-eligible read/full dependencies (Phase 6, prompt 6.7) — see auth/api_key.py. Built
+# once here since the factory itself is cheap but re-invoking it per route wouldn't be wrong,
+# just noisier; these two names are exactly what each route below declares.
+_read_or_key = Depends(get_current_user_or_api_key("read"))
+_full_or_key = Depends(get_current_user_or_api_key("full"))
 
 # Request customization (Phase 6, prompt 6.2). request_method=None preserves the worker's
 # original HEAD-then-GET-on-failure default (see worker/checker.py) — only these three
@@ -454,12 +460,17 @@ async def stream_target_updates(
 
 
 @router.get("", response_model=list[TargetResponse])
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
 async def list_targets(
+    request: Request,
     tag: str | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = _read_or_key,
     db: AsyncSession = Depends(get_db),
 ):
     """Return all targets owned by the authenticated user, each with its full tags list.
+    API-key-eligible (scope 'read' or above — see auth/api_key.py) alongside the existing
+    cookie session; ownership enforcement is identical either way, since both paths resolve to
+    the same `current_user` and every query below still filters by current_user.id.
 
     `?tag=<name>` optionally filters to targets carrying a tag with that exact name. Filters by
     name (not tag_id) — the more natural shape for a query-string filter, matching how `region`
@@ -486,13 +497,18 @@ async def list_targets(
 
 @router.post("", response_model=TargetResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
 async def create_target(
     request: Request,
     body: TargetCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = _full_or_key,
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new target. URL is normalized; duplicate normalized URL per user returns 409."""
+    """Create a new target. URL is normalized; duplicate normalized URL per user returns 409.
+    API-key-eligible at scope 'full' (see auth/api_key.py) — the existing 10/minute IP-keyed
+    creation limit stays exactly as it was; the per-key limit stacks on top of it, not instead
+    of it (in practice the 10/minute limit binds first for any single key/IP, since it's the
+    stricter of the two)."""
     raw = str(body.url).strip()
     try:
         normalized = normalize_url(raw)
@@ -638,16 +654,19 @@ async def update_target(
 
 
 @router.post("/{target_id}/pause", response_model=TargetResponse)
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
 async def pause_target(
+    request: Request,
     target_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = _full_or_key,
     db: AsyncSession = Depends(get_db),
 ):
     """Pause a target: the worker's claim query excludes a paused target entirely (see
     worker/main.py's claim_due_targets — `AND NOT t.paused` in its WHERE clause), across every
     region, until it's resumed. Idempotent — pausing an already-paused target just re-confirms
     the state, no error. 404 (not 403) for a target that doesn't exist or isn't owned by the
-    caller, same pattern as every other target-scoped endpoint."""
+    caller, same pattern as every other target-scoped endpoint. API-key-eligible at scope
+    'full' (see auth/api_key.py)."""
     result = await db.execute(
         select(Target)
         .where(Target.id == target_id, Target.user_id == current_user.id)
@@ -770,15 +789,18 @@ async def detach_tag(
 
 
 @router.get("/{target_id}", response_model=TargetStatusResponse)
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
 async def get_target_detail(
+    request: Request,
     target_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = _read_or_key,
     db: AsyncSession = Depends(get_db),
 ):
     """Return one target with its latest check per region — the same shape as one row of
     GET /targets/status, built via the same query/payload helpers so the two can never drift
     apart. 404 (not 403) for a target that doesn't exist or isn't owned by the caller — same
-    "can't tell the difference" pattern as DELETE below."""
+    "can't tell the difference" pattern as DELETE below. API-key-eligible at scope 'read' (see
+    auth/api_key.py)."""
     result = await db.execute(_latest_checks_per_region_query(target_id=target_id))
     rows = result.all()
     if not rows or rows[0][0].user_id != current_user.id:
@@ -791,11 +813,15 @@ async def get_target_detail(
 
 
 @router.get("/{target_id}/checks", response_model=list[CheckHistoryEntry])
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
 async def get_target_checks(
+    request: Request,
+    response: Response,
     target_id: int,
     region: str,
     limit: int = 500,
-    current_user: User = Depends(get_current_user),
+    cursor: int | None = None,
+    current_user: User = _read_or_key,
     db: AsyncSession = Depends(get_db),
 ):
     """Return this target's check history for one region, oldest first — the raw material for
@@ -803,7 +829,22 @@ async def get_target_checks(
     than defaulting to "every region mixed together": every analytics view on the detail page
     is per-region by design (see the Phase 2 report's independent-display decision), so there
     is no meaningful combined history to return. 404 (not 403) if the target doesn't exist or
-    isn't owned by the caller."""
+    isn't owned by the caller. API-key-eligible at scope 'read' (see auth/api_key.py).
+
+    Cursor-based pagination (Phase 6, prompt 6.7) — `cursor` is the id of the last check seen
+    on a previous page; the next page is every check with a strictly greater id (id ordering
+    equals checked_at ordering here, since checks are inserted in real time order by an
+    autoincrement id, so switching to id-based ordering doesn't change the sequence a caller
+    without a cursor sees). **Honored only for API-key-authenticated requests** — the one real
+    identified consumer of paginated history (an external integration pulling a large
+    historical range); the dashboard fetches this once per region on page load and neither
+    needs nor should receive paginated behavior, so `cursor` is silently ignored and no more-
+    pages signal is ever sent for a cookie-authenticated caller, leaving its existing behavior
+    completely unchanged regardless of what query params it happens to send. When honored, a
+    further page is signaled via the `X-Next-Cursor` response header — never the response body,
+    which stays a bare list for every caller either way (the same header-based pagination-
+    signal convention GitHub's own API uses, rather than wrapping the body in an envelope that
+    would be a breaking change for the existing consumer)."""
     limit = max(1, min(limit, 2000))
     owns = await db.execute(
         select(Target.id).where(Target.id == target_id, Target.user_id == current_user.id)
@@ -811,13 +852,21 @@ async def get_target_checks(
     if owns.scalar_one_or_none() is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
 
-    result = await db.execute(
-        select(Check)
-        .where(Check.target_id == target_id, Check.region == region)
-        .order_by(Check.checked_at.asc())
-        .limit(limit)
-    )
-    checks = result.scalars().all()
+    is_key_authenticated = getattr(request.state, "api_key", None) is not None
+
+    query = select(Check).where(Check.target_id == target_id, Check.region == region)
+    if is_key_authenticated and cursor is not None:
+        query = query.where(Check.id > cursor)
+    fetch_limit = limit + 1 if is_key_authenticated else limit
+    query = query.order_by(Check.id.asc()).limit(fetch_limit)
+
+    result = await db.execute(query)
+    checks = list(result.scalars().all())
+
+    if is_key_authenticated and len(checks) > limit:
+        checks = checks[:limit]
+        response.headers["X-Next-Cursor"] = str(checks[-1].id)
+
     return [CheckHistoryEntry(**_check_to_response_dict(check), region=check.region) for check in checks]
 
 
@@ -884,20 +933,23 @@ async def get_target_analytics(
 
 
 @router.get("/{target_id}/export")
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
 async def export_target_checks(
+    request: Request,
     target_id: int,
     region: str,
     format: str = "csv",
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = _read_or_key,
     db: AsyncSession = Depends(get_db),
 ):
     """Export this target's check history for one region as a compliance CSV: a summary
     section (SLA %, incident list) followed by the raw check rows in the requested date range.
     `region` is required — same "never all regions merged" rule as GET /targets/{id}/checks;
     exporting means picking one region, run it again for another if needed. `from`/`to`
-    (optional, ISO 8601) bound the range; omitted means unbounded on that side. A single
+    (optional, ISO 8601) bound the range; omitted means unbounded on that side.
+    API-key-eligible at scope 'read' (see auth/api_key.py). A single
     synchronous response is fine at this project's real scale — see the export prompt's
     report for the actual row-count numbers behind that call. PDF is not built yet;
     `format` is validated so a caller gets a clear error instead of silently receiving CSV
@@ -945,12 +997,15 @@ async def export_target_checks(
 
 
 @router.delete("/{target_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
 async def delete_target(
+    request: Request,
     target_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = _full_or_key,
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a target only if it belongs to the authenticated user. Checks are removed (CASCADE)."""
+    """Delete a target only if it belongs to the authenticated user. Checks are removed
+    (CASCADE). API-key-eligible at scope 'full' (see auth/api_key.py)."""
     result = await db.execute(
         select(Target).where(Target.id == target_id, Target.user_id == current_user.id)
     )

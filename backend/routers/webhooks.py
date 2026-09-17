@@ -8,22 +8,30 @@ Webhook URLs are validated against the same SSRF blocklist used for target URLs
 (backend/security/ssrf.py) here, at creation — the same "fast feedback" principle as
 POST /targets — AND re-validated immediately before every send (see backend/webhooks.py's
 send_webhook), since a URL can resolve safely at creation and unsafely later (DNS rebinding).
+
+All three endpoints are API-key-eligible at scope 'full' (Phase 6, prompt 6.7) — "manage
+webhooks" is a full-scope-only capability, not covered by 'read' at all (see auth/api_key.py).
+POST also carries a dedicated 10/minute IP-keyed creation limit, mirroring POST /targets'
+existing pattern, on top of the per-key limit every key-eligible route gets.
 """
 
 import secrets
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth import get_current_user
+from auth import get_current_user_or_api_key
 from database import get_db
 from models import User, Webhook
+from rate_limit import API_KEY_RATE_LIMIT, api_key_or_remote_address, limiter
 from security.ssrf import is_url_blocked
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+_full_or_key = Depends(get_current_user_or_api_key("full"))
 
 
 def _validate_webhook_url(url: str) -> None:
@@ -82,8 +90,10 @@ def _webhook_to_response(webhook: Webhook) -> WebhookResponse:
 
 
 @router.get("", response_model=list[WebhookResponse])
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
 async def list_webhooks(
-    current_user: User = Depends(get_current_user),
+    request: Request,
+    current_user: User = _full_or_key,
     db: AsyncSession = Depends(get_db),
 ):
     """Return all webhooks owned by the authenticated user. Never includes `secret`."""
@@ -94,9 +104,12 @@ async def list_webhooks(
 
 
 @router.post("", response_model=WebhookCreatedResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
 async def create_webhook(
+    request: Request,
     body: WebhookCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = _full_or_key,
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new webhook. `secret` is always server-generated (never user-supplied) via
@@ -120,9 +133,11 @@ async def create_webhook(
 
 
 @router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(API_KEY_RATE_LIMIT, key_func=api_key_or_remote_address)
 async def delete_webhook(
+    request: Request,
     webhook_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = _full_or_key,
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a webhook only if it belongs to the authenticated user. 404 (not 403) if it
