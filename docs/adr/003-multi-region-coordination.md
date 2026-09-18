@@ -1,4 +1,4 @@
-# ADR 001: Multi-Region Check Coordination
+# ADR 003: Multi-Region Check Coordination
 
 ## Status
 

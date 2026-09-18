@@ -4679,5 +4679,78 @@ regression); every other check passed clean on the first or second try.
 **Phase 6 complete. Next: Phase 7 — presentation** (README rewrite, ADRs, `LOAD_TESTING.md`
 against the live deployed instance, and resume framing) per CLAUDE.md's phase plan.
 
+Phase 7, prompt 7.1 (familiarization + documentation/site plan) is complete. Read-only — no
+files written or modified. Full report delivered directly in the conversation (not saved to a
+file); reread the conversation history if picking this up cold.
+- Reviewed `mstfaatf/fraud-detection`'s README/ARCHITECTURE.md/CASE_STUDY.md/SETUP.md/
+  docs/API.md structure and tone as the model to match, and this repo's actual current state
+  (stale root README, no ARCHITECTURE/CASE_STUDY/SETUP, a genuinely strong existing
+  `docs/adr/001-multi-region-coordination.md`, no `docs/API.md`, no screenshots) via the real
+  git log rather than assumption.
+- Produced a full feature/engineering inventory pulled from the real commit history
+  (security/foundation, worker rewrite + networking depth, multi-region coordination,
+  alerting + compliance export, and every Phase 6 feature addition), deliberately excluding
+  the UI design-system work and testing/verification discipline as documented topics, per the
+  prompt's explicit instruction.
+- Proposed a real multi-page site (`/`, `/features`, `/architecture`, `/engineering`, trimmed
+  `/about`), a visual-direction plan for more green/red in body text and three new
+  infrastructure-themed SVG illustrations (cell tower/antenna for multi-region, data center for
+  architecture, a signal-wave motif for the networking-depth section), a real Known Limitations
+  list and an honest Issues-Encountered list (SSE/Neon pooled-connection break, the
+  proxy-forwarded-IP rate-limiting bug, the stale worker Docker image, the credential-leak-on-
+  redirect bug, the HEAD+keyword-match bug, the failed-alert-recorded-as-sent bug, the Vercel
+  Deployment Protection block, the Resend sender/link misconfiguration), a concrete per-doc plan
+  for README/ARCHITECTURE/CASE_STUDY/SETUP/docs/API.md/docs/adr/docs/LOAD_TEST.md, a screenshot
+  plan, and a proposed build order (7.2 core reference docs → 7.3 CASE_STUDY/SETUP → 7.4-7.6 new
+  site pages → 7.7 landing/about rewrite + visual pass → 7.8 README rewrite + screenshots → 7.9
+  load test → 7.10 wrap-up).
+- Pending review before implementation began.
+
+Phase 7, prompt 7.2 (core reference docs: ARCHITECTURE.md, docs/API.md, ADR sequence) is
+complete — the pure-documentation, no-site-changes batch from the 7.1 report. README.md,
+CASE_STUDY.md, SETUP.md, and every site page are untouched, per this prompt's explicit scope.
+- **`ARCHITECTURE.md`** (new, repo root): a system-overview mermaid diagram (both worker
+  regions -> shared Neon Postgres -> backend's pooled traffic + separate direct-connection
+  LISTEN session -> SSE -> Vercel frontend), a deployment-targets table, a full "a check
+  happens" request-flow mermaid diagram (claim -> SSRF/redirect validation per hop -> timing/
+  cert capture -> keyword match -> write -> NOTIFY in the same transaction -> LISTEN -> alert
+  evaluation -> SSE push), and a component-map table per service (`backend/`, `worker/`,
+  `frontend/`) built from the actual current file layout, not a stale plan.
+- **`docs/API.md`** (new): full endpoint reference grouped by resource (Auth, Targets, Tags,
+  Webhooks, API Keys — ~34 endpoints total, substantially more than fraud-detection's 8), each
+  entry in the same heading/purpose/request/response/notes format, with an intro section
+  explaining the cookie-vs-API-key auth model (including the deliberate "a key can never manage
+  other keys" rule) and the two independent kinds of rate limit (IP-keyed vs. per-key). Request/
+  response shapes were read directly from the current Pydantic models and router code, not
+  reconstructed from memory.
+- **ADR sequence**: added `docs/adr/001-jwt-cookie-sessions.md` (JWT-in-cookie vs. server-side
+  sessions — the no-revocation tradeoff, why rate limits on auth endpoints end up IP-keyed not
+  user-keyed, and why API keys exist as a structurally separate credential rather than a second
+  use of the session JWT) and `docs/adr/002-ssrf-validation-timing.md` (creation-time vs.
+  check-time SSRF validation — why both are needed together, the real redirect-bypass bug and
+  the real cross-host-credential-leak bug this design had to account for, and the deliberate
+  two-copies-kept-in-sync-by-hand tradeoff over a shared package). The existing multi-region
+  ADR was renamed (`git mv`, preserving history) from `001-multi-region-coordination.md` to
+  `003-multi-region-coordination.md` — content unchanged per the prompt's instruction, only its
+  own title line's number corrected to match its new filename. Fixed the two stale
+  cross-references this rename created (`ARCHITECTURE.md`'s own new link, and one pre-existing
+  reference in `worker/README.md`) so nothing points at the old filename.
+- Verified the new docs against the real current code before writing them, not against memory
+  or older status notes: read `backend/routers/targets.py`, `auth.py`, `webhooks.py`,
+  `api_keys.py`, `tags.py`, `auth/api_key.py`, `auth/cookies.py`, `auth/deps.py`, `main.py`,
+  `rate_limit.py`, `config.py`, `security/ssrf.py`, `realtime.py`, `worker/main.py`, and
+  `worker/checker.py` directly rather than relying on this file's own historical summaries,
+  which — being written prompt-by-prompt over many months — could plausibly have drifted from
+  the code by now. No drift was actually found, but the docs are grounded in the code itself
+  either way.
+- No phase/prompt numbers or internal-process references appear anywhere in `ARCHITECTURE.md`,
+  `docs/API.md`, or either new ADR — written throughout as a first-person account of the actual
+  system, per the prompt's explicit instruction. (This CLAUDE.md status log itself is exempt,
+  per its own standing role as the internal tracking document.)
+- Not touched in this prompt, per its explicit scope: `README.md`, `CASE_STUDY.md`, `SETUP.md`,
+  any site page. Committed locally only — not pushed, per explicit instruction.
+
+**Next: Phase 7, prompt 7.3 — `CASE_STUDY.md` and `SETUP.md`**, per the 7.1 build order.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
