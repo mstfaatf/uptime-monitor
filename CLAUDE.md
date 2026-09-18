@@ -5110,5 +5110,65 @@ summary, Live Demo, Feature Walkthrough with real screenshots, Tech Stack, Runni
 Known Limitations, and a Load Testing note pointing at `docs/LOAD_TEST.md`. This is the last
 piece of Phase 7's original scope.
 
+Phase 7, prompt 7.9 (full site self-critique and accuracy pass) is complete. Reordered ahead of
+the screenshot/README pass again, at the user's direction — that work is still the last thing
+outstanding. This prompt touched only the eight markdown docs; every site page was read closely
+but needed no code changes, since its own prior consistency pass had already left it clean.
+- **Full sitewide em-dash removal, the bulk of this prompt's work**: found and properly rewrote
+  166 em dashes across `ARCHITECTURE.md` (14), `CASE_STUDY.md` (28), `SETUP.md` (23),
+  `docs/API.md` (38), `docs/LOAD_TEST.md` (15), and all three ADRs (12 + 10 + 26). None of these
+  were swapped for a comma or colon as a cheap character substitute. Each sentence was actually
+  restructured, most often split into two sentences, sometimes reordered, occasionally a genuine
+  colon where the sentence was introducing a real list. Confirmed the five site pages already
+  had zero em dashes from the last three prompts' own passes, so no code changes were needed
+  there. One deliberate exception, explained rather than silently overridden: `docs/API.md`'s
+  rate-limit section originally quoted the backend's real literal error string verbatim,
+  em dash included, since it's actual production output, not my own prose. Rather than either
+  leave a real em dash in the doc or misquote the API's real behavior, rewrote that sentence to
+  paraphrase the response shape instead of quoting it character-for-character, which sidesteps
+  the conflict entirely without sacrificing accuracy.
+- **Fixed a real, pre-existing rule violation while in there**: `CASE_STUDY.md` still had one
+  stray "Phase 6's request-customization feature" reference (a leftover the previous prompt's
+  targeted fix hadn't caught, since that pass only grepped for `Phase [0-9]`, not the
+  parenthetical form actually present). A fresh repo-wide grep across every site-facing doc and
+  page found this was the only remaining instance anywhere; removed.
+- **Contrast-pair and other AI-tell patterns**: grepped every doc and page for "it's not X,
+  it's Y," "not just X but Y," "the real story," and similar constructions. None were found
+  anywhere in this content, so nothing needed flattening on that front; the writing this project
+  has produced across the whole documentation phase apparently never leaned on that specific
+  tell. Read all five site pages closely by eye (not just grep) for rule-of-three-inserted-lists,
+  hedge-then-pivot phrasing, and generic transitional throat-clearing; found none.
+- **Fact-checked every numeric and behavioral claim against the actual live/current state,
+  not assumed accurate from memory**: re-ran both test suites' collection (`pytest
+  --collect-only`) and got 303 backend + 59 worker, still exactly 362, matching every doc and
+  page that cites it. Recounted Alembic migrations (14) and `@router` route decorators (34,
+  matching the docs' own "~34") directly against the current source. Grepped the real constant
+  values behind every cited figure (`CHECK_CONCURRENCY=15`, `SCHEDULER_TICK_SECONDS=5`,
+  `CLAIM_TTL_SECONDS=120`, the backoff curve's `BASE_SECONDS=30`/`MULTIPLIER=2`/`MAX_SECONDS=900`/
+  `JITTER_FRACTION=0.2`, `MIN_CHECK_INTERVAL_SECONDS=30`, `DOWNTIME_ALERT_COOLDOWN_SECONDS=900`,
+  `CERT_EXPIRY_WARN_DAYS=14`, `CERT_EXPIRY_REMINDER_COOLDOWN_DAYS=3`,
+  `CHECKS_RETENTION_DAYS=90`) directly in `worker/main.py`, `worker/backoff.py`, and
+  `backend/config.py` and found zero drift anywhere. Confirmed all five live Vercel site pages
+  (`/`, `/about`, `/features`, `/architecture`, `/engineering`) and the live Railway API's
+  `/health` all return real `200`s. Grepped every ADR cross-reference across the whole repo
+  (docs, `docker-compose.yml`, `worker/README.md`) and confirmed every live reference correctly
+  points at `003-multi-region-coordination.md`; the only remaining `001-multi-region-
+  coordination.md` mentions are this file's own historical status entries, describing what was
+  true before the renumbering, not live broken links.
+- **Confirmed the docker stack was left healthy** (`db`/`api`/`worker`/`worker-eu-west` all
+  `Up`) before and after this prompt's verification work, which only ran ephemeral, throwaway
+  `docker compose run` containers for the test-collection counts and never touched the
+  long-running services.
+- Not touched in this prompt: any application code, any site page's own source file (read-only
+  verification confirmed they needed nothing), `README.md` itself (still waiting on the real
+  screenshot pass).
+
+**Next: Phase 7, prompt 7.10 — the real screenshot pass and the README rewrite.** Register a
+throwaway account, seed realistic data across both regions, capture the real screenshots every
+placeholder on `/features` and `/architecture` is waiting on, then write `README.md` for real:
+summary, Live Demo, Feature Walkthrough with real screenshots, Tech Stack, Running Locally,
+Known Limitations, and a Load Testing note pointing at `docs/LOAD_TEST.md`. This is the last
+piece of Phase 7's original scope.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

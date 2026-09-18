@@ -1,9 +1,9 @@
 # API Reference
 
 The full REST + Server-Sent Events surface, grouped by resource. Explore it live at the
-deployed backend's `/docs` (interactive Swagger UI) — this document exists for a version you
+deployed backend's `/docs` (interactive Swagger UI). This document exists for a version you
 can read without the server running, and to spell out reasoning the OpenAPI schema alone
-doesn't capture (why a field is nullable, what "region required" actually means, etc.).
+doesn't capture, like why a field is nullable or what "region required" actually means.
 
 ## Authentication
 
@@ -14,29 +14,29 @@ Two independent ways to authenticate, and most endpoints only accept one of them
   web dashboard uses. In production the cookie is `Secure` and `SameSite=None` (the frontend
   and backend are on different origins); locally it's `SameSite=Lax` over plain HTTP.
 - **API key** (`Authorization: Bearer <key>`), issued via `POST /api-keys`. Only the specific
-  endpoints marked **API-key-eligible** below accept one — everything else, including the
-  `/api-keys` endpoints themselves, is cookie-only by design: a key can never be used to mint
-  or revoke other keys. A key has a **scope** of `read` or `full`; `full` is a strict superset
-  of `read`. Presenting a header that doesn't resolve to a valid, unrevoked key is a `401`;
+  endpoints marked **API-key-eligible** below accept one. Everything else, including the
+  `/api-keys` endpoints themselves, is cookie-only by design, because a key can never be used
+  to mint or revoke other keys. A key has a **scope** of `read` or `full`; `full` is a strict
+  superset of `read`. Presenting a header that doesn't resolve to a valid, unrevoked key is a `401`;
   presenting a valid key whose scope is too low for the operation is a `403`. If no
   `Authorization` header is present at all, an API-key-eligible endpoint falls back to the
   session cookie exactly as if the feature didn't exist.
 
 Ownership is enforced identically regardless of which auth method resolved the caller: every
 query is filtered by the resolved user's id, and a resource that exists but belongs to someone
-else returns `404`, not `403` — a caller can't distinguish "doesn't exist" from "isn't yours."
+else returns `404`, not `403`. A caller can't distinguish "doesn't exist" from "isn't yours."
 
 ## Rate limiting
 
-Every write endpoint is rate-limited; every limit returns `429` with a
-`{"detail": "Too many requests — rate limit is <limit>. Please try again shortly."}` body once
-exceeded. Two independent kinds of limit can apply to the same route:
+Every write endpoint is rate-limited. Once a limit is exceeded, the response is `429` with a
+`detail` field stating the configured limit and asking the caller to try again shortly. Two
+independent kinds of limit can apply to the same route:
 
-- **IP-keyed limits** — the classic abuse targets (login, register, forgot-password) and every
+- **IP-keyed limits.** The classic abuse targets (login, register, forgot-password) and every
   resource-creation endpoint (targets, tags, webhooks, API keys) carry a stricter limit, usually
   `10/minute`, keyed by client IP regardless of auth method.
-- **Per-key limits** — every API-key-eligible endpoint also carries a `60/minute` limit keyed by
-  the API key itself (or by IP, for a cookie-authenticated request to the same route). This
+- **Per-key limits.** Every API-key-eligible endpoint also carries a `60/minute` limit keyed by
+  the API key itself, or by IP for a cookie-authenticated request to the same route. This
   gives programmatic traffic its own budget, independent of whatever else might share that
   key owner's IP, without loosening the stricter IP-keyed creation limits above.
 
@@ -76,7 +76,7 @@ Authenticate and start a session.
 
 **Response:** `200`, same `UserResponse` shape as register. Sets the `session` cookie.
 
-**Notes:** `5/minute`, IP-keyed. `401` on a wrong email or password — the two cases are
+**Notes:** `5/minute`, IP-keyed. `401` on a wrong email or password. The two cases are
 indistinguishable in the response, so a caller can't use this endpoint to enumerate accounts.
 
 ---
@@ -107,8 +107,8 @@ Change the authenticated user's password.
 
 **Response:** `200`, `{"ok": true}`
 
-**Notes:** `5/minute`. `401` if `current_password` is wrong — same response shape as
-`/auth/login`'s failure, so this endpoint can't be used to probe how close a guess is.
+**Notes:** `5/minute`. `401` if `current_password` is wrong. This uses the same response shape
+as `/auth/login`'s failure, so the endpoint can't be used to probe how close a guess is.
 
 ---
 
@@ -116,8 +116,8 @@ Change the authenticated user's password.
 
 Update the two global alert toggles.
 
-**Request:** `{"alert_on_downtime": true, "alert_on_cert_expiry": false}` — either field
-optional; an omitted field is left unchanged.
+**Request:** `{"alert_on_downtime": true, "alert_on_cert_expiry": false}`. Either field is
+optional, and an omitted field is left unchanged.
 
 **Response:** `200`, `UserResponse`.
 
@@ -133,7 +133,7 @@ Permanently delete the authenticated account and everything it owns.
 
 **Request:** none. **Response:** `204`.
 
-**Notes:** no rate limit. Cascades at the database level — every target, check, schedule row,
+**Notes:** no rate limit. Cascades at the database level. Every target, check, schedule row,
 tag, webhook, and API key belonging to this user is removed along with it. Clears the session
 cookie. Irreversible.
 
@@ -145,8 +145,8 @@ Request a password-reset email.
 
 **Request:** `{"email": "..."}`
 
-**Response:** `200`, `{"detail": "If that email is registered, a password reset link has been sent."}`
-— **always this exact message**, whether or not the account exists.
+**Response:** `200`, `{"detail": "If that email is registered, a password reset link has been sent."}`.
+This is **always the exact message returned**, whether or not the account exists.
 
 **Notes:** `3/minute`. The reset link is valid for 60 minutes and single-use. A failed email
 send is logged but never changes the response (anti-enumeration takes priority over surfacing
@@ -164,8 +164,8 @@ Consume a reset token and set a new password.
 
 **Notes:** `5/minute`. `400` if the token is unknown, already used, or expired. Redeeming one
 token invalidates every other outstanding reset token for the same account. Does **not**
-invalidate other already-logged-in sessions (sessions are stateless JWTs with no server-side
-revocation list) — a known, accepted limitation.
+invalidate other already-logged-in sessions, since sessions are stateless JWTs with no
+server-side revocation list. This is a known, accepted limitation.
 
 ## Targets
 
@@ -176,7 +176,7 @@ worker region.
 
 List the authenticated user's targets, each with its full configuration and tags.
 
-**Request (query):** `tag` (optional) — filter to targets carrying a tag with this exact name.
+**Request (query):** `tag` (optional). Filters to targets carrying a tag with this exact name.
 
 **Response:** `200`, array of:
 ```json
@@ -220,7 +220,7 @@ Create a new target.
 
 **Response:** `201`, same shape as one `GET /targets` entry, `tags: []`.
 
-**Notes:** `10/minute` IP-keyed (on top of the per-key limit — API-key-eligible at `full`).
+**Notes:** `10/minute` IP-keyed, on top of the per-key limit (API-key-eligible at `full`).
 `400` on an invalid/blocked URL, an unsupported method, `HEAD` combined with a `keyword_match`
 (HEAD has no body to match against), a lone username or password with no pair, or an interval
 below the floor. `409` if the normalized URL already exists for this user (uniqueness is
@@ -236,7 +236,7 @@ Update a target's name and/or request-customization fields.
 `basic_auth_password`, `keyword_match`, `keyword_match_mode`, `check_interval_seconds`. Only
 fields actually present in the request body are changed. `basic_auth_password` is the one
 exception to "omit to leave unchanged, send `null` to clear": a blank or omitted password
-always means "keep the existing one" — clear basic auth entirely by clearing
+always means "keep the existing one." Clear basic auth entirely by clearing
 `basic_auth_username` instead. Does not support editing `url` or `paused` (see `/pause`/`/resume`
 below).
 
@@ -264,9 +264,10 @@ Un-pause a target and force an immediate recheck.
 
 **Request:** none. **Response:** `200`, target with `paused: false`.
 
-**Notes:** cookie-only. Idempotent — safe to call on a target that isn't paused (still forces a
-prompt recheck). Directly resets `next_check_at` on every region's schedule row for this
-target, the one deliberate exception to that table being worker-owned everywhere else.
+**Notes:** cookie-only. This is idempotent and safe to call on a target that isn't paused, since
+it still forces a prompt recheck. Directly resets `next_check_at` on every region's schedule
+row for this target, the one deliberate exception to that table being worker-owned everywhere
+else.
 
 ---
 
@@ -278,8 +279,9 @@ Attach an existing tag to a target.
 
 **Response:** `200`, the target with its updated `tags` list.
 
-**Notes:** cookie-only. Ownership enforced on both sides — the target and the tag must both
-belong to the caller, or `404`. Idempotent — attaching an already-attached tag is a no-op.
+**Notes:** cookie-only. Ownership is enforced on both sides. The target and the tag must both
+belong to the caller, or the response is `404`. This is idempotent. Attaching an
+already-attached tag is a no-op.
 
 ---
 
@@ -289,14 +291,14 @@ Detach a tag from a target.
 
 **Request:** none. **Response:** `204`.
 
-**Notes:** cookie-only. Same both-sides ownership check as attach. Idempotent — detaching a tag
-that isn't currently attached is not an error.
+**Notes:** cookie-only. Same both-sides ownership check as attach. This is idempotent.
+Detaching a tag that isn't currently attached is not an error.
 
 ---
 
 ### `GET /targets/{id}`
 
-Fetch one target's configuration plus its latest check per region — the single-target
+Fetch one target's configuration plus its latest check per region. This is the single-target
 equivalent of `GET /targets/status` below.
 
 **Response:** `200`, `TargetStatusResponse` (see `/targets/status`).
@@ -310,16 +312,16 @@ caller.
 
 Raw check history for one region, oldest first.
 
-**Request (query):** `region` (required), `limit` (default 500, max 2000), `cursor` (optional,
-API-key callers only — see Notes).
+**Request (query):** `region` (required), `limit` (default 500, max 2000), `cursor` (optional;
+API-key callers only, see Notes).
 
 **Response:** `200`, array of check entries (same shape as one region's entry in
 `latest_checks`, plus `"region"`).
 
-**Notes:** API-key-eligible at `read`. `region` is required — there is no "every region merged"
+**Notes:** API-key-eligible at `read`. `region` is required. There is no "every region merged"
 option, matching every other per-region endpoint in this app. Cursor-based pagination
 (`cursor` = the last-seen check id; a further page is signaled via an `X-Next-Cursor` response
-header) is honored **only for API-key-authenticated requests** — a cookie-authenticated
+header) is honored **only for API-key-authenticated requests**. A cookie-authenticated
 request's behavior is completely unaffected by these params, since the dashboard fetches this
 once per region on page load and has no use for paging.
 
@@ -329,7 +331,7 @@ once per region on page load and has no use for paging.
 
 Windowed uptime %, latency percentiles, and MTTR, per region.
 
-**Request (query):** `window` — one of `24h`, `7d`, `30d`, `90d` (default `7d`).
+**Request (query):** `window`, one of `24h`, `7d`, `30d`, `90d` (default `7d`).
 
 **Response:** `200`
 ```json
@@ -351,7 +353,7 @@ Windowed uptime %, latency percentiles, and MTTR, per region.
 ```
 
 **Notes:** `400` if `window` isn't one of the four allowed values, `404` on an unowned/missing
-target. Unlike `/checks` and `/export`, **every region comes back at once** here — the point of
+target. Unlike `/checks` and `/export`, **every region comes back at once** here. The point of
 this endpoint is comparing regions side by side, so requiring one call per region would work
 against its own purpose. A region absent entirely from `regions` had zero checks in the window,
 which is different from an in-progress incident that's still counted (see the Engineering page
@@ -368,16 +370,16 @@ Download a compliance CSV: a summary section (SLA %, incident list), then the ra
 
 **Response:** `200`, `text/csv`, `Content-Disposition: attachment`.
 
-**Notes:** API-key-eligible at `read`. `400` if `format` isn't `"csv"` (an honest error rather
-than silently returning CSV under a different label — PDF export is planned, not built). If the
-requested range predates what the retention sweep could still have on disk, the summary
+**Notes:** API-key-eligible at `read`. `400` if `format` isn't `"csv"`, an honest error rather
+than silently returning CSV under a different label, since PDF export is planned but not built.
+If the requested range predates what the retention sweep could still have on disk, the summary
 includes a `Note` row saying so.
 
 ---
 
 ### `GET /targets/status`
 
-List every owned target with its latest check per region — the dashboard's main read.
+List every owned target with its latest check per region. This is the dashboard's main read.
 
 **Response:** `200`, array of:
 ```json
@@ -404,9 +406,9 @@ List every owned target with its latest check per region — the dashboard's mai
 ```
 
 **Notes:** `latest_checks` is keyed by region; a target with no checks yet in any region
-returns `{}`, not `null`. There is deliberately no derived "overall status" field anywhere —
-see `docs/adr/003-multi-region-coordination.md`. `consecutive_failures` is `null` when no
-schedule row exists yet for that region.
+returns `{}`, not `null`. There is deliberately no derived "overall status" field anywhere.
+See `docs/adr/003-multi-region-coordination.md` for why. `consecutive_failures` is `null` when
+no schedule row exists yet for that region.
 
 ---
 
@@ -414,15 +416,15 @@ schedule row exists yet for that region.
 
 Server-Sent Events stream of live check updates for the authenticated user's own targets.
 
-**Request:** none (cookie only — not API-key-eligible, since a long-lived streaming connection
-doesn't fit the per-request auth model cleanly).
+**Request:** none, cookie only. Not API-key-eligible, since a long-lived streaming connection
+doesn't fit the per-request auth model cleanly.
 
 **Response:** `text/event-stream`. A `: connected` comment on open, then either
 `data: {"type": "check_update", "region": "us-east", "target": {...}}` (same shape as one
 `GET /targets/status` entry) whenever a check for one of this user's targets lands, or a
 `: keep-alive` comment roughly every 15 seconds when there's nothing new.
 
-**Notes:** never delivers another user's data — the notification is resolved to its owning user
+**Notes:** never delivers another user's data. The notification is resolved to its owning user
 before anything is published, so a user's queue structurally cannot receive a target it doesn't
 own.
 
@@ -440,7 +442,7 @@ rows are removed via cascade.
 ## Tags
 
 Free-form per-user labels, attached to targets many-to-many. A name is unique per user, not
-globally — two users can each have their own tag named "production."
+globally. Two users can each have their own tag named "production."
 
 ### `GET /tags`
 
@@ -474,7 +476,7 @@ on an unowned/missing tag. Detached from every target it was attached to, via ca
 
 ## Webhooks
 
-Outbound HTTP notifications on downtime, recovery, and cert-expiry events — see the
+Outbound HTTP notifications on downtime, recovery, and cert-expiry events. See the
 Engineering page for the delivery/signing design.
 
 ### `GET /webhooks`
@@ -502,10 +504,10 @@ Create a webhook.
   "secret": "a1b2c3..."
 }
 ```
-`secret` is shown **only in this response** — record it now; it's never returned again.
+`secret` is shown **only in this response**. Record it now, since it's never returned again.
 
 **Notes:** `10/minute` IP-keyed on top of the per-key limit. `400` on a malformed URL or one
-that resolves to a blocked (SSRF) range — the same check `POST /targets` runs, re-applied
+that resolves to a blocked (SSRF) range. This is the same check `POST /targets` runs, applied
 again immediately before every actual delivery attempt.
 
 ---
@@ -519,8 +521,8 @@ Update a webhook's URL and/or its toggles.
 **Response:** `200`, updated webhook (no `secret`).
 
 **Notes:** API-key-eligible at `full`. A changed URL is re-validated exactly like creation.
-The signing secret itself is never rotated by this endpoint — delete and recreate for a new
-one.
+The signing secret itself is never rotated by this endpoint. Delete and recreate the webhook
+for a new one.
 
 ---
 
@@ -531,7 +533,7 @@ unowned/missing webhook.
 
 ## API Keys
 
-Cookie-authenticated only — a key can never be used to manage other keys.
+Cookie-authenticated only. A key can never be used to manage other keys.
 
 ### `GET /api-keys`
 
@@ -544,8 +546,8 @@ the hash or raw key. **Notes:** no rate limit.
 
 Create a key.
 
-**Request:** `{"name": "prometheus-exporter", "scope": "read"}` — `scope` is `"read"` or
-`"full"`, default `"read"`.
+**Request:** `{"name": "prometheus-exporter", "scope": "read"}`. `scope` is `"read"` or
+`"full"`, defaulting to `"read"`.
 
 **Response:** `201`
 ```json
@@ -569,5 +571,6 @@ recovered later even by this app.
 
 ### `DELETE /api-keys/{id}`
 
-Revoke a key (soft-delete — the row is kept, `revoked_at` is stamped). **Response:** `204`.
-**Notes:** per-key-magnitude limit, IP-keyed. Idempotent. `404` on an unowned/missing key.
+Revoke a key. The row is kept as a soft delete, with `revoked_at` stamped on it.
+**Response:** `204`. **Notes:** per-key-magnitude limit, IP-keyed. Idempotent. `404` on an
+unowned/missing key.
