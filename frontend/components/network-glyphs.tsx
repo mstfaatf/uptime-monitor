@@ -85,6 +85,19 @@ export function AntennaGlyph({ size, className }: GlyphProps) {
   );
 }
 
+/** A single tapered lattice tower, housed like the other small glyphs — used for multi-region-flavored decisions where the paired-mast AntennaGlyph is already spoken for elsewhere on the same page. */
+export function TowerGlyph({ size, className }: GlyphProps) {
+  return (
+    <Housing size={size} className={className}>
+      <line x1={10} y1={24} x2={16} y2={10} stroke="var(--text-secondary)" strokeWidth={1.3} />
+      <line x1={22} y1={24} x2={16} y2={10} stroke="var(--text-secondary)" strokeWidth={1.3} />
+      <line x1={12.7} y1={18} x2={19.3} y2={18} stroke="var(--border)" strokeWidth={1.1} />
+      <line x1={16} y1={10} x2={16} y2={5} stroke="var(--text-secondary)" strokeWidth={1.3} />
+      <circle cx={16} cy={4} r={1.4} fill="var(--signal-up)" />
+    </Housing>
+  );
+}
+
 /** A router body with radiating wifi arcs — used for alerting + compliance export (signals going out). */
 export function RouterGlyph({ size, className }: GlyphProps) {
   return (

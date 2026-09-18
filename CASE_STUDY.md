@@ -31,10 +31,9 @@ including every hop of a redirect chain.
 That second part surfaced a bug I hadn't anticipated. Re-validating each redirect hop meant
 disabling the HTTP client's own automatic redirect-following and walking the chain by hand —
 which also silently disabled the client's default behavior of stripping `Authorization` on a
-cross-origin redirect. Once targets could carry custom headers and basic-auth credentials
-(Phase 6's request-customization feature), that meant a target's password or a secret-bearing
-header would have been forwarded to whatever host a `3xx` response happened to name, not just
-the host the user configured it for. I found this by reading through what manual
+cross-origin redirect. Once targets could carry custom headers and basic-auth credentials, that
+meant a target's password or a secret-bearing header would have been forwarded to whatever host
+a `3xx` response happened to name, not just the host the user configured it for. I found this by reading through what manual
 redirect-following actually gives up versus what the client normally does for you, not by
 someone reporting it — fixed by dropping a target's configured headers and auth the moment a
 redirect crosses to a different host, and never restoring them even if a later hop redirects

@@ -4934,5 +4934,65 @@ landing page, `/engineering`, and `/about` are untouched, per this prompt's expl
 signal-wave/antenna motif placement already used on `/features` — reuse rather than reinvent
 where it fits, per this page's own reasoning-focused content (CASE_STUDY.md's ground, browsable).
 
+Phase 7, prompt 7.6 (`/engineering` page) is complete. `/features`, `/architecture`, the
+landing page, and `/about` are untouched, per this prompt's explicit scope.
+- **Found and fixed a real, pre-existing violation of the standing "no internal-process
+  references" rule before building anything new**: `CASE_STUDY.md` (written two prompts ago)
+  had one stray "Phase 6's request-customization feature" parenthetical. A repo-wide grep
+  across every site-facing doc and page confirmed it was the only instance anywhere. Fixed in
+  place rather than carried forward, since the new page mirrors that same paragraph's content
+  and copying the reference into fresh content would have repeated the exact violation this
+  prompt was told to avoid.
+- **New `app/engineering/page.tsx`**: the browsable version of `CASE_STUDY.md` — all seven key
+  decisions (SSRF at two checkpoints, the async worker's backoff curve, row-claiming versus the
+  two heavier alternatives it was weighed against, per-region-never-collapsed display and why
+  that's an audience-dependent call, alert-cooldown design, webhook SSRF/signing, and
+  structurally-can't-self-manage API key scoping), all eight issues from the 7.1 report's honest
+  bug list (real-time push going silent on a pooled connection, rate limiting silently doing
+  nothing behind a proxy, one region running stale code for months, the credential-leak-on-
+  redirect bug, the HEAD-plus-keyword-match bug, the failed-alert-recorded-as-sent bug, the
+  Vercel Deployment Protection block, the broken password-reset link/sender), and a Known
+  Limitations list — every one written fresh in the product's own voice rather than copied
+  verbatim from this file's own status notes, but deliberately keeping the same specific,
+  plain-spoken, not-softened tone the report asked for, not summarized into vaguer language.
+- **Pull-quote stat callouts**: five bordered mono-number tiles — the backoff range (30s to
+  900s), the 120s claim-staleness TTL, the ~3.85s real measured minimum gap under forced
+  contention, the 362-test suite count, all in `--signal-up`, plus one in `--signal-down`
+  showing "8" (a real, exact count of the issues list below it, not an invented figure) —
+  fulfilling the green/red instruction with both colors actually meaning something rather than
+  green applied uniformly. Issue headings in the list below are colored `--signal-down`
+  directly, extending the same "a caught problem renders red" vocabulary from the diagrams on
+  `/architecture` into prose headings here.
+- **One real visual inconsistency caught in self-critique, not code review**: the multi-region
+  decision originally reused the big standalone `CellTowerIllustration` (built for
+  `/architecture`) at a shrunk size next to its heading, but that illustration has no bordered
+  housing, so it rendered as a stray unboxed icon next to six other decisions that all use the
+  small housed-glyph style. Fixed by adding a proper small, housed `TowerGlyph` to
+  `network-glyphs.tsx` (a single tapered lattice tower, visually distinct from the existing
+  paired-mast `AntennaGlyph` so the two don't read as duplicates) rather than stretching the
+  big illustration to a context it wasn't built for. Screenshotted the fix directly to confirm
+  it now matches the row of housed icons around it.
+- **No screenshot placeholders on this page, a deliberate choice, not an oversight**: unlike
+  `/features`/`/architecture`, this page is discursive prose, not a tour of the running product
+  — the reference project's own case study has none either. Flagging the decision explicitly
+  rather than leaving it silently ambiguous whether one was simply missed.
+- **Liberal but purposeful glyph use**: seven small housed glyphs across the seven decisions
+  (`RouterGlyph` and `DataCenterGlyph` each reused once, non-adjacently; the new `TowerGlyph`
+  used once), each sitting next to the specific concept it represents.
+- **Verified via Playwright against the real running dev server**: full-page screenshots at
+  1280px and 400px, plus close-ups of the stat-callout row and the tower-glyph fix, before and
+  after. Confirmed zero em dashes and zero middle-dot separators via direct grep (this page's
+  own first draft had neither, unlike the previous two prompts — the earlier fixes evidently
+  changed how this content got drafted) and zero remaining `Phase`/`prompt` references anywhere
+  in the new page or component. `tsc --noEmit` clean throughout. Screenshots were this session's
+  own dev reference only, deleted afterward, never committed.
+- Not touched in this prompt, per its explicit scope: `/features`, `/architecture`, the landing
+  page, `/about`, any real screenshot content. `CASE_STUDY.md`'s own fix above was the one
+  necessary exception, not new content.
+
+**Next: Phase 7, prompt 7.7 — rewrite the landing page and trim `/about`**, per the 7.1 build
+order, applying the green/red body-text pass consistently across every page built so far before
+moving on to the README rewrite and the real screenshot pass.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
