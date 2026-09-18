@@ -9,10 +9,6 @@ import { useAuthStatus } from "@/lib/use-auth-status";
 // Shared header for the public/auth pages (/, /features, /architecture, /engineering, /about,
 // /login, /register). The dashboard has its own separate header/actions bar — untouched here.
 //
-// /architecture and /engineering don't exist as routes yet — linked ahead of themselves so the
-// nav's final shape is in place before every page behind it is built; each link resolves once
-// its own page lands.
-//
 // Auth-aware: the brand link previously always pointed at "/", so an authenticated user
 // clicking it while on e.g. /about landed back on the signed-out landing page — not because
 // the session was cleared, but because this header (and the landing page itself) never

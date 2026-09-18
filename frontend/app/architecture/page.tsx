@@ -3,14 +3,7 @@ import { ScreenshotPlaceholder } from "@/components/screenshot-placeholder";
 import { SignalLight } from "@/components/signal-light";
 import { RegionBadge } from "@/components/region-badge";
 import { CellTowerIllustration, DataCenterIllustration } from "@/components/network-glyphs";
-
-function SectionHeading({ children }: { children: React.ReactNode }) {
-  return (
-    <h2 className="text-xl font-semibold" style={{ color: "var(--signal-up)" }}>
-      {children}
-    </h2>
-  );
-}
+import { SectionHeading } from "@/components/section-heading";
 
 function DiagramBox({
   title,

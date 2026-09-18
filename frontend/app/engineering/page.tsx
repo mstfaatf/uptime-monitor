@@ -6,14 +6,7 @@ import {
   SignalBarsGlyph,
   TowerGlyph,
 } from "@/components/network-glyphs";
-
-function SectionHeading({ children }: { children: React.ReactNode }) {
-  return (
-    <h2 className="text-xl font-semibold" style={{ color: "var(--signal-up)" }}>
-      {children}
-    </h2>
-  );
-}
+import { SectionHeading } from "@/components/section-heading";
 
 interface Decision {
   glyph: React.ReactNode;

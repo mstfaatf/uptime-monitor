@@ -4994,5 +4994,63 @@ landing page, and `/about` are untouched, per this prompt's explicit scope.
 order, applying the green/red body-text pass consistently across every page built so far before
 moving on to the README rewrite and the real screenshot pass.
 
+Phase 7, prompt 7.7 (landing page rewrite, `/about` trim, sitewide consistency pass) is
+complete. This closes out every page-content prompt in the site build — the only work left
+before the README rewrite is the real screenshot pass.
+- **Landing page** (`app/page.tsx`): kept all four existing content sections ("How a check
+  works," "What gets measured," "Multiple regions, independently," "Private by default") and
+  tightened their copy rather than cutting them, per the instruction to trim orientation-only,
+  not gut the page. The old closing "Built with" section (stack-listing prose now superseded by
+  the real Architecture page) was replaced with a "Go deeper" section: three plain links into
+  Features/Architecture/Engineering, each with a one-line teaser, no trailing arrows. Added one
+  line directly under the hero's CTA buttons, visible only to a signed-out visitor: "No shared
+  demo login. Registering your own account is free and immediate" — stated plainly, exactly
+  where someone deciding whether to register would actually read it, not buried lower on the
+  page.
+- **`/about`** (`app/about/page.tsx`): cut the old "Stack" section entirely (Architecture page's
+  job now) and replaced the old paragraph's technical detail list with a shorter framing plus a
+  "Read more" list pointing into Features/Architecture/Engineering — "just who built this and
+  why," per the prompt, with everything else delegated rather than repeated.
+- **Sitewide green/red consistency**: every page's top-level H2s now use the identical
+  `--signal-up` treatment. Extracted the three duplicated, byte-identical local `SectionHeading`
+  helper functions (landing, `/architecture`, `/engineering` had each independently defined the
+  same five lines) into one shared `components/section-heading.tsx`, imported by all three —
+  `/features` keeps its own inline version, since that component already owns its heading markup
+  for a different reason (it's built into `FeatureGroup`'s own row alongside a glyph). This was
+  a real duplication a dedicated consistency prompt should catch, not left as three copies that
+  could quietly drift apart from each other later.
+- **Sitewide networking-glyph pass**: landing page gained three placements it previously had
+  none of (`SignalPulseIllustration` next to "How a check works," `TowerGlyph` next to
+  "Multiple regions, independently," `DataCenterGlyph` next to "Private by default") and
+  `/about` gained one (`AntennaGlyph` next to its own heading) — both pages had zero glyph usage
+  before this prompt despite the last three prompts building up a whole small-glyph vocabulary
+  everywhere else. Counted across all five pages together: 21 total glyph/illustration
+  placements, genuinely liberal sitewide, not just concentrated on the three newest pages.
+- **Two real issues caught in self-critique, not code review**: `/about`'s new "Read more" list
+  first used the exact "LinkText — description" em-dash label pattern the project's avoid-list
+  explicitly flags as template chrome — caught immediately via the same direct-grep habit the
+  last three prompts established, rewritten with a comma instead. Separately, `site-header.tsx`
+  carried a stale comment claiming `/architecture` and `/engineering` "don't exist as routes
+  yet," left over from when the nav was built two prompts before either page actually existed —
+  removed now that both are real, shipped pages.
+- **Verified via Playwright against the real running dev server**: full-page screenshots of all
+  five pages (landing, about, features, architecture, engineering) at 1280px and 400px, taken
+  once before and once again after the `SectionHeading` extraction to confirm the refactor was
+  visually a no-op. Re-confirmed zero em dashes and zero middle-dot separators across every page
+  and every touched component (site-header, section-heading, screenshot-placeholder,
+  hero-panel), with the only matches being code comments, not rendered copy. `tsc --noEmit`
+  clean throughout. Screenshots were this session's own dev reference only, deleted afterward,
+  never committed.
+- Not touched in this prompt, per its explicit scope: `/features`, `/architecture`,
+  `/engineering` content itself (only imported the shared heading component; no visual or copy
+  change to any of the three), any real screenshot content.
+
+**Next: Phase 7, prompt 7.8 — the real screenshot pass and the README rewrite.** Register a
+throwaway account, seed realistic data across both regions, capture the real screenshots every
+placeholder on `/features` and `/architecture` is waiting on, then write `README.md` for real:
+summary, Live Demo (with an honest cold-start note if warranted), Feature Walkthrough with the
+real screenshots, Tech Stack, Running Locally, Known Limitations — this is the very last piece
+of Phase 7's original scope.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.

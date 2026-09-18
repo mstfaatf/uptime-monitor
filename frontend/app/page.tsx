@@ -9,6 +9,12 @@ import { SignalLight } from "@/components/signal-light";
 import { Button } from "@/components/ui/button";
 import { apiJson } from "@/lib/api";
 import { useAuthStatus } from "@/lib/use-auth-status";
+import {
+  SignalPulseIllustration,
+  TowerGlyph,
+  DataCenterGlyph,
+} from "@/components/network-glyphs";
+import { SectionHeading } from "@/components/section-heading";
 
 const CHECK_PHASES = ["DNS", "TCP", "TLS", "TTFB"];
 
@@ -80,20 +86,26 @@ export default function LandingPage() {
                 </>
               )}
             </div>
+            {!loading && !authenticated && (
+              <p className="mt-3 text-xs" style={{ color: "var(--text-secondary)" }}>
+                No shared demo login. Registering your own account is free and immediate.
+              </p>
+            )}
           </div>
           <HeroPanel />
         </div>
 
         <div className="mt-24 border-t pt-12" style={{ borderColor: "var(--border)" }}>
           <section>
-            <h2 className="text-xl font-semibold">How a check works</h2>
+            <div className="flex items-center gap-3">
+              <SignalPulseIllustration size={40} />
+              <SectionHeading>How a check works</SectionHeading>
+            </div>
             <p className="mt-3 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-              On its schedule, the worker resolves the target's DNS, opens a TCP connection,
-              negotiates TLS if the URL is HTTPS, and times how long the first byte takes to
-              come back. Each of those four phases gets its own number instead of being folded
-              into a single response time. A single failed check doesn't mark a target down
-              right away: retries back off with some random jitter mixed in, so one bad request
-              doesn't trigger a false alarm.
+              The worker resolves the target's DNS, opens a TCP connection, negotiates TLS if
+              the URL is HTTPS, and times how long the first byte takes to come back, each phase
+              on its own. A single failed check doesn't mark a target down right away: retries
+              back off with some jitter mixed in, so one bad request isn't a false alarm.
             </p>
             <div
               className="mt-5 flex items-center gap-3 font-mono text-sm"
@@ -109,7 +121,7 @@ export default function LandingPage() {
           </section>
 
           <section className="mt-16">
-            <h2 className="text-xl font-semibold">What gets measured</h2>
+            <SectionHeading>What gets measured</SectionHeading>
             <div className="mt-4 grid gap-10 md:grid-cols-2">
               <div>
                 <h3 className="font-medium">Per check</h3>
@@ -135,7 +147,10 @@ export default function LandingPage() {
           </section>
 
           <section className="mt-16">
-            <h2 className="text-xl font-semibold">Multiple regions, independently</h2>
+            <div className="flex items-center gap-3">
+              <TowerGlyph />
+              <SectionHeading>Multiple regions, independently</SectionHeading>
+            </div>
             <div className="mt-4 flex flex-col gap-8 md:flex-row md:items-start md:justify-between">
               <p className="max-w-md" style={{ color: "var(--text-secondary)" }}>
                 Checks run from more than one region, each on its own schedule. If one region is
@@ -156,21 +171,39 @@ export default function LandingPage() {
           </section>
 
           <section className="mt-16">
-            <h2 className="text-xl font-semibold">Private by default</h2>
+            <div className="flex items-center gap-3">
+              <DataCenterGlyph />
+              <SectionHeading>Private by default</SectionHeading>
+            </div>
             <p className="mt-3 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
               Your targets and their history are yours. There's no page anywhere listing what
-              anyone else is watching.
+              anyone else is watching, and no shared account: registering is how you get in.
             </p>
           </section>
         </div>
 
         <div className="mt-20 border-t pt-12" style={{ borderColor: "var(--border)" }}>
-          <h2 className="text-xl font-semibold">Built with</h2>
-          <p className="mt-3 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-            The frontend is Next.js and TypeScript. The API is FastAPI with async SQLAlchemy and
-            Alembic migrations. The worker that actually performs the checks is a Python asyncio
-            service built on httpx. All of it reads and writes the same PostgreSQL database.
-          </p>
+          <SectionHeading>Go deeper</SectionHeading>
+          <div className="mt-6 grid gap-6 sm:grid-cols-3">
+            <Link href="/features" className="group">
+              <h3 className="font-medium group-hover:underline">Features</h3>
+              <p className="mt-1.5 text-sm" style={{ color: "var(--text-secondary)" }}>
+                Everything that's actually built, grouped by area.
+              </p>
+            </Link>
+            <Link href="/architecture" className="group">
+              <h3 className="font-medium group-hover:underline">Architecture</h3>
+              <p className="mt-1.5 text-sm" style={{ color: "var(--text-secondary)" }}>
+                How the pieces fit together, and what happens on a single check.
+              </p>
+            </Link>
+            <Link href="/engineering" className="group">
+              <h3 className="font-medium group-hover:underline">Engineering</h3>
+              <p className="mt-1.5 text-sm" style={{ color: "var(--text-secondary)" }}>
+                The decisions behind it, and the real bugs found along the way.
+              </p>
+            </Link>
+          </div>
         </div>
       </main>
       <footer className="mx-auto max-w-5xl px-6 py-10 font-mono text-sm" style={{ color: "var(--text-secondary)" }}>
