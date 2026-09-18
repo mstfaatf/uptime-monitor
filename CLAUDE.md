@@ -5052,5 +5052,63 @@ summary, Live Demo (with an honest cold-start note if warranted), Feature Walkth
 real screenshots, Tech Stack, Running Locally, Known Limitations — this is the very last piece
 of Phase 7's original scope.
 
+Phase 7, prompt 7.8 (real load test against the live deployed backend + `docs/LOAD_TEST.md`) is
+complete. Reordered ahead of the screenshot/README pass at the user's direction — that work is
+still outstanding, now next. No site page or other doc touched, per this prompt's explicit
+scope; only `docs/LOAD_TEST.md` is new.
+- **Tooling**: k6 (`grafana/k6`, run via Docker rather than installing a host binary) for the
+  two HTTP-based tests, against the real deployed Railway API
+  (`uptime-monitor-production-cff9.up.railway.app`), never local Docker Compose. **Real, honest
+  tool-selection finding**: k6's SSE support (tried both `k6/experimental/sse` and `k6/x/sse`)
+  isn't provisionable in the available `k6 v2.2.0` image — its extension-resolution step
+  reports each as an unrecognized dependency outright, not a network failure. Rather than sink
+  time into standing up a custom k6 build for one test, the SSE concurrency test was written as
+  a small Node script directly against the `https` module, parsing the event-stream body by
+  hand — documented as a deliberate, reasoned tool substitution in `docs/LOAD_TEST.md` itself,
+  not silently swapped without explanation.
+- **Read path** (`GET /targets/status`, ramping 0→30 VUs over 50s): 1,242 requests, **0%
+  failed**, 27.6 req/s, p95 latency 810ms, avg 357ms. Clean under this load, no sign of strain.
+- **Write path** (`POST /targets`, 5 constant VUs for 40s, deliberately exceeding the
+  documented 10/minute limit): **exactly 10 created, 141 rate-limited** — confirms the limit
+  enforces precisely what it's documented to, not approximately. Successful-request latency
+  (633ms avg) is meaningfully higher than rejected-request latency (which never reaches the
+  SSRF/DB-write path), explaining why the all-requests average sits lower than either.
+- **Real breaking point found and precisely characterized, not softened**: SSE
+  (`GET /targets/stream`) concurrency stepped at 5/10/15/16/17/20/25 simultaneous connections
+  from one client, six separate runs. **Exactly 15 concurrent connections succeed; every
+  connection past the 15th fails immediately with a genuine HTTP 500**, scaling linearly (1
+  over → 1 failure, 10 over → 10 failures) — the signature of a hard concurrency ceiling, not
+  graceful degradation. Not root-caused to completion (most likely a connection/worker-count
+  default somewhere between Railway's edge and the ASGI server, not `realtime.py`'s own pub/sub
+  logic, which has no such cap written into it) — flagged honestly as a genuine, previously-
+  unmeasured limit rather than investigated past this prompt's scope. A real check was also
+  forced mid-test to try to catch a genuine push event landing during the window; none was
+  captured in any run — stated as an honest gap in this specific test's observation (the push
+  mechanism itself has been directly verified working under real concurrent load in earlier,
+  separate verification), not claimed as proven here when it wasn't.
+- **A second real, minor finding along the way**: the very first login attempt immediately
+  after the final cleanup's `DELETE /auth/me` returned a stale `200` with the already-deleted
+  user's data; a retry two seconds later correctly returned `401`. Read as the same category of
+  Neon pooled-connection read-after-write lag this project has already documented elsewhere,
+  not a real account-deletion bug — noted plainly in `docs/LOAD_TEST.md` rather than silently
+  dropped, but not chased further since it's unrelated to what this test was measuring.
+- **Cleanup verified, not assumed**: every target created during all three tests (1 seed + 10
+  from the write-path test) and the throwaway account itself were removed via a single
+  `DELETE /auth/me` (cascades to targets and checks); confirmed via the login retry above
+  correctly failing. Confirmed the production backend's `/health` still returns `200` after all
+  testing. All local k6/Node scripts and the session cookie lived only in this session's
+  scratchpad directory, never the repo, and were deleted after the run.
+- One stray internal-process reference ("Phase 0's original abuse protection") caught in the
+  doc's own first draft via the same direct-grep habit established over the last several
+  prompts, and rewritten before finishing.
+
+**Next: Phase 7, prompt 7.9 — the real screenshot pass and the README rewrite**, the content
+originally planned for 7.8 before the load test was moved ahead of it. Register a throwaway
+account, seed realistic data across both regions, capture the real screenshots every
+placeholder on `/features` and `/architecture` is waiting on, then write `README.md` for real —
+summary, Live Demo, Feature Walkthrough with real screenshots, Tech Stack, Running Locally,
+Known Limitations, and a Load Testing note pointing at `docs/LOAD_TEST.md`. This is the last
+piece of Phase 7's original scope.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
