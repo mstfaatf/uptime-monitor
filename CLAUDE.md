@@ -4809,5 +4809,75 @@ last, once every page exists and real screenshots are ready.
 next; `README.md` itself waits until every page exists and real screenshots are ready, per
 prompt 7.3's own instruction).
 
+Phase 7, prompt 7.4 (`/features` page + full site nav) is complete. Landing page, `/architecture`,
+`/engineering`, and `/about` content are untouched, per this prompt's explicit scope — only the
+shared `SiteHeader` component (used by all of them) changed, and only because it needed to.
+- **New `app/features/page.tsx`**: walks the full feature inventory grouped exactly as planned —
+  security & foundation, worker & network observability, multi-region coordination, alerting &
+  compliance export, and a fifth group covering the request-customization/pause-resume/tags/
+  analytics/webhooks/API-key feature set. Each item is a short title + one-to-two-sentence
+  "what it does and why it matters," written fresh in the product's own voice (not copied from
+  this file's own internal status notes), with a clearly-marked, honestly-labeled screenshot
+  placeholder (dashed border, `SignalLight state="pending"`, "Screenshot pending: ...") at the
+  end of each group — real screenshots are explicitly a later prompt's job, not faked here.
+- **New `components/network-glyphs.tsx`**: five small SVG glyphs (`DataCenterGlyph`,
+  `AntennaGlyph`, `RouterGlyph`, `SignalBarsGlyph`, plus the larger standalone
+  `SignalPulseIllustration`), built as an extension of the existing SignalLight/LatencyGauge
+  instrument-panel vocabulary — a bordered `--bg-surface-raised` housing, muted
+  `--text-secondary` linework, one `--signal-up` accent per glyph — rather than a new,
+  unrelated icon language. One glyph sits next to each group heading (skipped for the worker/
+  networking group, which gets the bigger illustration instead, so that section doesn't carry
+  two competing visual anchors); `SignalPulseIllustration` (a mast, a lit beacon, three
+  fading concentric pulse arcs) is the dedicated networking-depth illustration, placed inline
+  next to the DNS/TCP/TLS/TTFB phase row. Deliberately more liberal with these touches than the
+  original site-structure report proposed, per this prompt's explicit steer, while keeping
+  every glyph small, schematic, and tied to the section it sits next to rather than decorative.
+- **New `components/screenshot-placeholder.tsx`**: the shared, explicitly-labeled placeholder
+  used by every group above.
+- **Section headings colored `--signal-up`** throughout the page, applying the green-accent
+  body-text treatment to this page specifically, reusing the exact token the dashboard already
+  uses for "reporting up" rather than inventing a new accent color.
+- **Site nav added to the shared `SiteHeader`**: Features / Architecture / Engineering / About,
+  in that order, ahead of Log in/Sign out. `/architecture` and `/engineering` don't exist as
+  routes yet — linked ahead of themselves deliberately, so the nav's final shape is in place
+  now rather than growing link-by-link across the next two prompts; each resolves to Next's
+  default not-found page until its own prompt lands, a known, temporary, and expected gap, not
+  a bug to chase down.
+- **Real mobile bug found and fixed via the screenshot pass, not code review**: adding three nav
+  links pushed `SiteHeader`'s single-line nav row past 400px width with no wrap, producing
+  genuine horizontal overflow (confirmed precisely: a full-page screenshot at a 400px viewport
+  came back 547px wide). Fixed with `flex-wrap` on both the header's outer row and the nav
+  itself, plus a tighter `gap-x-4`/`gap-y-1` on narrow widths; re-screenshotted and confirmed
+  the capture is genuinely 400px wide with the nav wrapping onto its own line. This fix lands on
+  every page using `SiteHeader` (landing, about, login, register, forgot/reset-password,
+  features) — an accepted, in-scope side effect of fixing the shared component itself, not new
+  content on any of those pages, consistent with how this exact situation was handled the last
+  time a `SiteHeader` fix was needed.
+- **Self-critique against the avoid-list, one real finding**: 14 em dashes had crept into the
+  freshly-written feature copy (and one more in the screenshot placeholder's own label) —
+  against this project's own established, repeatedly-enforced rule that user-facing site copy
+  never uses them (markdown documentation files are a different context and were never held to
+  this rule). Found via a direct grep across the new page and component, rewritten into plain
+  sentences/commas/colons, and reconfirmed at zero matches afterward. Everything else checked
+  clean: no gradients/shadows/Inter, no all-caps eyebrow labels, no middle-dot meta text, no
+  numbered markers, no trailing CTA arrows (the phase-row "→" is the same sequence-notation
+  precedent the landing page already established), no card-grid tell (feature items are plain
+  text blocks, not bordered cards).
+- Switched the intro paragraph's Architecture/Engineering links from plain `<a>` tags to
+  `next/link`'s `Link`, matching this project's own convention for in-app navigation (plain
+  `<a>` stays reserved for the external GitHub link in the footer).
+- **Verified via Playwright against the real running dev server** (not a build — this project's
+  own established rule against running `next build` alongside a live `next dev` process still
+  applies): full-page screenshots at 1280px and 400px widths, a close-up of the header row, and
+  a close-up of the networking-depth illustration, used only as this session's own dev
+  reference and deleted afterward, never committed. `tsc --noEmit` clean throughout, including
+  after every copy fix.
+- Not touched in this prompt, per its explicit scope: the landing page, `/architecture`,
+  `/engineering`, `/about`'s own content, any real screenshot content.
+
+**Next: Phase 7, prompt 7.5 — the `/architecture` page**, per the 7.1 build order, including the
+cell-tower/antenna and data-center illustrations placed there per the original site-structure
+report.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
