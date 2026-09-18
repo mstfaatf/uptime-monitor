@@ -1,5 +1,4 @@
 import { SiteHeader } from "@/components/site-header";
-import { ScreenshotPlaceholder } from "@/components/screenshot-placeholder";
 import { SignalLight } from "@/components/signal-light";
 import { RegionBadge } from "@/components/region-badge";
 import { CellTowerIllustration, DataCenterIllustration } from "@/components/network-glyphs";
@@ -297,8 +296,13 @@ export default function ArchitecturePage() {
             Same target, id 42, two independent schedule rows, one per region
           </p>
 
-          <div className="mt-8 max-w-xl">
-            <ScreenshotPlaceholder caption="dashboard row showing both regions' independent status" />
+          <div className="mt-8 max-w-xl overflow-hidden rounded border" style={{ borderColor: "var(--border)" }}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/screenshots/dashboard.png"
+              alt="Dashboard showing multiple targets, each with independent per-region status"
+              className="w-full"
+            />
           </div>
         </section>
 

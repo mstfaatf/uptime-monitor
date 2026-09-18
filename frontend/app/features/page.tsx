@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { SiteHeader } from "@/components/site-header";
-import { ScreenshotPlaceholder } from "@/components/screenshot-placeholder";
 import {
   DataCenterGlyph,
   AntennaGlyph,
@@ -21,14 +20,16 @@ function FeatureGroup({
   heading,
   intro,
   items,
-  screenshotCaption,
+  screenshotSrc,
+  screenshotAlt,
   extra,
 }: {
   glyph?: React.ReactNode;
   heading: string;
   intro: string;
   items: FeatureItem[];
-  screenshotCaption: string;
+  screenshotSrc: string;
+  screenshotAlt: string;
   extra?: React.ReactNode;
 }) {
   return (
@@ -53,8 +54,9 @@ function FeatureGroup({
           </div>
         ))}
       </div>
-      <div className="mt-6 max-w-xl">
-        <ScreenshotPlaceholder caption={screenshotCaption} />
+      <div className="mt-6 max-w-xl overflow-hidden rounded border" style={{ borderColor: "var(--border)" }}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={screenshotSrc} alt={screenshotAlt} className="w-full" />
       </div>
     </section>
   );
@@ -87,7 +89,8 @@ export default function FeaturesPage() {
           heading="Security & foundation"
           intro="Every request that touches a user's data goes through the same ownership and
             abuse-prevention rules, before any feature was built on top of them."
-          screenshotCaption="settings page, danger zone and account controls"
+          screenshotSrc="/screenshots/settings.png"
+          screenshotAlt="Settings page showing alert preferences, webhooks, API keys, and the account danger zone"
           items={[
             {
               title: "Ownership enforced on every endpoint",
@@ -120,7 +123,8 @@ export default function FeaturesPage() {
           heading="Worker & network observability"
           intro="The part of this project that goes deepest: checks don't just report up or down,
             they report exactly where time was spent getting an answer."
-          screenshotCaption="target detail view, timing waterfall and latency chart"
+          screenshotSrc="/screenshots/target-detail.png"
+          screenshotAlt="Target detail page showing per-region analytics, a latency chart, timing breakdown, uptime heatmap, and incident timeline"
           extra={
             <div
               className="mt-6 flex flex-col items-center gap-6 rounded border p-6 sm:flex-row sm:items-center sm:justify-between"
@@ -175,7 +179,8 @@ export default function FeaturesPage() {
           heading="Multi-region coordination"
           intro="Two independent worker regions check every target on their own schedule against
             one shared database, without a message queue or a shared lock service between them."
-          screenshotCaption="dashboard row showing two regions' independent status"
+          screenshotSrc="/screenshots/dashboard.png"
+          screenshotAlt="Dashboard showing multiple targets, each with independent per-region status, latency, and tags"
           items={[
             {
               title: "Row-claiming, not a queue",
@@ -201,7 +206,8 @@ export default function FeaturesPage() {
           heading="Alerting & compliance export"
           intro="Downtime and certificate problems reach you without flooding your inbox, and
             every target's history can leave the app as a real report."
-          screenshotCaption="settings page, webhook and alert-preference controls"
+          screenshotSrc="/screenshots/settings.png"
+          screenshotAlt="Settings page showing alert preferences and webhook configuration"
           items={[
             {
               title: "Downtime and recovery email",
@@ -235,7 +241,8 @@ export default function FeaturesPage() {
           heading="Configuring what and how to check"
           intro="Past the basic 'is this URL reachable,' a target can be shaped to match what's
             actually being monitored."
-          screenshotCaption="target settings modal, request customization"
+          screenshotSrc="/screenshots/target-settings-modal.png"
+          screenshotAlt="Target settings modal showing request method, custom headers, basic auth, keyword match, and check interval fields"
           items={[
             {
               title: "Custom method, headers, and basic auth",

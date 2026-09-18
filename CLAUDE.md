@@ -5170,5 +5170,76 @@ summary, Live Demo, Feature Walkthrough with real screenshots, Tech Stack, Runni
 Known Limitations, and a Load Testing note pointing at `docs/LOAD_TEST.md`. This is the last
 piece of Phase 7's original scope.
 
+Phase 7, prompt 7.10 (real screenshots + README rewrite) is complete. **This is the last piece
+of Phase 7's original scope** — every planned doc and page now exists, is accuracy-checked, and
+carries real screenshots instead of placeholders.
+- **Seeded real data against the live production API, not local Docker Compose**: registered a
+  throwaway account, created two tags, and three targets each set to a 30s custom check
+  interval so real check cycles would accumulate quickly rather than waiting out the 300s
+  default: `https://example.com/` (a genuine, reliably healthy target), `https://httpbin.org/status/500`
+  (a real 500 response, a genuine down state), and `https://httpbin.org/delay/2` (a real 2-second
+  server-side delay, a genuine degraded state via the real >800ms latency threshold, not
+  fabricated). Polled the real API (via a small `until` loop, not a blind sleep) until the down
+  target's `consecutive_failures` genuinely crossed the real down threshold in both regions,
+  confirming an actual multi-check incident existed before screenshotting the detail page. Also
+  attached both tags, created one webhook and one API key, and created a fourth target
+  immediately before screenshotting specifically to capture a real pending state (it had
+  actually resolved to "up" by the time of capture, an honest outcome of real system timing, not
+  something forced).
+- **Captured all seven screenshots via Playwright against the real deployed app**
+  (`uptime-monitor-atf-labs.vercel.app`, logging in through the real login form so the session
+  cookie was set by the app itself): the signed-out landing page, `/features`, `/architecture`,
+  the authenticated dashboard (filter bar, tag chips, and per-region badges all visible with
+  real divergent states), the target detail page for the real down target (which produced a
+  genuine populated latency chart, timing waterfall, heatmap, and an ongoing incident entry, not
+  a contrived one), the target-settings modal (opened live via the real "Edit settings" button,
+  needed to fill the one placeholder caption the top-level capture list didn't name explicitly
+  but which still had to be replaced per "every screenshot placeholder"), and the settings page
+  (reloaded first so no one-time secret-reveal panel was showing, confirmed by inspection that
+  neither the webhook's signing secret nor the API key's raw value appears anywhere in the
+  image, only the masked prefix and URL).
+- **Deleted the throwaway account and confirmed it was genuinely gone** via a login retry
+  returning a real `401`, the same verification pattern used everywhere else in this project.
+- **Wired the real images in**: `docs/screenshots/` (for `README.md`, which GitHub renders via
+  plain repo-relative paths) and `frontend/public/screenshots/` (the only location Vercel can
+  actually serve, so the four images referenced from `/features` and `/architecture` live there
+  too). Deliberately did not duplicate the three README-only images (`landing`, `features`,
+  `architecture`) into the frontend's public directory, since nothing on the live site
+  references them and doing so would just be unused weight in the deployed bundle. Replaced
+  every `ScreenshotPlaceholder` usage on both pages with a real `<img>` in the same bordered
+  frame the placeholder used, then deleted `components/screenshot-placeholder.tsx` once grep
+  confirmed nothing referenced it anymore.
+- **`README.md` rewritten in full**: one-paragraph summary, a landing-page hero image, a Live
+  Demo section with both real live URLs and an honestly-scoped cold-start note (measured a real
+  request, including one that touches the database, at well under half a second right now;
+  named Neon's documented free-tier compute autosuspend as the one real place a delay could
+  show up, explicitly flagged as platform-documented behavior rather than something measured
+  cold in this session, since the database was already warm from testing this same deployment
+  minutes earlier), the register-your-own-account statement, a four-section Feature Walkthrough
+  built from real screenshots (dashboard, target detail, target configuration, alerts/webhooks/
+  API keys), Tech Stack, a short Running Locally pointing at `SETUP.md`, and a Known Limitations
+  list matching the live Engineering page's own. This fully resolves the dangling `SPEC.md`/
+  `TESTING.md` reference the old README carried, flagged as a known gap back when those files
+  were retired, since the old "Repository Structure" section containing it no longer exists
+  after the full rewrite.
+- **Same prose standard as the previous pass, verified the same way**: zero em dashes and zero
+  contrast-pair patterns in the new `README.md`, confirmed by direct grep, not assumed clean.
+  Caught one awkward unpunctuated run-on list in the opening paragraph on a close re-read and
+  fixed it before finishing.
+- **Verified thoroughly before finishing**: `tsc --noEmit` clean; confirmed zero horizontal
+  overflow on `/features` at a 400px viewport with the real images in place
+  (`document.documentElement.scrollWidth === 400`); confirmed every file actually in
+  `docs/screenshots/` is referenced by `README.md` and vice versa, with no orphaned images on
+  either side; confirmed total added image weight is small (~1MB across nine files, four of
+  them intentionally duplicated between `docs/` and `frontend/public/` since Vercel can only
+  serve the latter).
+- Not touched in this prompt: any other doc, any other site page, any application code beyond
+  the two page files whose placeholders were replaced.
+
+**Phase 7 is now complete in full**: every planned page exists, every doc is written and
+accuracy-checked, every screenshot placeholder carries a real image, and `README.md` reflects
+the actual, current, live state of the project. Nothing from the original Phase 7 scope remains
+outstanding.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
