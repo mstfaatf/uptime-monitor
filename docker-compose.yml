@@ -41,6 +41,7 @@ services:
         condition: service_healthy
 
   worker:
+    image: uptime-monitor-worker:latest
     build:
       context: ./worker
       dockerfile: Dockerfile
@@ -66,9 +67,16 @@ services:
   # REGION: two independent worker processes checking the same targets, each claiming and
   # scheduling only its own region's target_region_schedule rows.
   worker-eu-west:
-    build:
-      context: ./worker
-      dockerfile: Dockerfile
+    # Deliberately no separate `build:` block — shares `worker`'s exact image tag (set above)
+    # instead of building its own, since the two previously had independent, identically-named
+    # build targets under Compose's default `<project>-<service>` naming despite using the same
+    # Dockerfile/context. That let this container's image silently drift stale across many past
+    # rebuilds that only ever named `worker`/`api`, without either service's tag ever reflecting
+    # it — found live during the 6.16 wrap-up (a cross-host-redirect security fix appeared to
+    # not be taking effect in this region, purely because this image was months stale; the
+    # actual committed code was, and always had been, correct). Rebuilding `worker` now always
+    # rebuilds this service too, structurally, not by convention.
+    image: uptime-monitor-worker:latest
     env_file:
       - .env
     environment:

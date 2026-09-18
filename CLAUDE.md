@@ -4557,5 +4557,127 @@ superficial pass; found and fixed four real issues, confirmed everything else al
 **Phase 6 is now fully complete, including this consistency/accessibility/motion hardening
 pass across every 6.11-6.14 UI addition.** No planned Phase 6 work remains outstanding.
 
+Phase 6, prompt 6.16 (wrap-up + full regression verification) is complete. **Phase 6 is
+genuinely, verifiably done** — every backend feature (6.2-6.8), the CSV formatting fix (6.9),
+the security walkthrough (6.10), and every UI prompt (6.11-6.15) confirmed working end-to-end
+against the real running stack, not just re-read from prior notes. One real, previously-
+unnoticed local-dev environment bug was found and fixed along the way (not a shipped-code
+regression); every other check passed clean on the first or second try.
+- **`PATCH /webhooks/{id}`'s security coverage (this prompt's step-1 ask) confirmed already
+  complete, no gap found**: it carries the same `API_KEY_RATE_LIMIT` decorator as every other
+  non-create webhook endpoint, a dedicated 60/minute boundary test
+  (`test_webhook_update_rate_limited_after_sixty_per_minute`), cross-user ownership coverage
+  (`test_user_cannot_update_another_users_webhook`, 404 not 403), and auth-required coverage
+  — all already added when the endpoint itself landed in 6.14, correctly anticipating this
+  exact follow-up. No new test needed; re-confirmed live with a real cross-user PATCH attempt
+  (404) and a real owner PATCH (succeeds, change reflected).
+- **Real bug found and fixed: `worker-eu-west`'s Docker image had been stale for a long
+  time**, silently running old code while `worker` (local) was rebuilt regularly across
+  Phase 6's many prompts. Root cause: `docker-compose.yml` gave `worker` and `worker-eu-west`
+  each their own `build:` block against the identical Dockerfile/context but with no shared
+  `image:` tag — Compose's default `<project>-<service>` naming then treats them as two
+  entirely separate build targets, so `docker compose build worker` (this project's own
+  shorthand habit, used in nearly every Phase 6 prompt's own verification) never rebuilt
+  `worker-eu-west` at all. Caught live: re-verifying 6.2's cross-host-redirect credential-drop
+  fix (a real target through `httpbin.org` → `httpbingo.org/headers`, confirming a custom
+  header isn't forwarded across hosts) showed `eu-west` **failing** the check (keyword found,
+  meaning the header genuinely leaked) while `local` correctly passed — reproduced twice
+  before concluding it was real, not network flakiness. Rebuilding `worker-eu-west` alone
+  fixed it immediately; **the committed/shipped code was, and always had been, correct** —
+  this was purely a stale local image, never a real regression, and never affected Railway
+  (which deploys each service from its own Dockerfile independently, not from this
+  compose-level image-tag sharing). **Fixed structurally**, not just this once:
+  `docker-compose.yml`'s `worker-eu-west` now has no `build:` block of its own and instead
+  shares `worker`'s exact `image: uptime-monitor-worker:latest` tag, so rebuilding `worker`
+  always rebuilds/recreates `worker-eu-west` too from now on — confirmed by testing that
+  `docker compose build worker` alone now recreates both containers. **Caveat for whoever
+  picks this up next**: because of this, any past prompt's own "confirmed both regions"
+  claims specifically about `eu-west` behavior may, in a small number of cases, have silently
+  been checking stale local code rather than what was actually committed at the time — the
+  committed code itself was never wrong (re-verified live, see above), only this local
+  container's copy of it, so nothing needs re-auditing, just flagging as a known blind spot
+  in this project's own local-dev verification history.
+- **Full pytest suites, fresh**: **303 backend + 59 worker = 362 tests total**, all passing
+  against freshly rebuilt images (up from 160 total at the Phase 5 close — 179 new backend
+  tests, 23 new worker tests, one for every Phase 6 backend addition: request customization/
+  keyword monitoring, pause/resume/interval, tags, analytics, alerting restructure/webhooks,
+  API keys/rate limiting/pagination, retention, the CSV formatting rewrite, and the 6.10
+  rate-limiting-gap fixes). `tsc --noEmit` clean. `next build` intentionally not run — a dev
+  server was live on port 3000 throughout (this project's own established rule since 3.7);
+  live-stack Playwright verification stood in for it, as in every prompt since.
+- **End-to-end manual verification, all nine items from this prompt's checklist confirmed
+  against real infrastructure**: keyword monitoring correctly flagged a real mismatched
+  target (`200 OK`, `is_up=false`, exact "Keyword match failed" error, both regions) — caught
+  and fixed my own first attempt's flawed test target (a URL that 404'd before ever reaching
+  the keyword check) along the way, a test-authoring mistake, not a product bug. Pause/resume
+  proven against a real target: paused, forced due, confirmed zero checks across 2+ scheduler
+  ticks, resumed, confirmed a fresh check landed within ~8s. Custom check interval (30s)
+  confirmed respected on success (`next_check_at` landed ~30s out, not the 300s default) —
+  again required fixing my own first test target, which had been failing and thus exercising
+  the backoff curve instead of the custom interval, a design behavior 6.3 documented
+  correctly, not a bug. Tags confirmed filtering the dashboard live via the real UI (attach
+  via the row's own picker, filter via the bar's own select, exactly one matching row shown).
+  Uptime/p50/p99/MTTR confirmed correct against hand-computed values from ten seeded checks
+  (80.0% uptime, 58ms p50, 842ms p99, 40m MTTR/1 incident — every figure matched exactly)
+  across window changes on the real detail page. A webhook created through the real Settings
+  UI received two real, correctly-signed deliveries (`target.down` then `target.up`) from a
+  real forced transition, with the dashboard's own row simultaneously updating live in the
+  same browser tab with no reload — confirmed both the external delivery and the in-app UI
+  together, not just one or the other. An API key created through the real UI authenticated
+  60 real requests then hit a real 429 on the 61st, with the same account's cookie-
+  authenticated session completely unaffected; the full raw key value was confirmed genuinely
+  gone from the page after a reload (only the key showing "um_..." as its own prefix
+  remained, not the full secret — my first check for this was a false positive matching that
+  prefix substring, corrected with an exact-string comparison). Retention's `prune_old_checks`
+  was invoked directly against seeded data spanning the 90-day boundary (3 rows correctly
+  deleted, exactly the >90-day ones), and `GET /targets/{id}/analytics` and
+  `GET /targets/{id}/export` were both confirmed to still return clean, correct 200 responses
+  immediately afterward — no breakage from checks disappearing out from under a live query.
+  The CSV export's 6.9 formatting fix was reconfirmed correct on real data (clean Summary/
+  Incidents/Checks sections, consistent timestamp formatting, lowercase `true`/`false`, plain
+  integer incident duration) — the one assertion my own script got wrong (expected "20"
+  minutes, got "40") was again my own arithmetic error in seeding the seed data's down window,
+  not a bug; the app's computed 40-minute duration was the objectively correct one.
+- **Phase 0-5 regression checks, all held, re-verified live rather than assumed**: ownership
+  enforcement (21 separate cross-user/anonymous checks across targets, webhooks, tags, API
+  keys, analytics, and export — every one 404-not-403 or 401 as expected, including the
+  6.10-fixed endpoints); cookie-auth rate limiting (login exactly 5-then-429, register
+  exactly 3-then-429, both hit organically during this prompt's own verification traffic, not
+  synthetically forced); `JWT_SECRET` fail-fast (stripped from `.env`, real container crash
+  with the same `ValidationError` every prior wrap-up has hit, `.env` restored byte-for-byte
+  via diff, clean recovery); SSRF blocking (metadata-IP and private-IP rejected at both target
+  and webhook creation; the cross-host credential-drop fix from 6.2 re-verified live and
+  found the `worker-eu-west` staleness bug above — the fix itself was never actually broken);
+  per-user SSE filtering (two real concurrent streams, the target's owner received both
+  regions' real check_update events, the other user received zero); per-region independence
+  (the same target's `eu-west`/`local` entries showed genuinely distinct `checked_at`/
+  `latency_ms`/timing-breakdown data, never merged or collapsed).
+- **6.10's security-walkthrough findings reconfirmed still holding after 6.11-6.15's frontend
+  work**: the six previously-ratelimit-gapped endpoints (`PATCH /targets/{id}`,
+  `POST /targets/{id}/resume`, tag attach/detach, `POST /tags`, `DELETE /api-keys/{id}`) still
+  carry their fixed decorators (confirmed via the full passing test suite, since none of
+  6.11-6.15 touched backend code at all); credential handling re-spot-checked live — a
+  target's basic-auth password never appeared in any response body, an API key's full raw
+  value never appeared in `GET /api-keys`, a webhook's signing secret never appeared in
+  `GET /webhooks`. Nothing in the five frontend prompts reintroduced a leak or weakened an
+  ownership check, consistent with them never having touched backend code in the first place.
+- All verification data (5 accounts, their targets/webhooks/tags/API keys, ~30 seeded check
+  rows) deleted afterward via the real `DELETE /auth/me` cascade, confirmed via direct SQL
+  count of zero remaining `wrap616*`-prefixed rows anywhere. Scratch Playwright/API scripts
+  (11 across this prompt) written under `frontend/`, deleted before finishing, never
+  committed. Docker stack confirmed healthy throughout and after; the one pre-existing
+  self-healing safety path (a target deleted mid-check logs and swallows a
+  `ForeignKeyViolationError` rather than crashing the cycle, per 1.3's original design) fired
+  naturally during cleanup and behaved exactly as designed.
+- **Assessment: Phase 6 is genuinely done.** No functional gap was found anywhere in the
+  actual shipped code across 13 backend features, the CSV fix, the security walkthrough, and
+  6 rounds of UI work. The one real finding (`worker-eu-west`'s stale local image) was an
+  artifact of this specific local dev environment's Docker Compose setup, now structurally
+  fixed so it can't recur, and never affected what was actually committed, tested, or would
+  be deployed. Nothing needs revisiting before Phase 7 begins.
+
+**Phase 6 complete. Next: Phase 7 — presentation** (README rewrite, ADRs, `LOAD_TESTING.md`
+against the live deployed instance, and resume framing) per CLAUDE.md's phase plan.
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
