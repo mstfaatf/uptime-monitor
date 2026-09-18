@@ -1,12 +1,13 @@
 import { cn } from "@/lib/utils";
 
 /**
- * A small family of network/infrastructure glyphs used on the Features page to give each
- * feature group its own visual identity — an extension of the same instrument-panel
- * vocabulary SignalLight/LatencyGauge already established (a bordered housing on
- * --bg-surface-raised, muted --text-secondary linework, one --signal-up accent for "pop"),
- * not a new icon system. Kept deliberately small and schematic rather than illustrative —
- * simple geometric strokes, no gradients/shadows, only locked palette tokens.
+ * A family of network/infrastructure glyphs and illustrations — an extension of the same
+ * instrument-panel vocabulary SignalLight/LatencyGauge already established (a bordered housing
+ * on --bg-surface-raised where relevant, muted --text-secondary linework, one --signal-up
+ * accent for "pop"), not a new icon system. The small, housed glyphs (Data Center/Antenna/
+ * Router/SignalBars) sit next to Features page headings; the larger standalone illustrations
+ * (CellTower, DataCenter, SignalPulse) anchor specific concepts on the Architecture page.
+ * Simple geometric strokes throughout — no gradients/shadows, only locked palette tokens.
  */
 
 const HOUSING_VIEWBOX = 32;
@@ -121,6 +122,99 @@ export function SignalBarsGlyph({ size, className }: GlyphProps) {
         />
       ))}
     </Housing>
+  );
+}
+
+/**
+ * A larger, standalone lattice cell tower — used on the Architecture page's multi-region
+ * section, one per region, always paired with a real <SignalLight> next to it for that
+ * region's actual live state (the tower itself stays neutral linework; it represents the
+ * infrastructure, not the reading). The beacon at the top is a fixed --signal-up accent
+ * (broadcasting), not a state indicator — deliberately not a second place this page encodes
+ * up/down/degraded, so there's only ever one source of truth for state on the page.
+ */
+export function CellTowerIllustration({ size = 90, className }: GlyphProps) {
+  const legTopX = 60;
+  const legTopY = 46;
+  const legBottomLeftX = 40;
+  const legBottomRightX = 80;
+  const baseY = 128;
+  const braceYs = [112, 94, 76, 60];
+
+  function xAtY(y: number, fromX: number) {
+    const t = (baseY - y) / (baseY - legTopY);
+    return fromX + (legTopX - fromX) * t;
+  }
+
+  return (
+    <svg
+      width={size}
+      height={(size * 140) / 120}
+      viewBox="0 0 120 140"
+      role="img"
+      aria-hidden="true"
+      className={cn("shrink-0", className)}
+    >
+      <line x1={legBottomLeftX} y1={baseY} x2={legTopX} y2={legTopY} stroke="var(--text-secondary)" strokeWidth={1.6} />
+      <line x1={legBottomRightX} y1={baseY} x2={legTopX} y2={legTopY} stroke="var(--text-secondary)" strokeWidth={1.6} />
+      {braceYs.map((y) => (
+        <line
+          key={y}
+          x1={xAtY(y, legBottomLeftX)}
+          y1={y}
+          x2={xAtY(y, legBottomRightX)}
+          y2={y}
+          stroke="var(--border)"
+          strokeWidth={1.3}
+        />
+      ))}
+      <line x1={30} y1={baseY} x2={90} y2={baseY} stroke="var(--border)" strokeWidth={2.5} strokeLinecap="round" />
+      <line x1={legTopX} y1={legTopY} x2={legTopX} y2={20} stroke="var(--text-secondary)" strokeWidth={1.6} />
+      <line x1={46} y1={30} x2={74} y2={30} stroke="var(--text-secondary)" strokeWidth={1.6} strokeLinecap="round" />
+      <line x1={50} y1={38} x2={70} y2={38} stroke="var(--text-secondary)" strokeWidth={1.6} strokeLinecap="round" />
+      <circle cx={legTopX} cy={17} r={3.5} fill="var(--signal-up)" />
+    </svg>
+  );
+}
+
+/**
+ * A larger, standalone server rack pair — anchors the Postgres/Neon node in the Architecture
+ * page's system diagram. Two racks so it reads as "a data center," not one lone server.
+ */
+export function DataCenterIllustration({ size = 110, className }: GlyphProps) {
+  function Rack({ x, litIndex }: { x: number; litIndex: number }) {
+    const slots = [0, 1, 2, 3, 4];
+    return (
+      <g>
+        <rect x={x} y={18} width={34} height={84} rx={2} fill="var(--bg-surface-raised)" stroke="var(--border)" strokeWidth={1.4} />
+        {slots.map((i) => {
+          const y = 26 + i * 15;
+          return (
+            <g key={i}>
+              <line x1={x + 5} y1={y} x2={x + 29} y2={y} stroke="var(--border)" strokeWidth={1} />
+              <circle cx={x + 8} cy={y + 7} r={1.4} fill={i === litIndex ? "var(--signal-up)" : "var(--text-secondary)"} />
+            </g>
+          );
+        })}
+      </g>
+    );
+  }
+
+  return (
+    <svg
+      width={size}
+      height={(size * 120) / 140}
+      viewBox="0 0 140 120"
+      role="img"
+      aria-hidden="true"
+      className={cn("shrink-0", className)}
+    >
+      <Rack x={22} litIndex={2} />
+      <Rack x={84} litIndex={4} />
+      <line x1={39} y1={102} x2={101} y2={102} stroke="var(--border)" strokeWidth={1.4} />
+      <line x1={39} y1={107} x2={39} y2={102} stroke="var(--border)" strokeWidth={1.4} />
+      <line x1={101} y1={107} x2={101} y2={102} stroke="var(--border)" strokeWidth={1.4} />
+    </svg>
   );
 }
 

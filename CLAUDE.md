@@ -4879,5 +4879,60 @@ shared `SiteHeader` component (used by all of them) changed, and only because it
 cell-tower/antenna and data-center illustrations placed there per the original site-structure
 report.
 
+Phase 7, prompt 7.5 (`/architecture` page + system diagrams) is complete. `/features`, the
+landing page, `/engineering`, and `/about` are untouched, per this prompt's explicit scope.
+- **New `app/architecture/page.tsx`**: the same content ground as `ARCHITECTURE.md`, browsable
+  and illustrated instead of markdown — a System overview diagram (two worker-region boxes with
+  cell-tower illustrations, down to a Postgres/Neon box anchored by a data-center illustration,
+  down to the backend with its `realtime.py`/LISTEN sub-box called out separately, down to the
+  frontend, with a note on the pooled-vs-direct connection split), a three-card Deployment
+  targets section (Vercel/Railway/Neon), a full "a check, end to end" step sequence walking
+  claim through SSRF/redirect validation, timing/cert capture, keyword matching, the single
+  commit that writes the check/reschedule/notify together, and the SSE push, and a "Multi-region
+  coordination, visually" section pairing two cell towers with two real `SignalLight` states
+  plus a small illustrative `target_region_schedule` row mockup (same target id, two regions,
+  two independent rows). Closes with a link to `ARCHITECTURE.md` on GitHub for the full
+  file-by-file component map, which this page deliberately doesn't duplicate.
+- **Two new illustrations added to `components/network-glyphs.tsx`**: `CellTowerIllustration`
+  (a lattice mast with cross braces and a fixed `--signal-up` beacon — deliberately left neutral
+  otherwise, always paired with a real `SignalLight` next to it for the actual state, so the
+  page never has two different places claiming to represent the same live reading) and
+  `DataCenterIllustration` (two server racks with slotted bays and LED accents). Both extend the
+  same small glyph file from the features-page prompt rather than starting a second icon module.
+- **Green/red text treatment applied exactly where asked**: every failure branch in the "a
+  check, end to end" flow (blocked at the SSRF check, a blocked or excessive redirect chain, a
+  failed keyword match) renders in `--signal-down`, with a matching colored marker dot; two
+  genuinely successful terminal steps (URL validated, pushed to the browser) render in
+  `--signal-up`, the same colors a real check already renders elsewhere in the app. Section
+  headings again use `--signal-up`, consistent with the features page.
+- **More liberal illustration use, per this prompt's explicit steer**: five illustration
+  placements total (two small cell towers in the system diagram, one data-center illustration,
+  two larger cell towers in the multi-region section), each doing real explanatory work next to
+  the concept it represents rather than decorating the page.
+- **One real accessibility-adjacent tell caught in self-critique, not code review**: the
+  Postgres/Neon diagram box's table list and the backend box's stack caption both originally used
+  middle-dot separators (`targets · checks · target_region_schedule · ...`) — precisely the
+  "middle-dot-joined meta text" pattern this project's own avoid-list has flagged and removed
+  several times before, in a place this pass almost missed since it read as a plain table list
+  rather than a "meta" row. Caught via a direct grep for the character, not by re-reading the
+  rendered page, and rewritten as a plain comma-separated list in both places.
+- **Zero em dashes**, confirmed via the same direct-grep check as the last two prompts, after
+  finding and rewriting twelve of them across the flow-step copy and diagram captions.
+- **Verified via Playwright against the real running dev server**: full-page screenshots at
+  1280px and 400px, plus close-ups of the system diagram, the tower/schedule-table section, and
+  the mobile-width diagram grid and table — the diagram's two-column worker boxes wrap their
+  labels cleanly at 400px rather than overflowing, and the schedule-table mockup scrolls inside
+  its own bordered container (the established pattern for a table wider than the page) rather
+  than the page itself gaining horizontal scroll. Confirmed the mobile nav fix from the previous
+  prompt still holds unchanged on this page too. `tsc --noEmit` clean throughout, including
+  after every copy fix. Screenshots were this session's own dev reference only, deleted
+  afterward, never committed.
+- Not touched in this prompt, per its explicit scope: `/features`, the landing page,
+  `/engineering`, `/about`, any real screenshot content.
+
+**Next: Phase 7, prompt 7.6 — the `/engineering` page**, per the 7.1 build order, including the
+signal-wave/antenna motif placement already used on `/features` — reuse rather than reinvent
+where it fits, per this page's own reasoning-focused content (CASE_STUDY.md's ground, browsable).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
