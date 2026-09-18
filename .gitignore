@@ -12,3 +12,6 @@ __pycache__/
 # Node (frontend/)
 node_modules/
 .next/
+
+# Internal development notes, not part of the project's own documentation
+CLAUDE.md
