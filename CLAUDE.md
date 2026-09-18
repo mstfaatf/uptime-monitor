@@ -4752,5 +4752,62 @@ CASE_STUDY.md, SETUP.md, and every site page are untouched, per this prompt's ex
 
 **Next: Phase 7, prompt 7.3 — `CASE_STUDY.md` and `SETUP.md`**, per the 7.1 build order.
 
+Phase 7, prompt 7.3 (`CASE_STUDY.md`, `SETUP.md`, retiring `SPEC.md`/`TESTING.md`) is complete.
+`README.md` and every site page are untouched, per this prompt's explicit scope — README comes
+last, once every page exists and real screenshots are ready.
+- **`CASE_STUDY.md`** (new, repo root): key technical decisions with real, already-established
+  reasoning — SSRF at two checkpoints plus the real cross-host-credential-drop bug the manual
+  redirect-following implementation required, the async worker + per-target backoff/jitter
+  design, row-claiming (`SKIP LOCKED` + a `claimed_at` lease) and the alternatives it was chosen
+  over, per-region-never-collapsed display and why that's an audience-dependent call rather than
+  an obviously correct one, the alert-cooldown design (including the real failed-send-recorded-
+  as-sent bug found and fixed during development), webhook SSRF-at-send-time + HMAC-SHA256
+  signing, and API-key scoping (structurally, not just by convention, unable to manage other
+  keys). Closes with a Quantified Results table and a "What this deliberately is not" section.
+  **Every number in Quantified Results was verified against the real current code or a real
+  measurement before being written**, not pulled from memory of older status notes: the 362-test
+  total (303 backend + 59 worker) was confirmed by actually running `pytest --collect-only`
+  inside the `api` and `worker` containers rather than trusted from an earlier prompt's own
+  count (a grep-based count attempted first came out low — 298/50 — a reminder that grepping
+  `def test_` under-counts against pytest's own real collection, so it was discarded in favor of
+  the real collection run); the 14-migration count was confirmed via a direct directory listing.
+  No cold-start latency figure is included — unlike the reference project, this one has never
+  actually measured it, and the instruction was to use only real numbers already on record, not
+  invent one to fill the gap.
+- **`SETUP.md`** (new, repo root): a single real local-dev path (`docker compose up -d` — the
+  API container runs `alembic upgrade head` on its own boot, no separate migration step to
+  remember), then the frontend run separately for hot reload, then a full consolidated env-var
+  table pulled from `backend/README.md`/`worker/README.md`/`.env.example` (not reinvented —
+  cross-checked against the actual current `Settings` classes in both services' `config.py`),
+  plus the two test-suite commands. A short "running outside Docker" section covers the one
+  real gotcha already documented elsewhere (the backend reads `.env` from its own working
+  directory, a different file from the repo-root one Compose reads).
+- **Found and fixed a second stale cross-reference from the ADR renumbering in the prior
+  prompt**: `docker-compose.yml`'s own comment on the `worker-eu-west` service still pointed at
+  `docs/adr/001-multi-region-coordination.md` — missed previously because that search was
+  scoped to `.md`/`.py`/`.ts`/`.tsx` files and never checked `.yml`. Corrected to
+  `003-multi-region-coordination.md`, and linked the same file directly from `SETUP.md`.
+- **Retired `SPEC.md` and `TESTING.md`** at the repo root. Confirmed via a full-repo grep
+  before removing that the only references anywhere were the root `README.md` (which lists
+  both in its "Repository Structure" bullets — left as a **known, temporary dangling
+  reference**, since `README.md` is explicitly out of scope this prompt and is itself getting a
+  full rewrite in a later prompt, at which point this resolves on its own rather than needing a
+  standalone fix) and this file's own historical status entries (an internal log, not a live
+  reference). `SPEC.md` contained the original technical specification — locked stack choice,
+  the original `users`/`targets`/`checks` data model, the original three-endpoint API surface,
+  and the original security requirements list; every one of those is now either superseded by
+  what's actually built (the schema alone grew from 3 tables to the current set across 14
+  migrations) or documented accurately in `docs/API.md`/`ARCHITECTURE.md`/this prompt's own
+  ADRs, none of which existed when `SPEC.md` was written. `TESTING.md` contained manual curl-
+  based steps to verify services/add-target/checks/status/delete against the original MVP
+  before an automated test suite existed at all; that verification is now the 362-test
+  automated suite documented in `SETUP.md`'s "Tests" section, a strictly stronger replacement,
+  not a loss of coverage.
+- Not touched in this prompt, per its explicit scope: `README.md`, any site page.
+
+**Next: Phase 7, prompt 7.4 — the `/features` page**, per the 7.1 build order (site pages come
+next; `README.md` itself waits until every page exists and real screenshots are ready, per
+prompt 7.3's own instruction).
+
 Update this line, and add brief notes below it, at the end of every prompt so a new chat session
 can pick up context immediately without re-reading the whole codebase.
