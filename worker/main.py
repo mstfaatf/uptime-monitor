@@ -439,7 +439,13 @@ async def main() -> None:
         CHECK_CONCURRENCY,
         settings.CHECKS_RETENTION_DAYS,
     )
-    pool = await asyncpg.create_pool(settings.asyncpg_database_url, init=_init_connection)
+    # application_name tags every pooled connection in pg_stat_activity by region, so it's
+    # possible to see exactly which process is holding a connection open.
+    pool = await asyncpg.create_pool(
+        settings.asyncpg_database_url,
+        init=_init_connection,
+        server_settings={"application_name": f"worker-{settings.REGION}"},
+    )
     # Retention (Phase 6, prompt 6.8) runs as a second, independent task for the life of the
     # process — started here, before the check-cycle loop below, and cancelled in `finally`
     # alongside closing the pool. It never nests inside run_cycle()/the check loop and shares

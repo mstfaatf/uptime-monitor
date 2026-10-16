@@ -94,6 +94,7 @@ async def test_run_listener_connects_with_listen_asyncpg_url_not_the_pooled_url(
     monkeypatch.setattr(settings, "LISTEN_DATABASE_URL", "postgresql+asyncpg://direct-host/db")
 
     connected_urls = []
+    connected_app_names = []
 
     class _FakeConn:
         def is_closed(self):
@@ -105,8 +106,9 @@ async def test_run_listener_connects_with_listen_asyncpg_url_not_the_pooled_url(
         async def close(self):
             pass
 
-    async def fake_connect(url):
+    async def fake_connect(url, **kwargs):
         connected_urls.append(url)
+        connected_app_names.append(kwargs.get("server_settings", {}).get("application_name"))
         return _FakeConn()
 
     monkeypatch.setattr(realtime.asyncpg, "connect", fake_connect)
@@ -118,6 +120,7 @@ async def test_run_listener_connects_with_listen_asyncpg_url_not_the_pooled_url(
         await task
 
     assert connected_urls == ["postgresql://direct-host/db"]
+    assert connected_app_names == ["api-listen"]
 
 
 async def test_handle_notification_for_a_deleted_target_is_a_noop(client):

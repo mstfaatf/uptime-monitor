@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 NOTIFY_CHANNEL = "checks_inserted"
 RECONNECT_DELAY_SECONDS = 5
 
+# Tags the LISTEN connection in pg_stat_activity so it can be told apart from request-path
+# connections ("api") when checking what is keeping the database awake.
+LISTEN_APPLICATION_NAME = "api-listen"
+
 # user_id -> the set of queues for that user's currently-connected SSE stream(s) (a user can
 # have more than one tab/device open at once).
 _subscribers: dict[int, set[asyncio.Queue]] = {}
@@ -361,7 +365,9 @@ async def run_listener() -> None:
     while True:
         conn: asyncpg.Connection | None = None
         try:
-            conn = await asyncpg.connect(settings.listen_asyncpg_url)
+            conn = await asyncpg.connect(
+                settings.listen_asyncpg_url, server_settings={"application_name": LISTEN_APPLICATION_NAME}
+            )
 
             def _on_notify(connection, pid, channel, payload) -> None:
                 # asyncpg calls this synchronously from its own read loop — hand off to a task

@@ -23,7 +23,7 @@ from sqlalchemy.orm import aliased, selectinload
 
 import realtime
 from analytics import ALLOWED_WINDOWS, compute_region_analytics
-from auth import get_current_user, get_current_user_or_api_key
+from auth import get_current_user, get_current_user_id_short_lived, get_current_user_or_api_key
 from config import settings
 from database import get_db
 from export import build_csv
@@ -434,15 +434,20 @@ async def list_targets_status(
 @router.get("/stream")
 async def stream_target_updates(
     request: Request,
-    current_user: User = Depends(get_current_user),
+    user_id: int = Depends(get_current_user_id_short_lived),
 ):
     """
     Server-Sent Events stream of check-result updates for the authenticated user's own
     targets only. The worker NOTIFYs after each check commits; realtime.py resolves the
     notified target_id to its owning user and forwards the event only to that user's queue(s)
     here — this endpoint never sees, and can never accidentally forward, another user's data.
+
+    Holds no database connection while streaming: the user lookup happens in
+    get_current_user_id_short_lived's own session, which is committed and closed before this
+    function runs. Anything that needs the database per event (realtime._handle_notification)
+    opens and closes its own session.
     """
-    queue = realtime.subscribe(current_user.id)
+    queue = realtime.subscribe(user_id)
 
     async def event_generator():
         try:
@@ -456,7 +461,7 @@ async def stream_target_updates(
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
         finally:
-            realtime.unsubscribe(current_user.id, queue)
+            realtime.unsubscribe(user_id, queue)
 
     return StreamingResponse(
         event_generator(),
