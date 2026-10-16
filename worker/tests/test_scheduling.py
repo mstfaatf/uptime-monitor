@@ -132,9 +132,10 @@ async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim
 
     rows = await main.claim_due_targets(conn, "us-east")
 
-    select_sql, region_arg, ttl_arg = conn.fetch.call_args.args
+    select_sql, region_arg, ttl_arg, grace_arg = conn.fetch.call_args.args
     assert "target_region_schedule" in select_sql
-    assert "next_check_at <= now()" in select_sql
+    assert "trs.next_check_at <= now() + make_interval(secs => $3)" in select_sql
+    assert grace_arg == 0  # exact due time unless a caller asks for grace
     # Precisely the self-heal clause from 2.2/2.5: a stale claim (older than CLAIM_TTL_SECONDS)
     # must be treated as due, not just a NULL one — a looser "claimed_at" substring check
     # wouldn't catch a regression that dropped the "OR ... stale" half and left a target
@@ -166,6 +167,49 @@ async def test_claim_due_targets_selects_for_update_skip_locked_and_stamps_claim
 
     assert rows[0]["id"] == 1
     assert rows[0]["url"] == "https://example.com"
+
+
+async def test_claim_due_targets_passes_grace_seconds_through():
+    conn = _mock_conn()
+    conn.fetch.return_value = []
+
+    await main.claim_due_targets(conn, "us-east", 60)
+
+    *_, grace_arg = conn.fetch.call_args.args
+    assert grace_arg == 60
+
+
+async def test_claim_due_targets_only_stamps_claimed_at_never_next_check_at():
+    """Claiming must never move a target's schedule, in any mode: only reschedule_target, after
+    a real check, writes next_check_at."""
+    conn = _mock_conn()
+    conn.fetch.return_value = [{"id": 1, "url": "https://example.com"}]
+
+    await main.claim_due_targets(conn, "us-east", 60)
+
+    for call in conn.execute.call_args_list:
+        sql = call.args[0]
+        if sql.lstrip().startswith("UPDATE"):
+            assert "next_check_at" not in sql
+
+
+async def test_seconds_until_failing_due_only_considers_claimable_failing_rows():
+    conn = _mock_conn()
+    conn.fetchval = AsyncMock(return_value=12.5)
+
+    wait = await main.seconds_until_failing_due(conn, "us-east")
+
+    sql, region_arg, ttl_arg, max_failures_arg = conn.fetchval.call_args.args
+    assert wait == 12.5
+    assert "min(trs.next_check_at) - now()" in sql
+    # Only targets that just started failing: a long-failing target's ~15 min backoff must not
+    # hold a burst open just because it happens to come due during the window.
+    assert "trs.consecutive_failures BETWEEN 1 AND $3" in sql
+    assert max_failures_arg == main.IN_BURST_RETRY_MAX_FAILURES == 2
+    assert "AND NOT t.paused" in sql
+    assert "trs.claimed_at IS NULL OR trs.claimed_at < now() - make_interval(secs => $2)" in sql
+    assert region_arg == "us-east"
+    assert ttl_arg == main.CLAIM_TTL_SECONDS
 
 
 async def test_claim_due_targets_does_not_stamp_claim_when_nothing_is_due():

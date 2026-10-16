@@ -21,6 +21,9 @@ service also loads the repo-root `.env` (`env_file:`) for consistency with the `
 | `HTTP_TIMEOUT_SECONDS` | Timeout per HTTP request | `10` |
 | `HTTP_VERIFY_SSL` | Verify TLS certificates for checked URLs (`true`/`false`) | `true`. Set to `false` only for local/dev if CA verification fails (insecure). |
 | `REGION` | Identifies which region this worker instance is checking from. Tagged onto log lines and `checks` rows. Set a distinct value per instance (e.g. `us-east`, `eu-west`) once more than one worker runs. | `local` |
+| `BACKEND_URL` | Base URL of the API, used to ask `GET /internal/watching` whether anyone is using the site. Locally `http://api:8000` (set in `docker-compose.yml`); in production the API's public HTTPS domain. | unset, which keeps the worker in idle mode |
+| `INTERNAL_API_SECRET` | Sent in the `X-Internal-Secret` header to `GET /internal/watching`. Must be the same value as the API's `INTERNAL_API_SECRET`. Never logged. | unset, which keeps the worker in idle mode |
+| `BURST_INTERVAL_SECONDS` | In idle mode (nobody watching), targets are checked in short bursts starting on multiples of this many seconds since the Unix epoch, so every region wakes together and the database can sleep in between. Must be the same on every worker. | `900` (15 min) |
 
 ## DATABASE_URL (production — Neon)
 

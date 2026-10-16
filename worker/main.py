@@ -23,13 +23,12 @@ sees this as a no-op: it always gets every due target back, just via two quick t
 instead of one bare SELECT. Two instances in *different* regions never contend for the same
 row at all, since each only ever queries its own region's rows.
 
-Also runs a checks-table retention sweep (Phase 6, prompt 6.8) as a second, independent
-asyncio task — see retention.py and main()'s own comment on why it's sequenced this way rather
-than folded into the check-cycle loop above.
+When to claim is decided by scheduler.py: continuously while someone is watching the site,
+in clock-aligned bursts with no database connection in between while nobody is. That module
+also runs the checks-table retention sweep (retention.py) once per UTC day.
 """
 
 import asyncio
-import contextlib
 import json
 import logging
 import time
@@ -42,8 +41,10 @@ from backoff import compute_backoff_seconds
 from config import settings
 from checker import check_url
 from crypto import decrypt_secret
-from retention import run_retention_loop
+from retention import prune_old_checks
+from scheduler import IN_BURST_RETRY_MAX_FAILURES, SCHEDULER_TICK_SECONDS, Scheduler
 from ssrf import is_url_blocked
+from watching import WatchingProbe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -54,14 +55,6 @@ logger = logging.getLogger(__name__)
 # that a single worker process doesn't open dozens of simultaneous outbound connections/DNS
 # lookups (against sites we don't control) or DB connections (against our own pool) all at once.
 CHECK_CONCURRENCY = 15
-
-# How often the worker polls the DB for targets whose next_check_at is due. Deliberately much
-# shorter than CHECK_INTERVAL_SECONDS (the normal per-target recheck cadence): with per-target
-# scheduling, a failing target's backoff delay can be as short as ~30s (see backoff.py), and a
-# 300s outer poll would flatten that back down to "retry every 5 minutes regardless," defeating
-# the point of backing off gradually. A 5s poll against an indexed next_check_at column is
-# trivial at this scale (a single user's targets).
-SCHEDULER_TICK_SECONDS = 5
 
 # Postgres NOTIFY channel used to tell the backend a check just landed, for its SSE push to
 # connected dashboards (backend/realtime.py). The payload sent on this channel is
@@ -119,7 +112,7 @@ async def ensure_schedule_rows(conn: asyncpg.Connection, region: str) -> None:
     )
 
 
-async def claim_due_targets(conn: asyncpg.Connection, region: str) -> list[dict]:
+async def claim_due_targets(conn: asyncpg.Connection, region: str, grace_seconds: int = 0) -> list[dict]:
     """
     Select this region's targets currently due for a check and claim them, atomically, so a
     concurrent worker instance in the same region can never come back with the same target.
@@ -135,7 +128,10 @@ async def claim_due_targets(conn: asyncpg.Connection, region: str) -> list[dict]
 
     A schedule row is "due" if its next_check_at says so AND it isn't currently claimed by a
     still-live claim: claimed_at is either NULL (never claimed / already cleared after a prior
-    check) or older than CLAIM_TTL_SECONDS (stale — treat as abandoned).
+    check) or older than CLAIM_TTL_SECONDS (stale — treat as abandoned). grace_seconds widens
+    "due" to rows coming due that many seconds from now; it's 0 everywhere except the first
+    pass of an idle-mode burst (see scheduler.py). Claiming only ever stamps claimed_at; it
+    never moves next_check_at.
 
     Also selects each target's request-customization fields (Phase 6, prompt 6.2:
     request_method/request_headers/basic_auth_*/keyword_match*) and its pause/interval fields
@@ -157,12 +153,13 @@ async def claim_due_targets(conn: asyncpg.Connection, region: str) -> list[dict]
             JOIN targets t ON t.id = trs.target_id
             WHERE trs.region = $1
               AND NOT t.paused
-              AND trs.next_check_at <= now()
+              AND trs.next_check_at <= now() + make_interval(secs => $3)
               AND (trs.claimed_at IS NULL OR trs.claimed_at < now() - make_interval(secs => $2))
             FOR UPDATE OF trs SKIP LOCKED
             """,
             region,
             CLAIM_TTL_SECONDS,
+            grace_seconds,
         )
         if rows:
             await conn.execute(
@@ -171,6 +168,31 @@ async def claim_due_targets(conn: asyncpg.Connection, region: str) -> list[dict]
                 [row["id"] for row in rows],
             )
     return [dict(row) for row in rows]
+
+
+async def seconds_until_failing_due(
+    conn: asyncpg.Connection, region: str, max_failures: int = IN_BURST_RETRY_MAX_FAILURES
+) -> float | None:
+    """Seconds until the soonest claimable schedule row for this region that has just started
+    failing (1 to max_failures consecutive failures) comes due; negative if one is already due,
+    None if there's no such row. Lets an idle-mode burst decide whether a just-failed target's
+    backoff retry lands before the burst ends, without holding the burst open for healthy
+    targets or for long-failing ones that are backing off ~15 minutes at a time. Uses the same
+    claimability rules as claim_due_targets (not paused, no live claim)."""
+    return await conn.fetchval(
+        """
+        SELECT EXTRACT(EPOCH FROM (min(trs.next_check_at) - now()))::float8
+        FROM target_region_schedule trs
+        JOIN targets t ON t.id = trs.target_id
+        WHERE trs.region = $1
+          AND NOT t.paused
+          AND trs.consecutive_failures BETWEEN 1 AND $3
+          AND (trs.claimed_at IS NULL OR trs.claimed_at < now() - make_interval(secs => $2))
+        """,
+        region,
+        CLAIM_TTL_SECONDS,
+        max_failures,
+    )
 
 
 async def insert_check(
@@ -393,17 +415,18 @@ async def check_one(
             )
 
 
-async def run_cycle(pool: asyncpg.Pool, client: httpx.AsyncClient) -> None:
+async def run_cycle(pool: asyncpg.Pool, client: httpx.AsyncClient, grace_seconds: int = 0) -> int:
     """Claim this worker's region's targets currently due for a check and check them
     concurrently (bounded by CHECK_CONCURRENCY) — targets not yet due, or already claimed by
     another still-live worker in the same region, are left alone until their next_check_at (or
-    claim) expires."""
+    claim) expires. Returns how many targets were claimed. Every check it starts has finished
+    by the time it returns."""
     region = settings.REGION
     async with pool.acquire() as conn:
-        targets = await claim_due_targets(conn, region)
+        targets = await claim_due_targets(conn, region, grace_seconds)
     if not targets:
         logger.debug("[region=%s] No targets due for a check", region)
-        return
+        return 0
     semaphore = asyncio.Semaphore(CHECK_CONCURRENCY)
     await asyncio.gather(
         *(
@@ -426,55 +449,63 @@ async def run_cycle(pool: asyncpg.Pool, client: httpx.AsyncClient) -> None:
             for row in targets
         )
     )
+    return len(targets)
+
+
+async def create_pool(min_size: int | None = None) -> asyncpg.Pool:
+    """A connection pool for this worker. min_size=0 opens nothing until the first query (used
+    for idle-mode bursts); None keeps asyncpg's default (the long-lived live-mode pool).
+    application_name tags every pooled connection in pg_stat_activity by region, so it's
+    possible to see exactly which process is holding a connection open."""
+    kwargs = {} if min_size is None else {"min_size": min_size}
+    return await asyncpg.create_pool(
+        settings.asyncpg_database_url,
+        init=_init_connection,
+        server_settings={"application_name": f"worker-{settings.REGION}"},
+        **kwargs,
+    )
 
 
 async def main() -> None:
     logger.info(
-        "Worker starting (region=%s, interval=%ss, tick=%ss, timeout=%ss, concurrency=%s, "
-        "retention_days=%s)",
+        "Worker starting (region=%s, interval=%ss, tick=%ss, burst_interval=%ss, timeout=%ss, "
+        "concurrency=%s, retention_days=%s, backend_url=%s)",
         settings.REGION,
         settings.CHECK_INTERVAL_SECONDS,
         SCHEDULER_TICK_SECONDS,
+        settings.BURST_INTERVAL_SECONDS,
         settings.HTTP_TIMEOUT_SECONDS,
         CHECK_CONCURRENCY,
         settings.CHECKS_RETENTION_DAYS,
+        settings.BACKEND_URL or "unset",
     )
-    # application_name tags every pooled connection in pg_stat_activity by region, so it's
-    # possible to see exactly which process is holding a connection open.
-    pool = await asyncpg.create_pool(
-        settings.asyncpg_database_url,
-        init=_init_connection,
-        server_settings={"application_name": f"worker-{settings.REGION}"},
-    )
-    # Retention (Phase 6, prompt 6.8) runs as a second, independent task for the life of the
-    # process — started here, before the check-cycle loop below, and cancelled in `finally`
-    # alongside closing the pool. It never nests inside run_cycle()/the check loop and shares
-    # nothing with it but the connection pool — see retention.py's module docstring for exactly
-    # why that's safe with respect to Phase 2's row-claiming.
-    retention_task = asyncio.create_task(run_retention_loop(pool))
-    try:
-        # max_keepalive_connections=0: force a brand-new TCP+TLS connection for every single
-        # request instead of reusing a pooled one. A reused connection would skip the
-        # connect_tcp/start_tls trace events entirely, silently leaving tcp_ms/tls_ms null on
-        # any check that happens to land on a still-warm connection — unacceptable for a
-        # timing breakdown that's supposed to measure real connection-establishment cost on
-        # every check, not whatever the pool happened to have lying around.
-        async with httpx.AsyncClient(
-            timeout=settings.HTTP_TIMEOUT_SECONDS,
-            verify=settings.HTTP_VERIFY_SSL,
-            limits=httpx.Limits(max_keepalive_connections=0),
-        ) as client:
-            while True:
-                try:
-                    await run_cycle(pool, client)
-                except Exception as e:
-                    logger.exception("Cycle failed: %s", e)
-                await asyncio.sleep(SCHEDULER_TICK_SECONDS)
-    finally:
-        retention_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await retention_task
-        await pool.close()
+    region = settings.REGION
+    # max_keepalive_connections=0: force a brand-new TCP+TLS connection for every single
+    # request instead of reusing a pooled one. A reused connection would skip the
+    # connect_tcp/start_tls trace events entirely, silently leaving tcp_ms/tls_ms null on
+    # any check that happens to land on a still-warm connection — unacceptable for a
+    # timing breakdown that's supposed to measure real connection-establishment cost on
+    # every check, not whatever the pool happened to have lying around.
+    async with httpx.AsyncClient(
+        timeout=settings.HTTP_TIMEOUT_SECONDS,
+        verify=settings.HTTP_VERIFY_SSL,
+        limits=httpx.Limits(max_keepalive_connections=0),
+    ) as client, httpx.AsyncClient(follow_redirects=False) as backend_client:
+
+        async def failing_due(pool: asyncpg.Pool) -> float | None:
+            async with pool.acquire() as conn:
+                return await seconds_until_failing_due(conn, region)
+
+        scheduler = Scheduler(
+            region=region,
+            burst_interval=settings.BURST_INTERVAL_SECONDS,
+            create_pool=create_pool,
+            run_cycle=lambda pool, grace: run_cycle(pool, client, grace),
+            seconds_until_failing_due=failing_due,
+            prune=lambda pool: prune_old_checks(pool, settings.CHECKS_RETENTION_DAYS),
+            watching=WatchingProbe(settings.BACKEND_URL, settings.INTERNAL_API_SECRET, backend_client),
+        )
+        await scheduler.run_forever()
 
 
 if __name__ == "__main__":

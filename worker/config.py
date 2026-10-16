@@ -46,6 +46,19 @@ class Settings(BaseSettings):
     # requested range predates what's actually still on disk.
     CHECKS_RETENTION_DAYS: int = 90
 
+    # Where to ask whether anyone is watching the site (GET {BACKEND_URL}/internal/watching),
+    # and the shared secret sent in its X-Internal-Secret header (same value as the API's
+    # INTERNAL_API_SECRET). Both optional: if either is missing, or the backend can't be
+    # reached, the worker stays in idle mode (see scheduler.py). It never falls back to
+    # continuous checking because of a failure.
+    BACKEND_URL: str | None = None
+    INTERNAL_API_SECRET: str | None = None
+
+    # Idle mode checks everything in short bursts that start on multiples of this many seconds
+    # since the Unix epoch, so every region wakes at the same moments and the database can sleep
+    # in between. Must be the same value on every worker.
+    BURST_INTERVAL_SECONDS: int = 900
+
     @property
     def asyncpg_database_url(self) -> str:
         return _strip_asyncpg_dialect_suffix(self.DATABASE_URL)

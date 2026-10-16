@@ -138,7 +138,10 @@ both worker services in Docker Compose) is the one place these are actually set 
 | `HTTP_TIMEOUT_SECONDS` | `10` | Per-request timeout. |
 | `HTTP_VERIFY_SSL` | `true` | Set `false` only for local testing against a self-signed cert. |
 | `REGION` | `local` | Identity tagged onto every check row and log line. Set a distinct value per worker instance once more than one runs. Docker Compose already sets `worker-eu-west` to `eu-west`. |
-| `CHECKS_RETENTION_DAYS` | `90` | How many days of check history the worker actually keeps before pruning. |
+| `CHECKS_RETENTION_DAYS` | `90` | How many days of check history the worker actually keeps before pruning. Pruning runs once per UTC day, in the first claim pass after midnight. |
+| `BACKEND_URL` | unset | Base URL of the API, polled at `/internal/watching` to decide between live mode (someone is watching: checks run continuously) and idle mode (bursts only). Docker Compose sets it to `http://api:8000`. Unset means idle mode. |
+| `INTERNAL_API_SECRET` | unset | Same value as the API's `INTERNAL_API_SECRET`, sent in the `X-Internal-Secret` header. Unset means idle mode. |
+| `BURST_INTERVAL_SECONDS` | `900` | Idle-mode bursts start on multiples of this many seconds since the Unix epoch, so every region wakes together. Must be the same on every worker. |
 
 ### Frontend
 

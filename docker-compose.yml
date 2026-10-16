@@ -54,6 +54,9 @@ services:
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
       REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
       REGION: local
+      # Asks the api service whether anyone is watching (idle vs. live scheduling, see
+      # worker/scheduler.py). INTERNAL_API_SECRET comes from .env, same value as the api's.
+      BACKEND_URL: http://api:8000
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -86,6 +89,9 @@ services:
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
       REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
       REGION: eu-west
+      # Asks the api service whether anyone is watching (idle vs. live scheduling, see
+      # worker/scheduler.py). INTERNAL_API_SECRET comes from .env, same value as the api's.
+      BACKEND_URL: http://api:8000
     dns:
       - 8.8.8.8
       - 8.8.4.4

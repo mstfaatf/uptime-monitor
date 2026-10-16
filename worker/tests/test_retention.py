@@ -16,7 +16,7 @@ scope.
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
-from retention import RETENTION_INTERVAL_SECONDS, prune_old_checks
+from retention import prune_old_checks
 
 
 class _AsyncContextManagerMock:
@@ -89,9 +89,3 @@ async def test_prune_old_checks_parses_command_status_robustly():
     deleted = await prune_old_checks(pool, retention_days=90)
 
     assert deleted == 0
-
-
-def test_retention_interval_is_roughly_a_day():
-    """A basic sanity check on the constant itself — the prompt's "coarse ~24h timer"
-    requirement, not just a magic number."""
-    assert RETENTION_INTERVAL_SECONDS == 24 * 60 * 60
