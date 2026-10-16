@@ -72,6 +72,12 @@ def unsubscribe(user_id: int, queue: asyncio.Queue) -> None:
         _subscribers.pop(user_id, None)
 
 
+def has_subscribers() -> bool:
+    """True if any user currently has an SSE stream open. In-memory only, no database access
+    (read by GET /internal/watching)."""
+    return bool(_subscribers)
+
+
 def _publish(user_id: int, payload: dict) -> None:
     """Put payload on every queue this user currently has open. A no-op if the user has no
     connected stream — the update is simply not pushed; GET /targets/status still has it."""

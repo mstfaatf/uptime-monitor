@@ -13,7 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 import realtime
 from config import settings
 from rate_limit import limiter
-from routers import api_keys, auth, tags, targets, webhooks
+from routers import api_keys, auth, internal, tags, targets, webhooks
 
 
 @asynccontextmanager
@@ -77,6 +77,7 @@ app.include_router(targets.router)
 app.include_router(tags.router)
 app.include_router(webhooks.router)
 app.include_router(api_keys.router)
+app.include_router(internal.router)
 
 
 @app.get("/health")

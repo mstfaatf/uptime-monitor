@@ -101,6 +101,15 @@ class Settings(BaseSettings):
     # export note's threshold would silently disagree with what's actually pruned.
     CHECKS_RETENTION_DAYS: int = 90
 
+    # Shared secret the workers send in the X-Internal-Secret header to GET /internal/watching
+    # (routers/internal.py). Must be the same value on the API and both workers. Optional: when
+    # unset or empty the endpoint answers 404, and the workers fall back to their slow schedule.
+    # Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+    INTERNAL_API_SECRET: str | None = None
+    # How long after a cookie-authenticated request the site still counts as being watched
+    # (activity.py), alongside any open SSE stream.
+    WATCHING_WINDOW_SECONDS: int = 300
+
     @model_validator(mode="after")
     def _enforce_secure_cookie_settings_in_production(self) -> "Settings":
         """ENVIRONMENT=production always gets a secure, cross-site-capable cookie, even if

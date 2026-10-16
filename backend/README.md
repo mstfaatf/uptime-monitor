@@ -159,6 +159,8 @@ requirement and works fine over a pooled connection; only the receiving `LISTEN`
    | `FRONTEND_URL` | Base URL used to build links in outgoing email (detail page, settings, password reset) | `http://localhost:3000` |
    | `RESEND_API_KEY` | Resend API key for transactional email (downtime/cert-expiry alerts, password reset) | unset — email sending no-ops (logged, not sent) rather than failing |
    | `RESEND_FROM_EMAIL` | Sender identity for outgoing mail | `Uptime Monitor <onboarding@resend.dev>` (Resend's sandbox address; works without a verified domain) |
+   | `INTERNAL_API_SECRET` | Shared secret the workers send in the `X-Internal-Secret` header to `GET /internal/watching`. Must match the workers' value. | unset, which makes the endpoint return 404 |
+   | `WATCHING_WINDOW_SECONDS` | How long after a cookie-authenticated request the site still counts as being watched (an open SSE stream always counts). API-key requests never count. | `300` |
 
    Example `backend/.env`:
 
@@ -250,6 +252,7 @@ does):
 | `RESEND_FROM_EMAIL` | `Uptime Monitor <onboarding@resend.dev>` (sandbox address — no custom domain verified yet) |
 | `CORS_ORIGINS` | `http://localhost:3000` for now (still verifying cross-origin behavior locally); update to the real Vercel domain once the frontend is deployed |
 | `FRONTEND_URL` | same as `CORS_ORIGINS` for now — update together |
+| `INTERNAL_API_SECRET` | freshly generated with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Set the same value on both worker services once they poll `GET /internal/watching`. |
 
 Not set (safe defaults apply): `JWT_ALGORITHM`, `JWT_EXPIRE_MINUTES`, `COOKIE_NAME`,
 `COOKIE_HTTP_ONLY`, `COOKIE_MAX_AGE`, `DOWNTIME_ALERT_COOLDOWN_SECONDS`, `CERT_EXPIRY_WARN_DAYS`,

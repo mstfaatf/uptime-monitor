@@ -120,6 +120,8 @@ both worker services in Docker Compose) is the one place these are actually set 
 | `CERT_EXPIRY_WARN_DAYS` | `14` | How many days out a certificate's expiry starts alerting. |
 | `CERT_EXPIRY_REMINDER_COOLDOWN_DAYS` | `3` | How often an unrenewed, still-expiring certificate re-alerts. |
 | `CHECKS_RETENTION_DAYS` | `90` | Informational on the backend, used only to annotate CSV exports. The worker's own copy of this setting is what actually prunes. |
+| `INTERNAL_API_SECRET` | unset | Shared secret for `GET /internal/watching`, sent by the workers in the `X-Internal-Secret` header. With no value set, the endpoint returns 404. Must match the workers' value. |
+| `WATCHING_WINDOW_SECONDS` | `300` | How long after a cookie-authenticated request the site still counts as being watched. An open SSE stream always counts; API-key requests never do. |
 
 ### Worker (required, no default)
 

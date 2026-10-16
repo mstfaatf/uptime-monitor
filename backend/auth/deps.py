@@ -4,6 +4,7 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import activity
 from auth.cookies import read_session_token
 from config import settings
 from database import AsyncSessionLocal, get_db
@@ -30,6 +31,9 @@ async def _user_from_session_cookie(request: Request, session: AsyncSession) -> 
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    # Only a cookie that resolves to a real user counts as someone using the site. API-key
+    # requests never reach this function, and failed lookups raise above before getting here.
+    activity.record_cookie_activity()
     return user
 
 
