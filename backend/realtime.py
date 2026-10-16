@@ -40,6 +40,7 @@ import math
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 import asyncpg
 from sqlalchemy import select, text
@@ -61,15 +62,31 @@ RECONNECT_DELAY_SECONDS = 1
 # When the LISTEN connection is held (see ListenerController.should_be_open):
 # - from LISTEN_LEAD_SECONDS before each worker burst boundary (multiples of
 #   BURST_INTERVAL_SECONDS since the Unix epoch, the same instants the workers compute) until
-#   LISTEN_BURST_WINDOW_SECONDS after it. 150s is the workers' 90s burst cap plus time for the
-#   checks started in a burst's last pass to finish (up to five redirect hops at the default
-#   10s timeout). The 30s lead gives the database time to wake and the connection time to open.
-# - while anyone is watching (is_watching), and for LISTEN_QUIET_SECONDS after that stops: a
-#   worker in live mode keeps checking until two of its 30s-apart polls say nobody's watching.
-# - for LISTEN_QUIET_SECONDS after the last NOTIFY, and while any notification is being handled.
-LISTEN_LEAD_SECONDS = 30
-LISTEN_BURST_WINDOW_SECONDS = 150
-LISTEN_QUIET_SECONDS = 120
+#   LISTEN_BURST_WINDOW_SECONDS after it. A healthy burst finishes in about a second; the lead
+#   covers the database waking and the connection opening, and anything that still slips
+#   through is replayed by the catch-up on the next open.
+# - for LISTEN_NOTIFY_QUIET_SECONDS after the last NOTIFY.
+# - while a burst may still retry a target that just started failing: the worker retries such a
+#   target (1 to IN_BURST_RETRY_MAX_FAILURES consecutive failures) once its backoff (about 30s,
+#   then about 60s) comes due, up to WORKER_BURST_MAX_SECONDS after the boundary. Those retries
+#   can be more than LISTEN_NOTIFY_QUIET_SECONDS apart and later than the window, so a handled
+#   check like that holds LISTEN open until WORKER_BURST_MAX_SECONDS + LISTEN_NOTIFY_QUIET_SECONDS
+#   after its burst's boundary. Both mirror worker/scheduler.py's BURST_MAX_SECONDS and
+#   IN_BURST_RETRY_MAX_FAILURES, kept in sync by hand like the other cross-service constants.
+# - while anyone is watching (is_watching), and for LISTEN_WATCHING_QUIET_SECONDS after that
+#   stops: a worker in live mode keeps checking until two of its 30s-apart polls say nobody's
+#   watching.
+# - while any notification or catch-up is being handled.
+LISTEN_LEAD_SECONDS = 10
+LISTEN_BURST_WINDOW_SECONDS = 60
+LISTEN_NOTIFY_QUIET_SECONDS = 30
+LISTEN_WATCHING_QUIET_SECONDS = 120
+WORKER_BURST_MAX_SECONDS = 90
+IN_BURST_RETRY_MAX_FAILURES = 2
+# At startup the catch-up watermark starts at the newest check older than this, not the newest
+# check, so an API restart (a deploy, a crash) in the middle of a burst still replays that
+# burst's checks. Replays are safe (see _handle_notification).
+STARTUP_REPLAY_SECONDS = 600
 # How often the controller re-evaluates when nothing wakes it. In-memory only; no database.
 CONTROL_TICK_SECONDS = 1
 # Catch-up after a gap reads at most this many checks per query, looping until caught up.
@@ -326,14 +343,24 @@ async def _evaluate_cert_expiry_alert(
         row.last_cert_expires_at = check.tls_cert_expires_at
 
 
-async def _handle_notification(payload: str) -> int | None:
+class HandledCheck(NamedTuple):
+    """What _handle_notification evaluated: the check's id (for the catch-up watermark), and
+    whether the worker may retry this target within the same burst (it failed and has only just
+    started failing), which keeps LISTEN open for the retry."""
+
+    check_id: int
+    retry_pending: bool
+
+
+async def _handle_notification(payload: str) -> HandledCheck | None:
     """Resolve a notified target_id to its owner and publish the same status payload the
     REST endpoint would return for it (every region's latest check), so the frontend never
     needs a follow-up fetch. payload is "{target_id}:{region}"; region is carried through into
     the published event purely to say which region's check triggered it.
 
-    Returns the id of that region's latest check (the one evaluated), or None if there was
-    nothing to handle, so the LISTEN controller can advance its catch-up watermark.
+    Returns a HandledCheck for that region's latest check (the one evaluated), or None if
+    there was nothing to handle, so the LISTEN controller can advance its catch-up watermark and
+    know whether a retry may follow within the burst.
 
     Safe to run more than once for the same check, which the catch-up replay relies on: alert
     evaluation compares against alert_history (still down / already recovered / cert reminder
@@ -398,7 +425,10 @@ async def _handle_notification(payload: str) -> int | None:
                 )
 
     _publish(target.user_id, {"type": "check_update", "region": region, "target": payload_dict})
-    return check.id if check is not None else None
+    if check is None:
+        return None
+    failures = failures_by_target[target_id].get(region) or 0
+    return HandledCheck(check.id, (not check.is_up) and 1 <= failures <= IN_BURST_RETRY_MAX_FAILURES)
 
 
 async def _connect_listen() -> asyncpg.Connection:
@@ -411,9 +441,14 @@ async def _connect_listen() -> asyncpg.Connection:
     )
 
 
-async def _fetch_max_check_id() -> int:
+async def _fetch_start_watermark() -> int:
+    """The newest check id older than STARTUP_REPLAY_SECONDS (0 if there is none), so the
+    first catch-up replays whatever the last few minutes wrote."""
     async with AsyncSessionLocal() as session:
-        result = await session.execute(text("SELECT coalesce(max(id), 0) FROM checks"))
+        result = await session.execute(
+            text("SELECT coalesce(max(id), 0) FROM checks WHERE checked_at < now() - make_interval(secs => :secs)"),
+            {"secs": STARTUP_REPLAY_SECONDS},
+        )
         return int(result.scalar_one())
 
 
@@ -441,8 +476,9 @@ class ListenerController:
     - Every time the connection opens (first open, reopen, or reconnect after a drop) it runs
       LISTEN first, then replays every check with an id above the watermark (the last check id
       handled) through _handle_notification, oldest first, in batches. Handled NOTIFYs advance
-      the watermark too. A replay of something already handled is harmless (see
-      _handle_notification's docstring).
+      the watermark too. At startup the watermark is set STARTUP_REPLAY_SECONDS back and a
+      catch-up runs straight away, so a restart during a burst replays that burst. A replay of
+      something already handled is harmless (see _handle_notification's docstring).
 
     Everything the controller touches outside memory is injected, so the tests can drive it with
     a fake clock and fake connection.
@@ -454,8 +490,8 @@ class ListenerController:
         burst_interval: int,
         connect: Callable[[], Awaitable[asyncpg.Connection]] = _connect_listen,
         watching: Callable[[], bool] = is_watching,
-        handle: Callable[[str], Awaitable[int | None]] = _handle_notification,
-        fetch_max_check_id: Callable[[], Awaitable[int]] = _fetch_max_check_id,
+        handle: Callable[[str], Awaitable[HandledCheck | None]] = _handle_notification,
+        fetch_start_watermark: Callable[[], Awaitable[int]] = _fetch_start_watermark,
         fetch_checks_after: Callable[[int, int], Awaitable[list[tuple[int, int, str]]]] = _fetch_checks_after,
         now: Callable[[], float] = time.time,
     ):
@@ -463,13 +499,14 @@ class ListenerController:
         self._connect = connect
         self._watching = watching
         self._handle = handle
-        self._fetch_max_check_id = fetch_max_check_id
+        self._fetch_start_watermark = fetch_start_watermark
         self._fetch_checks_after = fetch_checks_after
         self._now = now
         self._conn = None
         self.watermark: int | None = None
         self._last_notify_at: float | None = None
         self._last_watching_at: float | None = None
+        self._retry_hold_until: float | None = None
         self._in_flight = 0
         self._tasks: set[asyncio.Task] = set()
         self._next_attempt_at = 0.0
@@ -497,17 +534,33 @@ class ListenerController:
             return True
         if self.in_burst_window(now):
             return True
-        if self._last_watching_at is not None and now - self._last_watching_at < LISTEN_QUIET_SECONDS:
+        if self._last_watching_at is not None and now - self._last_watching_at < LISTEN_WATCHING_QUIET_SECONDS:
             return True
-        if self._last_notify_at is not None and now - self._last_notify_at < LISTEN_QUIET_SECONDS:
+        if self._last_notify_at is not None and now - self._last_notify_at < LISTEN_NOTIFY_QUIET_SECONDS:
+            return True
+        if self._retry_hold_until is not None and now < self._retry_hold_until:
             return True
         return False
 
+    def _note_handled(self, handled: HandledCheck | None) -> None:
+        """Advance the watermark, and hold LISTEN open for an in-burst retry if one may come."""
+        if handled is None:
+            return
+        if self.watermark is None or handled.check_id > self.watermark:
+            self.watermark = handled.check_id
+        if handled.retry_pending:
+            now = self._now()
+            boundary = math.floor(now / self._burst_interval) * self._burst_interval
+            if now - boundary <= WORKER_BURST_MAX_SECONDS:
+                hold_until = boundary + WORKER_BURST_MAX_SECONDS + LISTEN_NOTIFY_QUIET_SECONDS
+                if self._retry_hold_until is None or hold_until > self._retry_hold_until:
+                    self._retry_hold_until = hold_until
+
     async def initialize_watermark(self) -> None:
         try:
-            self.watermark = await self._fetch_max_check_id()
+            self.watermark = await self._fetch_start_watermark()
         except Exception:
-            logger.exception("Couldn't read the latest check id; it will be read on the first LISTEN open")
+            logger.exception("Couldn't read the starting check id; it will be read on the first LISTEN open")
 
     async def step(self) -> None:
         """One open/close decision."""
@@ -551,8 +604,7 @@ class ListenerController:
         self._in_flight += 1
         try:
             if self.watermark is None:
-                self.watermark = await self._fetch_max_check_id()
-                return
+                self.watermark = await self._fetch_start_watermark()
             replayed = 0
             while True:
                 rows = await self._fetch_checks_after(self.watermark, CATCHUP_BATCH_SIZE)
@@ -564,7 +616,7 @@ class ListenerController:
                 for check_id, target_id, region in rows:
                     newest[(target_id, region)] = check_id
                 for (target_id, region), check_id in sorted(newest.items(), key=lambda item: item[1]):
-                    await self._handle(f"{target_id}:{region}")
+                    self._note_handled(await self._handle(f"{target_id}:{region}"))
                     replayed += 1
                 self.watermark = max(self.watermark, rows[-1][0])
                 if len(rows) < CATCHUP_BATCH_SIZE:
@@ -588,9 +640,7 @@ class ListenerController:
 
     async def _run_handler(self, payload: str) -> None:
         try:
-            check_id = await self._handle(payload)
-            if check_id is not None and (self.watermark is None or check_id > self.watermark):
-                self.watermark = check_id
+            self._note_handled(await self._handle(payload))
         except Exception:
             logger.exception("Handling check notification %r failed", payload)
         finally:
@@ -600,6 +650,10 @@ class ListenerController:
     async def run(self) -> None:
         """Runs for the life of the process (started from main.py's lifespan)."""
         await self.initialize_watermark()
+        if self.watermark is not None:
+            # Replay the last STARTUP_REPLAY_SECONDS now, whether or not LISTEN is due to open,
+            # so a burst interrupted by this process restarting still gets its alerts.
+            await self._catch_up()
         try:
             while True:
                 self._wake.clear()

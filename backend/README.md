@@ -161,7 +161,7 @@ requirement and works fine over a pooled connection; only the receiving `LISTEN`
    | `RESEND_FROM_EMAIL` | Sender identity for outgoing mail | `Uptime Monitor <onboarding@resend.dev>` (Resend's sandbox address; works without a verified domain) |
    | `INTERNAL_API_SECRET` | Shared secret the workers send in the `X-Internal-Secret` header to `GET /internal/watching`. Must match the workers' value. | unset, which makes the endpoint return 404 |
    | `WATCHING_WINDOW_SECONDS` | How long after a cookie-authenticated request the site still counts as being watched (an open SSE stream always counts). API-key requests never count. | `300` |
-   | `BURST_INTERVAL_SECONDS` | The workers' idle-mode burst interval. The API opens its LISTEN connection 30s before each multiple of it since the Unix epoch and keeps it through the burst, so no check notification is sent with nobody listening. Must match the workers' value. | `900` |
+   | `BURST_INTERVAL_SECONDS` | The workers' idle-mode burst interval. The API opens its LISTEN connection 10s before each multiple of it since the Unix epoch and keeps it through the burst, so no check notification is sent with nobody listening. Must match the workers' value. | `900` |
 
    Example `backend/.env`:
 
