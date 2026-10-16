@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     # How long after a cookie-authenticated request the site still counts as being watched
     # (activity.py), alongside any open SSE stream.
     WATCHING_WINDOW_SECONDS: int = 300
+    # The workers' idle-mode burst interval (worker/config.py's own copy is what they use). Must
+    # be the same value here: realtime.py opens the LISTEN connection shortly before each
+    # multiple of it since the Unix epoch, so a burst's NOTIFYs are never sent with nobody
+    # listening.
+    BURST_INTERVAL_SECONDS: int = 900
 
     @model_validator(mode="after")
     def _enforce_secure_cookie_settings_in_production(self) -> "Settings":

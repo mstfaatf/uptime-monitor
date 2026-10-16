@@ -2,7 +2,7 @@
 
 GET /internal/watching tells a worker whether anyone is currently using the site, so it can
 choose between checking continuously and checking on a slow schedule that lets the database go
-idle. It answers entirely from in-process memory (realtime.py's SSE subscribers and
+idle. It answers entirely from in-process memory (realtime.is_watching: SSE subscribers and
 activity.py's last cookie-authenticated request) and must never touch the database: a worker
 polling it while nobody is around must not be the thing that keeps the database awake.
 
@@ -16,7 +16,6 @@ import hmac
 
 from fastapi import APIRouter, Header, HTTPException, status
 
-import activity
 import realtime
 from config import settings
 
@@ -36,4 +35,4 @@ async def watching(x_internal_secret: str | None = Header(default=None, alias="X
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
     if x_internal_secret is None or not hmac.compare_digest(x_internal_secret.encode(), expected.encode()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-    return {"watching": realtime.has_subscribers() or activity.recently_active()}
+    return {"watching": realtime.is_watching()}

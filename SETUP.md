@@ -122,6 +122,7 @@ both worker services in Docker Compose) is the one place these are actually set 
 | `CHECKS_RETENTION_DAYS` | `90` | Informational on the backend, used only to annotate CSV exports. The worker's own copy of this setting is what actually prunes. |
 | `INTERNAL_API_SECRET` | unset | Shared secret for `GET /internal/watching`, sent by the workers in the `X-Internal-Secret` header. With no value set, the endpoint returns 404. Must match the workers' value. |
 | `WATCHING_WINDOW_SECONDS` | `300` | How long after a cookie-authenticated request the site still counts as being watched. An open SSE stream always counts; API-key requests never do. |
+| `BURST_INTERVAL_SECONDS` | `900` | The workers' idle-mode burst interval. The API holds its LISTEN connection from 30s before each burst boundary until 150s after it, plus whenever anyone is watching, so it must match the workers' value. |
 
 ### Worker (required, no default)
 

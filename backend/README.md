@@ -161,6 +161,7 @@ requirement and works fine over a pooled connection; only the receiving `LISTEN`
    | `RESEND_FROM_EMAIL` | Sender identity for outgoing mail | `Uptime Monitor <onboarding@resend.dev>` (Resend's sandbox address; works without a verified domain) |
    | `INTERNAL_API_SECRET` | Shared secret the workers send in the `X-Internal-Secret` header to `GET /internal/watching`. Must match the workers' value. | unset, which makes the endpoint return 404 |
    | `WATCHING_WINDOW_SECONDS` | How long after a cookie-authenticated request the site still counts as being watched (an open SSE stream always counts). API-key requests never count. | `300` |
+   | `BURST_INTERVAL_SECONDS` | The workers' idle-mode burst interval. The API opens its LISTEN connection 30s before each multiple of it since the Unix epoch and keeps it through the burst, so no check notification is sent with nobody listening. Must match the workers' value. | `900` |
 
    Example `backend/.env`:
 
@@ -253,6 +254,7 @@ does):
 | `CORS_ORIGINS` | `http://localhost:3000` for now (still verifying cross-origin behavior locally); update to the real Vercel domain once the frontend is deployed |
 | `FRONTEND_URL` | same as `CORS_ORIGINS` for now — update together |
 | `INTERNAL_API_SECRET` | freshly generated with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Set the same value on both worker services once they poll `GET /internal/watching`. |
+| `BURST_INTERVAL_SECONDS` | optional, default `900`. If set, set the identical value on both worker services. |
 
 Not set (safe defaults apply): `JWT_ALGORITHM`, `JWT_EXPIRE_MINUTES`, `COOKIE_NAME`,
 `COOKIE_HTTP_ONLY`, `COOKIE_MAX_AGE`, `DOWNTIME_ALERT_COOLDOWN_SECONDS`, `CERT_EXPIRY_WARN_DAYS`,

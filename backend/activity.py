@@ -18,9 +18,13 @@ deployment runs exactly one API process; with several, each would only know abou
 traffic, and the endpoint would need a shared store instead.
 """
 
+import logging
 import time
+from collections.abc import Callable
 
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 # Indirection so tests can move time forward without patching time.monotonic itself, which the
 # event loop also relies on.
@@ -28,11 +32,31 @@ _clock = time.monotonic
 
 _last_cookie_activity: float | None = None
 
+# Called (synchronously, never awaited) after every recorded activity. realtime.py registers one
+# so the LISTEN connection opens the moment someone signs in, not on its next periodic check.
+_listeners: list[Callable[[], None]] = []
+
+
+def add_listener(callback: Callable[[], None]) -> None:
+    """Register a cheap, non-blocking callback to run whenever activity is recorded."""
+    _listeners.append(callback)
+
+
+def remove_listener(callback: Callable[[], None]) -> None:
+    if callback in _listeners:
+        _listeners.remove(callback)
+
 
 def record_cookie_activity() -> None:
     """Mark that a cookie-authenticated request just resolved to a real user."""
     global _last_cookie_activity
     _last_cookie_activity = _clock()
+    for callback in list(_listeners):
+        try:
+            callback()
+        except Exception:
+            # A listener must never be able to fail the request that recorded the activity.
+            logger.exception("Activity listener failed")
 
 
 def recently_active() -> bool:

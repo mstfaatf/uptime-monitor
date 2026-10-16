@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -15,18 +16,26 @@ from config import settings
 from rate_limit import limiter
 from routers import api_keys, auth, internal, tags, targets, webhooks
 
+# Uvicorn configures only its own loggers, so without this the app's INFO lines (LISTEN opening,
+# closing and catching up; alerts skipped or sent) never reach the container log. Uvicorn's
+# loggers don't propagate to the root logger, so nothing is printed twice.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run the Postgres LISTEN loop for the whole app lifetime, so realtime.py can push check
-    updates to connected SSE clients as soon as the worker commits them."""
-    listener_task = asyncio.create_task(realtime.run_listener())
+    """Run the LISTEN controller for the whole app lifetime. It holds the Postgres LISTEN
+    connection only while workers might be writing checks (see realtime.ListenerController), so
+    check updates reach SSE clients and alerting without keeping the database awake otherwise."""
+    controller = realtime.start_listener_controller()
+    listener_task = asyncio.create_task(controller.run())
     try:
         yield
     finally:
         listener_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await listener_task
+        realtime.stop_listener_controller()
 
 
 app = FastAPI(title="Uptime Monitor API", lifespan=lifespan)

@@ -1,11 +1,6 @@
 """Tests for realtime.py's pub/sub — the piece that guarantees a user only ever receives push
-updates for their own targets (Phase 1 prompt 1.5). The LISTEN/reconnect loop itself
-(run_listener) isn't exercised here beyond which connection string it opens — actually
-receiving a NOTIFY needs a live Postgres LISTEN connection and is covered by manual
-verification against the real stack instead."""
-
-import asyncio
-import contextlib
+updates for their own targets. When the LISTEN connection is open, and the catch-up replay, are
+covered in test_listener_controller.py; here only which connection string it opens."""
 
 import realtime
 from config import settings
@@ -85,7 +80,7 @@ async def test_handle_notification_ignores_non_numeric_target_id():
     await realtime._handle_notification("not-an-integer:local")  # must not raise
 
 
-async def test_run_listener_connects_with_listen_asyncpg_url_not_the_pooled_url(monkeypatch):
+async def test_listen_connection_uses_listen_asyncpg_url_not_the_pooled_url(monkeypatch):
     """Regression test for the Neon pooled-connection bug found in prompt 5.4: the LISTEN
     connection must come from settings.listen_asyncpg_url (LISTEN_DATABASE_URL, falling back
     to DATABASE_URL), never settings.asyncpg_database_url directly — a pooled connection
@@ -93,34 +88,17 @@ async def test_run_listener_connects_with_listen_asyncpg_url_not_the_pooled_url(
     monkeypatch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://pooled-host/db")
     monkeypatch.setattr(settings, "LISTEN_DATABASE_URL", "postgresql+asyncpg://direct-host/db")
 
-    connected_urls = []
-    connected_app_names = []
-
-    class _FakeConn:
-        def is_closed(self):
-            return False
-
-        async def add_listener(self, channel, callback):
-            pass
-
-        async def close(self):
-            pass
+    connected = []
 
     async def fake_connect(url, **kwargs):
-        connected_urls.append(url)
-        connected_app_names.append(kwargs.get("server_settings", {}).get("application_name"))
-        return _FakeConn()
+        connected.append((url, kwargs.get("server_settings", {}).get("application_name")))
+        return object()
 
     monkeypatch.setattr(realtime.asyncpg, "connect", fake_connect)
 
-    task = asyncio.create_task(realtime.run_listener())
-    await asyncio.sleep(0.05)  # let it connect and reach the inner "still open?" sleep loop
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    await realtime._connect_listen()
 
-    assert connected_urls == ["postgresql://direct-host/db"]
-    assert connected_app_names == ["api-listen"]
+    assert connected == [("postgresql://direct-host/db", "api-listen")]
 
 
 async def test_handle_notification_for_a_deleted_target_is_a_noop(client):
