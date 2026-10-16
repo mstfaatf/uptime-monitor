@@ -15,6 +15,7 @@ import { TagManagerModal } from "@/components/tag-manager-modal";
 import { TargetTagChips } from "@/components/target-tag-chips";
 import { Button } from "@/components/ui/button";
 import { LATENCY_WARN_MS, CERT_EXPIRY_WARN_DAYS, CONSECUTIVE_FAILURES_DOWN_THRESHOLD } from "@/lib/thresholds";
+import { useHiddenTabCutoff } from "@/lib/use-hidden-tab-cutoff";
 import type { Tag } from "@/lib/types";
 
 type LatestCheck = {
@@ -46,6 +47,32 @@ type TargetStatusRow = {
   latest_checks: Record<string, LatestCheck>;
   tags: Tag[];
 };
+
+function checkedAtMs(check: LatestCheck | undefined): number {
+  if (!check?.checked_at) return Number.NEGATIVE_INFINITY;
+  const ms = Date.parse(check.checked_at);
+  return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
+}
+
+// True if `candidate` is at least as recent as `known` (or nothing is known yet). A tie goes
+// to the candidate, since it's the later-arriving copy of the same check.
+function isAtLeastAsRecent(candidate: LatestCheck | undefined, known: LatestCheck | undefined): boolean {
+  return known === undefined || checkedAtMs(candidate) >= checkedAtMs(known);
+}
+
+// Per-region, newest-wins merge of latest_checks. The live stream and a refetch of
+// /targets/status can land in either order (a refetch started before an event can finish after
+// it), so neither is allowed to replace a region's check with an older one.
+function mergeLatestChecks(
+  known: Record<string, LatestCheck>,
+  incoming: Record<string, LatestCheck>
+): Record<string, LatestCheck> {
+  const merged = { ...known };
+  for (const [region, check] of Object.entries(incoming)) {
+    if (isAtLeastAsRecent(check, merged[region])) merged[region] = check;
+  }
+  return merged;
+}
 
 function formatTimestamp(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -163,6 +190,18 @@ export default function DashboardPage() {
 
   const [live, setLive] = useState(false);
 
+  // False once the tab has been hidden past HIDDEN_TAB_CUTOFF_MS, which closes the live stream
+  // (see the EventSource effect below) so a forgotten background tab stops counting as someone
+  // watching. needsResyncRef records that events may have been missed while it was closed.
+  const streamActive = useHiddenTabCutoff();
+  const needsResyncRef = useRef(false);
+  // Bumped after each refetch triggered by a reopened stream, to re-seed the toast baseline.
+  const [resyncCount, setResyncCount] = useState(0);
+  // Latest rendered items, for the stream handler to compare incoming checks against without
+  // making toast decisions inside a setState updater.
+  const itemsRef = useRef<TargetStatusRow[]>([]);
+  itemsRef.current = items;
+
   // The one deliberate motion moment on this page: rows light up top-to-bottom once on initial
   // load, then stay revealed for the rest of the session (including rows added later) — never
   // a per-row hover effect, never scroll-triggered.
@@ -209,7 +248,16 @@ export default function DashboardPage() {
         checksById = new Map(data.map((d) => [d.id, d.latest_checks]));
       }
 
-      setItems(targets.map((t) => ({ ...t, latest_checks: checksById.get(t.id) ?? {} })));
+      // GET /targets decides which targets exist and their names/tags; check data is merged
+      // newest-wins per region against what's already shown, so a live event that arrived
+      // while this request was in flight is never overwritten by this older snapshot.
+      setItems((prev) => {
+        const knownById = new Map(prev.map((item) => [item.id, item.latest_checks]));
+        return targets.map((t) => ({
+          ...t,
+          latest_checks: mergeLatestChecks(knownById.get(t.id) ?? {}, checksById.get(t.id) ?? {}),
+        }));
+      });
     } catch (err) {
       const res = await apiFetch("/auth/me").catch(() => null);
       if (res?.status === 401) setAuthFailed(true);
@@ -258,9 +306,11 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (loading) return;
-    // Seed the transition-tracking baseline from whatever the initial load returned, exactly
-    // once — so the first SSE push compares against real prior state instead of nothing (which
-    // would otherwise either toast a false "transition" from undefined, or never toast at all).
+    // Seed the transition-tracking baseline from whatever the initial load returned — so the
+    // first SSE push compares against real prior state instead of nothing (which would
+    // otherwise either toast a false "transition" from undefined, or never toast at all). Also
+    // re-seeded after each resync: changes that happened while the stream was closed show up in
+    // the rows, but aren't replayed as toasts, and the next live event compares against them.
     const next: Record<string, SignalState> = {};
     for (const item of items) {
       for (const [region, check] of Object.entries(item.latest_checks)) {
@@ -269,7 +319,19 @@ export default function DashboardPage() {
     }
     prevStatesRef.current = next;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading]);
+  }, [loading, resyncCount]);
+
+  useEffect(() => {
+    if (!streamActive) needsResyncRef.current = true;
+  }, [streamActive]);
+
+  // Refetch everything after a gap in the live stream, without touching `loading`: the page
+  // keeps showing what it has (no skeleton flash) and the merge in loadStatus keeps whichever
+  // copy of each check is newer.
+  const resync = useCallback(async () => {
+    await loadStatus();
+    setResyncCount((n) => n + 1);
+  }, [loadStatus]);
 
   // Real-time push: once the initial poll has confirmed we're authenticated, open an SSE
   // subscription for check-result updates on our own targets. The browser's EventSource
@@ -279,12 +341,26 @@ export default function DashboardPage() {
   // the target's full latest_checks map (every region, not just the one that changed — see
   // backend/realtime.py), so replacing the whole row is correct and never loses another
   // region's data.
+  //
+  // Only one EventSource exists at a time: this effect's cleanup closes the current one before
+  // a new one is created, and none is created while the tab is past the hidden cutoff. When a
+  // stream opens after a gap (the tab came back after the cutoff, or the browser reconnected
+  // after a drop), events may have been missed, so the page resyncs once the stream is open,
+  // not before, so nothing can slip between the refetch and the subscription.
   useEffect(() => {
-    if (loading || authFailed) return;
+    if (loading || authFailed || !streamActive) return;
 
     const es = new EventSource(`${API_BASE}/targets/stream`, { withCredentials: true });
+    let openedBefore = false;
 
-    es.onopen = () => setLive(true);
+    es.onopen = () => {
+      setLive(true);
+      if (openedBefore || needsResyncRef.current) {
+        needsResyncRef.current = false;
+        void resync();
+      }
+      openedBefore = true;
+    };
     es.onerror = () => setLive(false);
     es.onmessage = (event) => {
       try {
@@ -297,7 +373,10 @@ export default function DashboardPage() {
         // Compare each region's new state against what we last knew, and toast on a genuine
         // transition — only when there was a real prior state to transition from (the first
         // reading for a region is "new data," not a "change" worth interrupting anyone for).
+        // A region whose check is older than the one already shown is skipped entirely.
+        const shown = itemsRef.current.find((item) => item.id === message.target.id);
         for (const [region, check] of Object.entries(message.target.latest_checks)) {
+          if (!isAtLeastAsRecent(check, shown?.latest_checks[region])) continue;
           const key = `${message.target.id}:${region}`;
           const newState = deriveState(check);
           const prevState = prevStatesRef.current[key];
@@ -311,7 +390,14 @@ export default function DashboardPage() {
         // bare replace here would silently wipe a target's tags on every single live update.
         setItems((prev) =>
           prev.map((item) =>
-            item.id === message.target.id ? { ...item, ...message.target, tags: item.tags } : item
+            item.id === message.target.id
+              ? {
+                  ...item,
+                  ...message.target,
+                  latest_checks: mergeLatestChecks(item.latest_checks, message.target.latest_checks),
+                  tags: item.tags,
+                }
+              : item
           )
         );
       } catch {
@@ -323,7 +409,7 @@ export default function DashboardPage() {
       es.close();
       setLive(false);
     };
-  }, [loading, authFailed]);
+  }, [loading, authFailed, streamActive, resync]);
 
   async function handleLogout() {
     try {
