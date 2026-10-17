@@ -49,11 +49,47 @@ checks at a time) lets one process handle a real batch of targets in roughly one
 instead of one-by-one. A failing target backs off exponentially: 30s, 60s, 120s, 240s, 480s,
 capped at 900s. Each retry is jittered by ±20% so targets that start failing at the same
 moment, like a shared upstream DNS blip, don't all retry in perfect lockstep forever. A
-successful check resets the streak and returns to the normal cadence immediately. The outer
-scheduler polls for due work every 5 seconds, deliberately much shorter than the normal
-per-target interval. A flat 5-minute outer loop would have flattened every backoff step back
-down to "retry every 5 minutes regardless," which defeats the entire point of backing off
-gradually.
+successful check resets the streak and returns to the normal cadence immediately. While
+someone is using the site, the worker looks for due work every 5 seconds, much shorter than the
+normal per-target interval, so a 30 second backoff step really does retry after about 30
+seconds instead of waiting for the next 5-minute mark.
+
+### Viewer-aware scheduling: a database that sleeps when nobody is looking
+
+The database is Neon's serverless Postgres on its free tier. Compute there accrues for as long
+as the database is awake, and it only suspends after five minutes with no activity. A scheduler
+that touches the database every few seconds around the clock would keep it awake around the
+clock, about 180 compute-unit-hours a month at the smallest size, far past the free allowance.
+So the scheduler is built around one question: is anyone using the site right now?
+
+The backend answers it from memory. The site counts as watched while any live-update stream is
+open, or for 5 minutes after any cookie-authenticated request. API-key requests don't count, so
+a script polling the API can't hold the system awake. Workers ask over an internal endpoint
+protected by a shared secret, and any failure to get a clear answer counts as "no," so every
+failure mode falls back to the cheap behavior. A dashboard tab hidden for 3 minutes closes its
+stream, and resyncs when it comes back.
+
+While someone is watching, the worker runs **live mode**: a held connection pool, a claim pass
+every 5 seconds, every target on its normal interval. While nobody is, it runs **idle mode**: no
+database connections at all, and a batch on every 15-minute multiple of the Unix epoch, so both
+regions wake together no matter when each one started. A batch's first pass picks up anything
+due within the next 60 seconds; further passes run only to retry a target on its first or
+second consecutive failure, capped at 90 seconds; then the pool closes. The backend's `LISTEN`
+connection follows the same rhythm: open from 10 seconds before a batch to 60 seconds after it,
+or while someone is watching, and closed otherwise. Whenever it opens, it replays any check it
+hasn't handled yet from a check-id watermark, through the same handler a live notification
+uses, so an alert is never lost to a closed connection or a restart. Ordinary requests open one
+database connection each and close it when the request ends, and the live-update stream holds
+no database connection at all once it's established.
+
+I considered three alternatives. Continuous scheduling with an always-open listener keeps the
+database awake permanently, so it can't fit the budget. A paid always-on plan would fit, but
+pays to keep an idle database awake for a personal project. Batch-only scheduling with no live
+mode is cheaper and simpler still, but a new target would sit unchecked for up to 15 minutes and
+the dashboard would barely move while someone watched it. The cost of the chosen design is
+detection delay while nobody is watching: an outage can take up to 15 minutes to be noticed and
+alerted on. In production it uses about 2.2 compute-unit-hours a day. See
+`docs/adr/004-viewer-aware-scheduling.md` for the full reasoning.
 
 ### Row-claiming for coordination, not a message queue
 
@@ -140,7 +176,9 @@ estimated:
 |---|---|
 | Backoff curve (failures → next retry) | 30s → 60s → 120s → 240s → 480s → capped at 900s, each ±20% jitter |
 | Claim staleness TTL (crashed-worker self-heal) | 120s |
-| Scheduler poll interval | 5s |
+| Live-mode claim pass interval | 5s |
+| Idle-mode batch interval | 900s, aligned to the clock so both regions wake together; first pass includes targets due within 60s, in-batch retries capped at 90s |
+| Database compute in production | about 2.2 compute-unit-hours a day, measured over roughly 19 hours |
 | Concurrent checks per worker process | 15 |
 | Default per-target check interval | 300s (configurable per target, 30s floor) |
 | Downtime alert cooldown | 900s |
@@ -149,7 +187,7 @@ estimated:
 | Minimum observed gap between two checks of the same `(target, region)` under forced same-region contention | ~3.85 seconds, consistent with two independent due-cycles and never the sub-second gap an actual double-claim would produce |
 | Schema migrations | 14, applied cleanly against both local Postgres and the production Neon instance |
 | REST/SSE endpoints | ~34, across auth, targets (including request customization, pause/resume, tags, analytics, export), webhooks, and API keys |
-| Automated test suite | 362 tests (303 backend, 59 worker), all passing against a real Postgres database, no mocked database layer |
+| Automated test suite | 449 tests (348 backend, 101 worker), all passing against a real Postgres database, no mocked database layer |
 | Regions actually running in production | 2, on independently deployed Railway services, coordinating through nothing but the shared database |
 
 ## What This Project Deliberately Is Not
@@ -165,8 +203,10 @@ rate-limit store among them, are called out explicitly in code as needing a diff
 before that would be true. Alert delivery doesn't retry per channel: if email succeeds but a
 webhook fails for the same event, that webhook isn't individually retried on the next check.
 Tracking "was this transition alerted at all" was the right amount of complexity for this
-project's actual use, not "did every channel confirm delivery." The load characteristics here
+project's actual use, not "did every channel confirm delivery." Monitoring while nobody is
+signed in is deliberately coarse: everything is checked once every 15 minutes, so an outage can
+take up to 15 minutes to be noticed. The load characteristics here
 are honest, not benchmarked against real production traffic. The request-flow design
-(claim-then-release-the-lock-before-the-network-call, bounded concurrency, retention pruning as
-its own background task) is built the way I'd want it built at a larger scale, but it hasn't
+(claim-then-release-the-lock-before-the-network-call, bounded concurrency, connections opened
+only for as long as they're needed) is built the way I'd want it built at a larger scale, but it hasn't
 been proven at one.

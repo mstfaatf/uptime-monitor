@@ -114,7 +114,7 @@ export default function FeaturesPage() {
             },
             {
               title: "A real automated test suite",
-              body: "362 tests across the backend and worker, run against a real Postgres database rather than a mocked one, covering the ownership rules above directly.",
+              body: "449 tests across the backend and worker, run against a real Postgres database rather than a mocked one, covering the ownership rules above directly.",
             },
           ]}
         />
@@ -153,7 +153,11 @@ export default function FeaturesPage() {
           items={[
             {
               title: "A fully async worker",
-              body: "Rewritten from a synchronous, sequential loop onto httpx.AsyncClient and asyncpg: a batch of due targets is checked concurrently, bounded by a semaphore, instead of one at a time.",
+              body: "Built on httpx.AsyncClient and asyncpg: a batch of due targets is checked concurrently, bounded by a semaphore, instead of one at a time.",
+            },
+            {
+              title: "Checks that follow whether you're watching",
+              body: "While you're signed in and using the site, every target is checked on its own interval, 5 minutes by default, with results arriving live. The rest of the time, both regions check everything in one clock-aligned batch every 15 minutes and the database sleeps in between, which keeps the whole system inside a serverless Postgres free tier.",
             },
             {
               title: "Per-target backoff with jitter",
@@ -168,8 +172,8 @@ export default function FeaturesPage() {
               body: "Expiry date and issuer, read straight off the same TLS handshake for every HTTPS target, with days-remaining computed at read time so it's never stale.",
             },
             {
-              title: "Real-time push, not polling",
-              body: "A check landing triggers a Postgres NOTIFY the instant it commits; the backend forwards it to that user's connected browser over Server-Sent Events. The dashboard has no polling loop anywhere.",
+              title: "Live push to the dashboard",
+              body: "A check landing triggers a Postgres NOTIFY as it commits, and the backend forwards it to that user's connected browser over Server-Sent Events. The listening connection opens only while results can arrive, and replays anything it hasn't handled yet each time it opens, so an alert is never skipped. The dashboard has no polling loop anywhere.",
             },
           ]}
         />
@@ -177,8 +181,8 @@ export default function FeaturesPage() {
         <FeatureGroup
           glyph={<AntennaGlyph />}
           heading="Multi-region coordination"
-          intro="Two independent worker regions check every target on their own schedule against
-            one shared database, without a message queue or a shared lock service between them."
+          intro="Two independent worker regions check every target against one shared database,
+            without a message queue or a shared lock service between them."
           screenshotSrc="/screenshots/dashboard.png"
           screenshotAlt="Dashboard showing multiple targets, each with independent per-region status, latency, and tags"
           items={[
@@ -231,7 +235,7 @@ export default function FeaturesPage() {
             },
             {
               title: "Bounded history",
-              body: "Raw check rows older than the retention window are pruned automatically, by a background task that never competes with the scheduling it runs alongside.",
+              body: "Raw check rows older than the retention window are pruned automatically, once a day, as part of a regular scheduling pass.",
             },
           ]}
         />

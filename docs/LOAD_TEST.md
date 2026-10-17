@@ -1,36 +1,28 @@
 # Load Test
 
 Real results from running load against the actual deployed backend on Railway, not the local
-Docker Compose stack. Run on 2026-09-18, against
-`https://uptime-monitor-production-cff9.up.railway.app`, a single Railway service instance,
-talking to a single Neon Postgres instance, exactly the infrastructure this project is
-genuinely deployed on. Nothing here is scaled up or specially provisioned for the test.
+Docker Compose stack: `https://uptime-monitor-production-cff9.up.railway.app`, a single Railway
+service instance talking to a single Neon Postgres instance, exactly the infrastructure this
+project is deployed on. Nothing here is scaled up or specially provisioned for the test. The
+read and write path tests ran on 2026-09-18; the SSE concurrency test ran on 2026-10-17.
 
 ## Tool and methodology
 
-[k6](https://k6.io) (`grafana/k6`, run via Docker rather than installing a binary, since this
-machine already treats Docker as the default way to run project tooling) handled the two
-HTTP-based tests. k6's own SSE support (`k6/experimental/sse` and `k6/x/sse`, tried in that
-order) isn't provisionable in the `grafana/k6:latest` image at the version available for this
-run (`k6 v2.2.0`). Its extension-resolution step reports both as an unrecognized dependency
-rather than building them, and this environment has no reason to stand up a custom k6 build
-pipeline just for one test. The SSE concurrency test was written instead as a small Node script
-using the built-in `https` module directly, parsing the `text/event-stream` body by hand. This
-is a legitimate, common way to drive an SSE endpoint under load when a purpose-built tool isn't
-available, and honestly simpler for this one narrow test than it would have been to get k6's
-SSE module working.
+[k6](https://k6.io) drove all three tests, run through Docker rather than installed on the host.
+The two HTTP tests use the stock `grafana/k6` image. The SSE test uses a k6 binary built with
+[xk6](https://github.com/grafana/xk6) and the [`xk6-sse`](https://github.com/phymbert/xk6-sse)
+extension, since SSE support isn't part of the stock image. Each SSE virtual user opens one
+`text/event-stream` connection, holds it for a fixed window using the client's own timeout, and
+records whether the `: connected` comment arrived, how long that took, and every event received.
 
-A throwaway account was registered against the live API for all three tests (`POST
-/auth/register`), never the account's own real login. All targets created during testing, and
-the account itself, were deleted afterward via `DELETE /auth/me` (which cascades to every
-target and check it owns), confirmed by a subsequent login attempt with the same credentials
-correctly returning `401`. One test-tooling anomaly worth noting plainly: the very first login
-attempt immediately after the `204` from `DELETE /auth/me` returned a stale `200` with the
-already-deleted user's data, before a retry two seconds later correctly returned `401`. This
-reads as a read-after-write consistency lag on Neon's pooled connection (a stale read landing
-on a different pooled backend than the one that just committed the delete), the same category
-of pooling quirk this project has hit and documented before, not a real account-deletion bug.
-It isn't something this test is about, so it wasn't chased further.
+A throwaway account was registered against the live API for each test (`POST /auth/register`),
+never a real account. All targets created during testing, and the account itself, were deleted
+afterward via `DELETE /auth/me` (which cascades to every target and check it owns), confirmed by
+a later login attempt with the same credentials returning `401`. After the 2026-09-18 run, the
+very first login attempt right after the `204` from `DELETE /auth/me` returned a stale `200`,
+and a retry two seconds later correctly returned `401`. That reads as a brief read-after-write
+lag across Neon's pooled endpoint, since the account was gone on the retry; the 2026-10-17 cleanup
+returned `401` on the first attempt.
 
 ## Test 1: Read path (`GET /targets/status`)
 
@@ -59,7 +51,7 @@ in this profile of the single Railway instance being close to its own limit at t
 
 ## Test 2: Write path (`POST /targets`), under its rate limit
 
-`POST /targets` carries a `10/minute` IP-keyed limit, the project's original abuse protection
+`POST /targets` carries a `10/minute` IP-keyed limit, the abuse protection
 against mass target creation. This test intentionally exceeds it to see the real cutoff, not
 just trust the number in the code.
 
@@ -86,60 +78,63 @@ well below the successful-only average.
 
 ## Test 3: SSE concurrency (`GET /targets/stream`)
 
-Repeated attempts at increasing levels of concurrency, each opening N connections at once from
-one client, holding them open for 35 seconds, then closing them.
+Stepped concurrency levels, each run opening N connections at once from one client, all as the
+same authenticated user, holding every connection open for 35 seconds, then closing them. The
+account had one real target set to a 30 second check interval, and with a signed-in user
+streaming, both worker regions were in live mode. So every run had real checks landing during
+the window, and each stream's received events show whether pushes actually reached every open
+connection.
 
 **Results:**
 
-| Concurrent connection attempts | Connections that opened (`200`) | Connections rejected (`500`) |
-|---|---|---|
-| 5 | 5 | 0 |
-| 10 | 10 | 0 |
-| 15 | 15 | 0 |
-| 16 | 15 | 1 |
-| 17 | 15 | 2 |
-| 20 | 15 | 5 |
-| 25 | 15 | 10 |
+| Concurrent connections | Opened (`200` + `: connected`) | Failed | Time to `: connected`, median | p95 | max | Streams that received at least one real `check_update` |
+|---|---|---|---|---|---|---|
+| 5 | 5 | 0 | 985ms | 1.01s | 1.01s | 5 of 5 |
+| 10 | 10 | 0 | 920ms | 947ms | 947ms | 10 of 10 |
+| 15 | 15 | 0 | 1.13s | 1.17s | 1.17s | 15 of 15 |
+| 16 | 16 | 0 | 942ms | 1.00s | 1.00s | 16 of 16 |
+| 17 | 17 | 0 | 1.07s | 1.13s | 1.14s | 17 of 17 |
+| 20 | 20 | 0 | 985ms | 1.01s | 1.01s | 20 of 20 |
+| 25 | 25 | 0 | 985ms | 1.08s | 1.09s | 25 of 25 |
+| 50 | 50 | 0 | 1.11s | 1.39s | 1.42s | 50 of 50 |
+| 100 | 100 | 0 | 2.02s | 2.54s | 2.62s | 100 of 100 |
+| 200 | 200 | 0 | 2.51s | 3.66s | 3.81s | 200 of 200 |
+| 400 | 400 | 0 | 4.60s | 7.36s | 7.60s | 400 of 400 |
+| 600 | 600 | 0 | 6.14s | 10.36s | 10.71s | 600 of 600 |
+| 800 (first run) | 786 | 14 (`500` after about 11.7s) | 8.21s | 12.49s | 12.60s | 786 of 786 |
+| 800 (repeat) | 799 | 1 (no response) | 7.56s | 13.15s | 13.65s | 799 of 799 |
 
-**This is a real, reproducible breaking point, not a one-off blip.** It was confirmed across
-six separate runs at six different concurrency levels: **exactly 15 concurrent SSE connections
-succeed from a single client; every connection past the 15th fails immediately with a genuine
-HTTP 500**, not a timeout or a slow degradation. The failure count past 15 scales exactly
-linearly with how far over 15 the attempt goes (1 over → 1 failure, 10 over → 10 failures),
-which is the signature of a hard concurrency ceiling somewhere in the stack, not a resource
-that degrades gracefully under load. This wasn't chased down to its exact root cause. It's most
-likely a connection or worker-count limit somewhere between Railway's edge and the ASGI
-server's own default configuration, rather than anything in this project's own `realtime.py`
-pub/sub logic, which has no such cap written into it. I'm flagging it here as a real, honest
-finding rather than investigating it to completion, since root-causing it thoroughly was
-outside this test's scope.
+Every connection that opened received at least one real `check_update` push inside its 35
+second window, at every level, including 799 simultaneous streams. Through 600 simultaneous
+opens nothing failed. Where a window caught checks from both regions, a stream received two
+pushes, one per region, each carrying the target's complete per-region status.
 
-For the connections that did open successfully:
+**Where it tops out.** The limit shows up first as slower opens, and failures come later. Up to about 50
+simultaneous opens, a stream is connected in about a second. Past that, open time grows roughly
+in proportion to how many streams open at once: a median of 2s at 100, 4.6s at 400, and 7.5 to
+8s at 800, with the slowest connections taking over 13 seconds. At 800 the first failures
+appear, and they aren't consistent from run to run: 14 connections came back `500` after about
+11.7 seconds in the first run, one connection got no response at all in the repeat. Opening a
+stream does one database lookup to resolve the session cookie to a user, on its own short-lived
+connection, so 800 simultaneous opens means 800 near-simultaneous database connections from a
+single API process. That's the most likely place the queueing builds up, though this test
+doesn't separate it from the Railway edge or the single uvicorn process accepting the
+connections. Once a stream is open it holds no database connection, which is why holding 800
+open streams and pushing to all of them stayed healthy once they were connected. The backend's
+`/health` endpoint answered in about 0.2 seconds immediately after the largest runs.
 
-| Metric | Value |
-|---|---|
-| Time to first byte (the `: connected` comment), average | ~660–800ms across runs |
-| Time to first byte, p95 | ~900ms–1.05s |
-| Keep-alive comments received (15 connections, 35s window) | 45 (as expected, roughly one per connection per 15s interval) |
-
-A real check was forced mid-test (`POST /targets/{id}/resume`, which forces an immediate
-recheck) to try to observe a genuine `check_update` push landing during the test window, not
-just keep-alives. No real push event was captured in any run within the 35-second window. A
-plausible, unproven explanation is that the forced recheck's own round-trip through the
-worker's next scheduling tick, the check itself, and the NOTIFY didn't consistently land before
-the window closed. The push mechanism itself has been directly verified working, including
-under real concurrent load, in earlier verification passes, so I don't read this as evidence
-that it's broken. It's stated honestly as a gap in this specific test's observation, not
-glossed over as "it must have worked."
+For scale: this is a personal monitoring tool where one dashboard tab is one stream. Hundreds of
+simultaneous opens from a single account is far outside its real use, so the numbers above are
+a ceiling measurement.
 
 ## What this does and doesn't show
 
-This confirms the read and write paths hold up cleanly at moderate concurrency (tens of
-requests per second, well within what a single free-tier Railway instance and a personal
-project's real traffic would ever see), that the write-path rate limit enforces exactly what
-it's documented to enforce, and that real-time SSE has a genuine, previously-unmeasured
-concurrency ceiling around 15 simultaneous connections per client on this deployment. It does
-not test sustained load over minutes or hours, doesn't exercise multiple concurrent user
-accounts at once (every test ran as a single authenticated user), and doesn't push either HTTP
-path anywhere near hard enough to find its own breaking point the way the SSE test found one.
-Those would be reasonable next steps, not claimed as already done here.
+The read and write paths hold up cleanly at moderate concurrency (tens of requests per second,
+well within what a single Railway instance and a personal project's real traffic would ever
+see), and the write-path rate limit enforces exactly what it's documented to. The SSE endpoint
+opens hundreds of concurrent streams from one client with every stream receiving live pushes,
+starts to slow down noticeably past about 50 simultaneous opens, and starts to drop a small
+number of connections at around 800. The tests don't cover sustained load over minutes or
+hours, don't exercise many different user accounts at once (every test ran as a single
+authenticated user), and don't push either HTTP path hard enough to find its own breaking
+point. Those would be reasonable next steps.

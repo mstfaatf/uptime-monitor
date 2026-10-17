@@ -426,7 +426,9 @@ doesn't fit the per-request auth model cleanly.
 
 **Notes:** never delivers another user's data. The notification is resolved to its owning user
 before anything is published, so a user's queue structurally cannot receive a target it doesn't
-own.
+own. An open stream counts as someone watching the site, which keeps the workers in live mode
+(see [ADR 004](adr/004-viewer-aware-scheduling.md)). Once open, the stream holds no database
+connection.
 
 ---
 

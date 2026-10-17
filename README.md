@@ -24,13 +24,15 @@ built, by area), **/architecture** (the same system diagram, browsable), and **/
 There's no shared or demo login. Registering your own account is free and takes a few seconds,
 and every account only ever sees its own targets.
 
-A note on cold starts, since it's a fair question for anything on free or hobby-tier hosting: a
-real request to the live backend right now returned in under half a second, including one that
-actually queries the database, so there's nothing to warn about in normal use. The one place a
-delay could show up is Neon's own free-tier compute, which autosuspends after a period of no
-activity and takes a moment to resume on the next query. That's a real, documented characteristic
-of the hosting tier, not something measured directly in this session, since the database had
-already been active from testing this exact deployment beforehand.
+A note on cold starts, since it's a fair question for anything on free or hobby-tier hosting:
+the database is serverless Postgres that sleeps whenever nobody is using the site, so the first
+request after a quiet stretch wakes it and can take a moment longer than usual. After that,
+requests are fast. Signing in also switches the checkers into live mode, so within about 15
+seconds every target is checked on its normal interval and results reach the dashboard as they
+land. While nobody is signed in, both regions check everything in one batch every 15 minutes
+and let the database sleep in between, which keeps the whole system inside a free-tier compute
+budget (about 2.2 compute-unit-hours a day, measured in production). The design is written up
+in [docs/adr/004-viewer-aware-scheduling.md](docs/adr/004-viewer-aware-scheduling.md).
 
 ## Feature Walkthrough
 
@@ -75,8 +77,8 @@ matter its own scope.
 - **Frontend:** Next.js 14 (App Router), TypeScript, Tailwind CSS, Recharts
 - **Backend:** FastAPI, async SQLAlchemy, Alembic migrations, slowapi rate limiting, Server-Sent
   Events for live push
-- **Worker:** Python, asyncio, httpx, asyncpg, running continuously on its own schedule per
-  region
+- **Worker:** Python, asyncio, httpx, asyncpg, one service per region, switching between a live
+  mode while someone uses the site and 15-minute clock-aligned batches otherwise
 - **Database:** PostgreSQL (Neon in production, Docker Compose Postgres locally, the same
   schema and migrations against both)
 - **Email:** Resend, for downtime/cert-expiry alerts and password reset
@@ -108,6 +110,11 @@ Stated plainly, the same way they're stated on the live site's own Engineering p
   delivery.
 - There's no rotation story for a webhook's signing secret or an API key. Getting a new one
   means deleting and recreating it.
-- A real load test against the live deployed backend found a genuine concurrency ceiling on
-  Server-Sent Events connections, around 15 simultaneous connections per client. Full
+- While nobody is signed in, targets are checked once every 15 minutes, so an outage can take
+  up to 15 minutes to be detected and alerted on. A target's own shorter interval only applies
+  while someone is using the site.
+- The record of recent activity and the live-update listener state live in one API process's
+  memory, so the API runs as a single instance.
+- Server-Sent Events streams open in about a second up to roughly 50 simultaneous opens, then
+  slow down as more open at once; the first dropped connections appear at around 800. Full
   methodology and results are in **[docs/LOAD_TEST.md](docs/LOAD_TEST.md)**.

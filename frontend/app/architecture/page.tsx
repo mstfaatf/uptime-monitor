@@ -77,10 +77,24 @@ function FlowStep({ step, isLast }: { step: Step; isLast: boolean }) {
   );
 }
 
+interface TimelineRow {
+  at: string;
+  what: string;
+}
+
+const BURST_TIMELINE: TimelineRow[] = [
+  { at: "-10s", what: "The backend opens its LISTEN connection and replays any check it hasn't handled yet." },
+  { at: "0s", what: "Both regions open a fresh pool, claim everything due (or due within the next 60s), check it, and write the results." },
+  { at: "~+1s", what: "The last check commits. Each one has already been pushed to any open dashboard and evaluated for alerts." },
+  { at: "+60s", what: "The backend closes LISTEN, unless a batch is still retrying a fresh failure." },
+  { at: "up to +90s", what: "Extra passes run only to retry a target on its first or second consecutive failure, then the pools close. LISTEN stays open until 30s after the cap." },
+  { at: "+5 min", what: "With no connections left, the database suspends until the next batch or the next visitor." },
+];
+
 const CHECK_FLOW: Step[] = [
   {
     title: "A schedule row comes due",
-    body: "Every 5 seconds, a worker region claims its own due, unclaimed targets in one short transaction, then releases the lock immediately, before making any network request.",
+    body: "In live mode a worker region looks for due targets every 5 seconds; in idle mode it looks at each 15-minute batch. Either way it claims its own due, unclaimed targets in one short transaction, then releases the lock immediately, before making any network request.",
   },
   {
     title: "The URL is validated",
@@ -116,7 +130,7 @@ const CHECK_FLOW: Step[] = [
   },
   {
     title: "Pushed to the browser",
-    body: "The backend's listener resolves the notified target to its owner, evaluates downtime/cert-expiry alerts, and pushes the full result to that user's open dashboard, with no reload and no polling.",
+    body: "The backend's listener resolves the notified target to its owner, evaluates downtime/cert-expiry alerts, and pushes the full result to that user's open dashboard, with no reload and no polling. A check that landed while the listener was closed is replayed the next time it opens, so its alerts still go out.",
     tone: "up",
   },
 ];
@@ -128,9 +142,11 @@ export default function ArchitecturePage() {
       <main className="mx-auto max-w-5xl px-6 py-16">
         <h1 className="text-3xl font-semibold leading-tight">How it fits together</h1>
         <p className="mt-4 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-          Two worker regions, one shared database, a backend that pushes results the instant
-          they land, and a frontend that never talks to Postgres directly. This is the map of
-          how those pieces actually connect, and what happens end to end when a single check
+          Two worker regions, one shared database, a backend that pushes results to the
+          dashboard as they land, and a frontend that never talks to Postgres directly. The
+          whole system runs inside a serverless Postgres free tier by letting the database sleep
+          whenever nobody is using the site. This is the map of how those pieces connect, how
+          the checkers decide how often to run, and what happens end to end when a single check
           runs.
         </p>
 
@@ -155,6 +171,10 @@ export default function ArchitecturePage() {
                 illustration={<CellTowerIllustration size={64} />}
               />
             </div>
+            <p className="mt-3 max-w-md text-center font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
+              Each worker asks the backend whether anyone is watching, and picks live or idle
+              mode from the answer
+            </p>
             <FlowArrow label="INSERT checks, UPDATE schedule, NOTIFY: same transaction" />
             <DiagramBox
               title="Postgres (Neon)"
@@ -170,24 +190,90 @@ export default function ArchitecturePage() {
               </p>
               <div className="mt-3 rounded border px-3 py-2" style={{ borderColor: "var(--border)" }}>
                 <p className="text-center font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
-                  realtime.py: one long-lived LISTEN connection, resolves target to owner,
-                  publishes to that user's queue only
+                  realtime.py: LISTEN held around each batch and while someone is watching,
+                  catches up on every open, resolves target to owner, publishes to that user's
+                  queue only
                 </p>
               </div>
             </div>
             <FlowArrow label="SSE: check_update events" />
             <DiagramBox title="frontend (Vercel)" caption="Next.js dashboard" className="w-full max-w-sm" />
             <p className="mt-3 font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
-              ↑ REST, cookie or API-key auth, back to the backend's pooled connection
+              ↑ REST, cookie or API-key auth, one short database connection per request
             </p>
           </div>
 
           <p className="mx-auto mt-6 max-w-2xl text-sm" style={{ color: "var(--text-secondary)" }}>
-            Two separate database connections matter here. Ordinary app traffic goes through
-            Neon's pooled connection, but the backend's single LISTEN session needs Neon's
-            direct connection instead: a pooled connection's underlying backend can be swapped
-            between queries, so a NOTIFY sent while a different backend is attached is silently
-            never delivered.
+            Two kinds of database connection matter here. Each ordinary request opens one
+            connection through Neon's pooled endpoint and closes it when the request ends. The
+            LISTEN session uses Neon's direct endpoint instead: a pooled connection's underlying
+            backend can be swapped between queries, so a NOTIFY sent while a different backend
+            is attached would never be delivered.
+          </p>
+        </section>
+
+        <section className="mt-16">
+          <SectionHeading>Live mode and idle mode</SectionHeading>
+          <p className="mt-3 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
+            The database only accrues compute while it's awake, and it suspends after five idle
+            minutes. So the checkers run in one of two modes, chosen by whether anyone is using
+            the site. The backend counts the site as watched while a live dashboard is open, or
+            for 5 minutes after any signed-in request. Requests made with an API key don't count.
+          </p>
+          <div className="mt-6 grid gap-4 sm:grid-cols-2">
+            <div className="rounded border p-5" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
+              <div className="flex items-center gap-3">
+                <SignalLight state="up" size="sm" />
+                <p className="font-medium" style={{ color: "var(--signal-up)" }}>
+                  Live mode
+                </p>
+              </div>
+              <p className="mt-3 text-sm" style={{ color: "var(--text-secondary)" }}>
+                Someone is watching. Each worker holds a connection pool and looks for due
+                targets every 5 seconds, so every target is checked on its own interval (5
+                minutes by default) and each result reaches the dashboard as it lands. Workers
+                switch in within about 15 seconds of someone signing in, and switch back out
+                five to six minutes after the last activity.
+              </p>
+            </div>
+            <div className="rounded border p-5" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
+              <div className="flex items-center gap-3">
+                <SignalLight state="pending" size="sm" />
+                <p className="font-medium">Idle mode</p>
+              </div>
+              <p className="mt-3 text-sm" style={{ color: "var(--text-secondary)" }}>
+                Nobody is watching. Workers hold no database connections at all. Both regions
+                wake on the same clock-aligned boundary every 15 minutes, check everything in
+                one batch, and close their connections again, so the database sleeps in between.
+                An outage can take up to 15 minutes to be noticed in this mode.
+              </p>
+            </div>
+          </div>
+
+          <h3 className="mt-10 text-lg font-medium">One idle batch, from the database's point of view</h3>
+          <div className="mt-4 overflow-x-auto rounded border" style={{ borderColor: "var(--border)" }}>
+            <table className="w-full min-w-[420px] text-sm">
+              <tbody>
+                {BURST_TIMELINE.map((row) => (
+                  <tr key={row.at} className="border-b last:border-b-0" style={{ borderColor: "var(--border)" }}>
+                    <td className="whitespace-nowrap px-3 py-2 align-top font-mono text-xs" style={{ color: "var(--signal-up)" }}>
+                      {row.at}
+                    </td>
+                    <td className="px-3 py-2" style={{ color: "var(--text-secondary)" }}>
+                      {row.what}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-4 max-w-2xl text-sm" style={{ color: "var(--text-secondary)" }}>
+            The LISTEN connection follows the same rhythm. It opens shortly before each batch
+            and whenever someone starts watching, and every time it opens it replays any check
+            above the last one it handled, through the same handler a live notification uses.
+            Nothing is lost while it's closed, including across a restart. Measured in
+            production, the whole system uses about 2.2 compute-unit-hours of database time a
+            day.
           </p>
         </section>
 
@@ -214,8 +300,9 @@ export default function ArchitecturePage() {
             <div className="rounded border p-5" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
               <p className="font-medium">Neon</p>
               <p className="mt-2 text-sm" style={{ color: "var(--text-secondary)" }}>
-                Managed Postgres. A pooled connection for ordinary traffic, a direct connection
-                for the backend's real-time listener and for schema migrations.
+                Serverless Postgres that sleeps after five idle minutes. A pooled endpoint for
+                ordinary traffic, a direct one for the backend's listener and for schema
+                migrations.
               </p>
             </div>
           </div>

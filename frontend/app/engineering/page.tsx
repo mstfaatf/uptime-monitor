@@ -94,7 +94,9 @@ const LIMITATIONS: string[] = [
   "An alert that succeeds on one channel and fails on another isn't retried per channel. The system tracks whether a transition was alerted at all, not whether every channel confirmed delivery.",
   "There's no rotation story for a webhook's signing secret or an API key. Getting a new one means deleting and recreating it.",
   "One dependency lockfile is intentionally held a major version behind its latest release, since the fixes past that point are breaking changes not yet worth taking on for this project's stable UI.",
-  "The request-flow design (claim-then-release-before-the-network-call, bounded concurrency, background retention pruning) is built the way it should be at a larger scale, but it has never actually been load-tested at one.",
+  "While nobody is signed in, every target is checked once every 15 minutes, so an outage can take up to 15 minutes to be detected and alerted on. A target's own shorter interval only applies while someone is using the site.",
+  "The record of recent activity and the live-update listener state live in one API process's memory, so the API runs as a single instance.",
+  "The request-flow design (claim-then-release-before-the-network-call, bounded concurrency, connections held only while needed) is built the way it should be at a larger scale, but it has never actually been load-tested at one.",
 ];
 
 export default function EngineeringPage() {
@@ -109,11 +111,12 @@ export default function EngineeringPage() {
           list of what this project deliberately doesn't try to do.
         </p>
 
-        <div className="mt-10 grid grid-cols-2 gap-3 sm:grid-cols-5">
+        <div className="mt-10 grid grid-cols-2 gap-3 sm:grid-cols-3">
           <StatCallout value="30s → 900s" label="backoff range, ±20% jitter" />
           <StatCallout value="120s" label="stale-claim window before a crashed worker's target is reclaimed" />
           <StatCallout value="~3.85s" label="smallest gap seen between two checks of the same target and region, under forced contention" />
-          <StatCallout value="362" label="automated tests, against a real database" />
+          <StatCallout value="~2.2" label="compute-unit-hours of database time a day, measured in production" />
+          <StatCallout value="449" label="automated tests, against a real database" />
           <StatCallout value="8" label="real bugs found and fixed along the way, below" tone="down" />
         </div>
 
@@ -164,10 +167,51 @@ export default function EngineeringPage() {
                   limit, instead of one at a time. A failing target backs off on an exponential
                   curve with random jitter mixed in, so several targets that start failing
                   together don't all retry in lockstep forever. A single success resets the
-                  streak immediately. The scheduler itself polls far more often than any single
-                  target's own interval, specifically so a fast early-stage backoff step doesn't
-                  get flattened back down to "retry every five minutes regardless."
+                  streak immediately. While someone is using the site, the worker looks for due
+                  work every 5 seconds, far more often than any single target's own interval, so
+                  a 30 second backoff step really does retry after about 30 seconds.
                 </p>
+              ),
+            }}
+          />
+
+          <DecisionBlock
+            decision={{
+              glyph: <SignalBarsGlyph />,
+              title: "Scheduling that follows whether anyone is watching",
+              body: (
+                <>
+                  <p>
+                    The database is serverless Postgres on a free tier, which accrues compute for
+                    as long as it's awake and suspends after five idle minutes. Checking every few
+                    seconds around the clock would keep it awake around the clock, far past the
+                    free allowance. So the checkers run in two modes. While someone is signed in
+                    and using the site, each target is checked on its normal interval and every
+                    result reaches the dashboard as it lands. The rest of the time, both regions
+                    hold no database connections and wake together on a clock-aligned boundary
+                    every 15 minutes to check everything in one batch, so the database sleeps in
+                    between.
+                  </p>
+                  <p>
+                    Workers learn which mode to be in by asking the backend, which answers from
+                    memory: a live dashboard is open, or a signed-in request arrived in the last 5
+                    minutes. API-key traffic doesn't count, and any failure to get an answer
+                    counts as nobody watching, so every failure falls back to the cheap mode. The
+                    backend's listening connection opens around each batch and while someone is
+                    watching, and replays anything it hasn't handled each time it opens, so no
+                    alert is skipped. Ordinary requests open one database connection and close it
+                    when they finish.
+                  </p>
+                  <p>
+                    The alternatives were continuous scheduling with an always-open listener
+                    (never lets the database sleep), a paid always-on plan (pays to keep an idle
+                    database awake), and batch-only scheduling (a new target would wait up to 15
+                    minutes for its first check, and the dashboard would barely move while
+                    someone watched it). The cost of this design is up to 15 minutes of detection
+                    delay while nobody is signed in. Measured in production, it uses about 2.2
+                    compute-unit-hours of database time a day.
+                  </p>
+                </>
               ),
             }}
           />

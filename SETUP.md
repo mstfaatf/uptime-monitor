@@ -70,9 +70,11 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000). Register an account. There's no shared or
-demo login; every visitor gets their own private set of targets. Add a target and within a
-couple of scheduler ticks (every 5 seconds, per region) you should see a real check land for it
-from both `local` and `eu-west`.
+demo login; every visitor gets their own private set of targets. Being signed in puts both
+workers in live mode within about 15 seconds, so a target you add gets a real check from both
+`local` and `eu-west` within seconds after that. While nobody is signed in, the workers check
+everything in one batch on each 15-minute boundary instead and hold no database connections in
+between.
 
 `NEXT_PUBLIC_API_URL` defaults to `http://localhost:8000` and doesn't need to be set for this
 setup. Override it in `frontend/.env.local` only if the API is reachable somewhere else (e.g.
@@ -140,7 +142,7 @@ both worker services in Docker Compose) is the one place these are actually set 
 | `HTTP_VERIFY_SSL` | `true` | Set `false` only for local testing against a self-signed cert. |
 | `REGION` | `local` | Identity tagged onto every check row and log line. Set a distinct value per worker instance once more than one runs. Docker Compose already sets `worker-eu-west` to `eu-west`. |
 | `CHECKS_RETENTION_DAYS` | `90` | How many days of check history the worker actually keeps before pruning. Pruning runs once per UTC day, in the first claim pass after midnight. |
-| `BACKEND_URL` | unset | Base URL of the API, polled at `/internal/watching` to decide between live mode (someone is watching: checks run continuously) and idle mode (bursts only). Docker Compose sets it to `http://api:8000`. Unset means idle mode. |
+| `BACKEND_URL` | unset | Base URL of the API, polled at `/internal/watching` to decide between live mode (someone is watching: a claim pass every 5 seconds, each target on its normal interval) and idle mode (a batch on each `BURST_INTERVAL_SECONDS` boundary, no connections in between). Docker Compose sets it to `http://api:8000`. Unset means idle mode. |
 | `INTERNAL_API_SECRET` | unset | Same value as the API's `INTERNAL_API_SECRET`, sent in the `X-Internal-Secret` header. Unset means idle mode. |
 | `BURST_INTERVAL_SECONDS` | `900` | Idle-mode bursts start on multiples of this many seconds since the Unix epoch, so every region wakes together. Must be the same on every worker. |
 
@@ -178,14 +180,14 @@ Both suites need a reachable Postgres (the same one `docker compose up -d db` pr
 never touch your dev database. Each creates and migrates its own `<database>_test` database
 automatically.
 
-**Backend** (303 tests):
+**Backend** (348 tests):
 ```bash
 cd backend
 pip install -r requirements-dev.txt
 pytest
 ```
 
-**Worker** (59 tests, fully hermetic, with no database or network and all HTTP mocked):
+**Worker** (101 tests, fully hermetic, with no database or network and all HTTP mocked):
 ```bash
 cd worker
 pip install -r requirements-dev.txt

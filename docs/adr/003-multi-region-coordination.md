@@ -8,9 +8,8 @@ and the schema in `backend/alembic/versions/005_add_targets_claimed_at.py` and
 
 ## Context
 
-The worker originally ran as a single instance, checking every due target on a flat cadence
-with no coordination logic at all, since there was only ever one process touching the schedule
-and none was needed. Two things changed that:
+A single worker instance needs no coordination logic, since only one process ever touches the
+schedule. Two things break that assumption:
 
 1. **Horizontal scaling within a single vantage point.** Even one checking region might
    eventually run more than one worker process (for throughput or availability). Nothing
