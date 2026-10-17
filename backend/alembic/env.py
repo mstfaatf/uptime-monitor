@@ -8,6 +8,7 @@ from sqlalchemy import engine_from_config, pool
 from sqlalchemy.orm import sessionmaker
 
 from database import Base
+from logging_setup import configure_logging
 from models import (  # noqa: F401 — register with Base.metadata
     AlertHistory,
     Check,
@@ -20,6 +21,9 @@ from models import (  # noqa: F401 — register with Base.metadata
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+    # alembic.ini's console handler writes everything to stderr; route INFO to stdout and
+    # WARNING+ to stderr instead, the same as the running app (logging_setup.py).
+    configure_logging(log_format="%(levelname)-5.5s [%(name)s] %(message)s")
 
 # Sync URL for Alembic: app uses postgresql+asyncpg, migrations use postgresql (psycopg2).
 #

@@ -41,12 +41,14 @@ from backoff import compute_backoff_seconds
 from config import settings
 from checker import check_url
 from crypto import decrypt_secret
+from logging_setup import configure_logging
 from retention import prune_old_checks
 from scheduler import IN_BURST_RETRY_MAX_FAILURES, SCHEDULER_TICK_SECONDS, Scheduler
 from ssrf import is_url_blocked
 from watching import WatchingProbe
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# INFO to stdout, WARNING+ to stderr, httpx/httpcore request lines off. See logging_setup.py.
+configure_logging()
 logger = logging.getLogger(__name__)
 
 # Bounds how many checks run concurrently within one cycle. Picked from the middle of the

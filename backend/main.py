@@ -2,7 +2,6 @@
 
 import asyncio
 import contextlib
-import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -13,13 +12,13 @@ from slowapi.middleware import SlowAPIMiddleware
 
 import realtime
 from config import settings
+from logging_setup import configure_logging
 from rate_limit import limiter
 from routers import api_keys, auth, internal, tags, targets, webhooks
 
-# Uvicorn configures only its own loggers, so without this the app's INFO lines (LISTEN opening,
-# closing and catching up; alerts skipped or sent) never reach the container log. Uvicorn's
-# loggers don't propagate to the root logger, so nothing is printed twice.
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+# INFO to stdout and WARNING+ to stderr for the app's own loggers and uvicorn's, with the
+# workers' /internal/watching polls left out of the access log. See logging_setup.py.
+configure_logging()
 
 
 @asynccontextmanager
